@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import asyncio
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import uuid
@@ -955,9 +956,12 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             full_response = ""
+            _ws_t_start = time.time()
             try:
                 if persona == "legal":
-                    legal_result = run_legal_persona_ask(user_input)
+                    legal_result = await asyncio.get_event_loop().run_in_executor(
+                        None, run_legal_persona_ask, user_input
+                    )
                     state.source_metadata = legal_result["source_metadata"]
                     if state.source_metadata:
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
@@ -966,6 +970,7 @@ async def chat_stream(websocket: WebSocket):
                     state.prompt.append(user_input)
                     state.generated.append(legal_result["answer"])
                     _context.sessions[session_id] = state
+                    logging.info("/chat-stream [legal] %.2fs session=%s", time.time() - _ws_t_start, session_id)
                     continue
 
                 for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override):
