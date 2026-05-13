@@ -1,0 +1,117 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "search_legal",
+      "description": "Search for Philippine law content including Supreme Court cases, statutes (Republic Acts, Executive Orders), and SC E-Library documents. Call this when user asks about legal matters, laws, cases, jurisprudence, or Philippine legislation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query for legal content, e.g. 'murder case', 'Republic Act 10175', 'cybercrime law', 'estafa'"
+          },
+          "page": {
+            "type": "integer",
+            "description": "Page number for pagination (default: 1)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Number of results per page (default: 5)"
+          },
+          "content_types": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional filter by content type: case, statute, scelibrary"
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "summarize_legal_case",
+      "description": "Summarize a Philippine legal case by GR number, case title, or search query. Use when user asks to summarize, explain, or understand a specific case.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "case_identifier": {
+            "type": "string",
+            "description": "GR number, case title, or search query to find the case"
+          },
+          "summary_type": {
+            "type": "string",
+            "enum": ["brief", "detailed", "legal-analysis"],
+            "description": "Type of summary: brief (2-3 paragraphs), detailed (full breakdown), legal-analysis (includes ratio decidendi and obiter dicta)"
+          }
+        },
+        "required": ["case_identifier"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_legal_recommendation",
+      "description": "Get legal information and recommendations for a Philippine legal question. Use when user asks about laws, rights, penalties, or legal procedures.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "legal_issue": {
+            "type": "string",
+            "description": "The legal question or issue to research"
+          },
+          "user_context": {
+            "type": "string",
+            "description": "Optional context about the user's specific situation"
+          }
+        },
+        "required": ["legal_issue"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "generate_legal_document",
+      "description": "Generate a Philippine legal document. Supported types: affidavit_of_loss, demand_letter, power_of_attorney, authorization_letter, promissory_note, lease_contract.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "document_type": {
+            "type": "string",
+            "enum": ["affidavit_of_loss", "demand_letter", "power_of_attorney", "authorization_letter", "promissory_note", "lease_contract"],
+            "description": "Type of legal document to generate"
+          },
+          "affiant_name": { "type": "string", "description": "For affidavit_of_loss: full name of affiant" },
+          "item_lost": { "type": "string", "description": "For affidavit_of_loss: description of lost item" },
+          "date_lost": { "type": "string", "description": "For affidavit_of_loss: date when item was lost" },
+          "circumstances": { "type": "string", "description": "For affidavit_of_loss: how the item was lost" },
+          "sender_name": { "type": "string", "description": "For demand_letter: sender full name" },
+          "recipient_name": { "type": "string", "description": "For demand_letter: recipient full name" },
+          "amount": { "type": "string", "description": "For demand_letter/promissory_note: amount in PHP" },
+          "reason": { "type": "string", "description": "For demand_letter: reason for demand" },
+          "deadline_days": { "type": "integer", "description": "For demand_letter: days to comply" },
+          "principal_name": { "type": "string", "description": "For power_of_attorney: principal (grantor) name" },
+          "attorney_name": { "type": "string", "description": "For power_of_attorney: attorney-in-fact name" },
+          "powers_granted": { "type": "string", "description": "For power_of_attorney: powers being granted" },
+          "authorizer_name": { "type": "string", "description": "For authorization_letter: authorizer full name" },
+          "authorized_person": { "type": "string", "description": "For authorization_letter: authorized person's name" },
+          "purpose": { "type": "string", "description": "For authorization_letter: purpose of authorization" },
+          "borrower_name": { "type": "string", "description": "For promissory_note: borrower full name" },
+          "lender_name": { "type": "string", "description": "For promissory_note: lender full name" },
+          "principal_amount": { "type": "string", "description": "For promissory_note: loan amount" },
+          "due_date": { "type": "string", "description": "For promissory_note: payment due date" },
+          "lessor_name": { "type": "string", "description": "For lease_contract: landlord full name" },
+          "lessee_name": { "type": "string", "description": "For lease_contract: tenant full name" },
+          "property_address": { "type": "string", "description": "For lease_contract: property address" },
+          "monthly_rent": { "type": "string", "description": "For lease_contract: monthly rent amount" },
+          "lease_term": { "type": "string", "description": "For lease_contract: lease duration (e.g. '1 year')" }
+        },
+        "required": ["document_type"]
+      }
+    }
+  }
+]
