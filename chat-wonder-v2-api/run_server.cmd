@@ -1,2 +1,0 @@
-pip3 install -r requirements.txt -q
-uvicorn run:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 60
