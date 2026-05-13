@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+*.pyo
+*.pkl
+*.pkz
+.env
+.env.*
+sessions.pkl
+embeddings.pkz
+get-pip.py
