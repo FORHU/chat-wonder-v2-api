@@ -75,6 +75,27 @@
   {
     "type": "function",
     "function": {
+      "name": "analyze_document",
+      "description": "Download and analyze a legal document from S3. Call this when the user has uploaded a document and wants it analyzed. Returns a full structured Philippine legal analysis with 7 sections.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "s3_key": {
+            "type": "string",
+            "description": "The S3 key of the uploaded document (e.g. 'uploads/documents/uuid-filename.pdf')"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Optional display filename for the document"
+          }
+        },
+        "required": ["s3_key"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "generate_legal_document",
       "description": "Generate a Philippine legal document. Supported types: affidavit_of_loss, demand_letter, power_of_attorney, authorization_letter, promissory_note, lease_contract.",
       "parameters": {

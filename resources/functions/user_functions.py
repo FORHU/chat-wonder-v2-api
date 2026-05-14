@@ -1,7 +1,10 @@
 import os
+import io
 import json
 import time
 import hashlib
+import tempfile
+import logging
 
 # Simple in-memory cache with TTL
 _search_cache = {}
@@ -382,6 +385,171 @@ def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def analyze_document(s3_key: str, filename: str = None) -> dict:
+    """Download a document from S3 and return a structured Philippine legal analysis."""
+    import s3_storage
+    from openai import OpenAI
+
+    fname = filename or os.path.basename(s3_key)
+    ext = os.path.splitext(fname)[1].lower()
+
+    tmp_path = os.path.join(tempfile.gettempdir(), os.path.basename(s3_key))
+    downloaded = s3_storage.download_from_s3(s3_key, tmp_path)
+    if not downloaded:
+        return {"success": False, "error": "File not found in S3 or S3 is not configured."}
+
+    extracted_text = ""
+    try:
+        with open(tmp_path, "rb") as f:
+            contents = f.read()
+
+        if len(contents) > 20 * 1024 * 1024:
+            return {"success": False, "error": "File too large. Maximum allowed size is 20MB."}
+
+        if ext == ".txt":
+            for enc in ["utf-8", "cp1252", "latin-1"]:
+                try:
+                    extracted_text = contents.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+        elif ext == ".pdf":
+            try:
+                import PyPDF2
+                reader = PyPDF2.PdfReader(io.BytesIO(contents))
+                extracted_text = "\n\n".join(
+                    p.extract_text().strip() for p in reader.pages if p.extract_text()
+                )
+            except ImportError:
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(io.BytesIO(contents)) as pdf:
+                        extracted_text = "\n\n".join(p.extract_text() or "" for p in pdf.pages).strip()
+                except ImportError:
+                    return {"success": False, "error": "PDF library not installed. Run: pip install PyPDF2"}
+            except Exception as e:
+                return {"success": False, "error": f"Failed to parse PDF: {e}"}
+
+        elif ext in (".docx", ".doc"):
+            try:
+                import docx
+                doc = docx.Document(io.BytesIO(contents))
+                extracted_text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            except ImportError:
+                return {"success": False, "error": "DOCX library not installed. Run: pip install python-docx"}
+            except Exception as e:
+                return {"success": False, "error": f"Failed to parse DOCX: {e}"}
+
+        elif ext in (".mp3", ".wav", ".m4a"):
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                return {"success": False, "error": "OpenAI API key required for audio transcription."}
+            try:
+                client = OpenAI(api_key=api_key)
+                with open(tmp_path, "rb") as audio_file:
+                    transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+                extracted_text = transcription.text
+            except Exception as e:
+                return {"success": False, "error": f"Audio transcription failed: {e}"}
+
+        elif ext in (".png", ".jpg", ".jpeg"):
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                return {"success": False, "error": "OpenAI API key required for image OCR."}
+            try:
+                import base64, mimetypes
+                b64 = base64.b64encode(contents).decode("utf-8")
+                mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
+                client = OpenAI(api_key=api_key)
+                resp = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": "Extract all text from this image exactly as written. If no text, describe the image briefly."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                    ]}],
+                    max_tokens=3000,
+                )
+                extracted_text = resp.choices[0].message.content.strip()
+            except Exception as e:
+                return {"success": False, "error": f"Image OCR failed: {e}"}
+
+        else:
+            return {"success": False, "error": f"Unsupported file type '{ext}'. Supported: PDF, DOCX, TXT, PNG, JPG, MP3, WAV, M4A."}
+
+        extracted_text = extracted_text.strip()
+        if not extracted_text:
+            return {"success": False, "error": "No text could be extracted from the document."}
+
+        CHAR_LIMIT = 50000
+        truncated = len(extracted_text) > CHAR_LIMIT
+        if truncated:
+            extracted_text = extracted_text[:CHAR_LIMIT]
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return {"success": False, "error": "OpenAI API key not configured."}
+
+        client = OpenAI(api_key=api_key)
+        model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+
+        system_prompt = (
+            "You are an expert Philippine legal document analyst with deep knowledge of the Civil Code, "
+            "Revised Penal Code, Labor Code, and Supreme Court decisions. "
+            "Analyze the document and produce a structured legal analysis with these sections:\n\n"
+            "## 1. Document Overview\n"
+            "Document type, parties, date, jurisdiction, and legal purpose.\n\n"
+            "## 2. Key Legal Issues & Provisions\n"
+            "All significant obligations, rights, conditions, and prohibitions with their implications.\n\n"
+            "## 3. Relevant Philippine Laws & Jurisprudence\n"
+            "Applicable statutes (Civil Code Articles, RA numbers) and Supreme Court decisions (G.R. numbers).\n\n"
+            "## 4. Notable Clauses or Concerns\n"
+            "Unusual, ambiguous, or risky clauses with explanation of the legal risk.\n\n"
+            "## 5. Parties' Rights & Obligations\n"
+            "What each party is entitled to and obligated to do.\n\n"
+            "## 6. Potential Legal Issues or Disputes\n"
+            "Scenarios that could lead to disputes or enforcement problems and how to mitigate them.\n\n"
+            "## 7. Recommendations\n"
+            "Specific, actionable legal advice and suggested next steps."
+        )
+        text_for_ai = extracted_text[:25000]
+        if truncated:
+            text_for_ai += f"\n\n[Note: Document truncated — only the first {CHAR_LIMIT:,} characters were analyzed.]"
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Document: **{fname}**\n\n---\n\n{text_for_ai}"},
+            ],
+            temperature=0.2,
+            max_tokens=4000,
+        )
+        ai_summary = response.choices[0].message.content.strip()
+
+        file_url = s3_storage.generate_presigned_get(s3_key)
+
+        return {
+            "success": True,
+            "filename": fname,
+            "s3_key": s3_key,
+            "file_url": file_url,
+            "ai_summary": ai_summary,
+            "char_count": len(extracted_text),
+            "truncated": truncated,
+        }
+
+    except Exception as e:
+        logging.error(f"[analyze_document] Unexpected error: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 def generate_legal_document(document_type: str, details: dict = None, format: str = "markdown", **kwargs) -> dict:

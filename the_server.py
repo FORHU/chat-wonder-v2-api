@@ -39,6 +39,7 @@ from legal_rag.router import (
     legal_search as legal_rag_search,
     router as legal_rag_router,
 )
+import s3_storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -159,6 +160,18 @@ class ImportRequest(BaseModel):
 class EmotionRequest(BaseModel):
     text: str
     session_id: str = None
+
+class DocumentUploadUrlRequest(BaseModel):
+    filename: str
+    content_type: str
+
+class AnalyzeS3DocumentRequest(BaseModel):
+    s3_key: str
+    filename: Optional[str] = None
+    session_id: Optional[str] = None
+
+class SynthesizeDocumentsRequest(BaseModel):
+    summaries: List[str]
 
 # ---------------------------------------------------------------------------
 # Startup
@@ -1202,3 +1215,276 @@ _context.informed = True
 _context.show_clues = []
 _context.expertise = "General"
 _context.tone = "factual"
+
+# ---------------------------------------------------------------------------
+# Document Analyzer Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/legal/document-upload-url")
+async def generate_document_upload_url(request: DocumentUploadUrlRequest):
+    """Generate an S3 presigned PUT URL so the frontend can upload directly to S3."""
+    safe_filename = "".join(c for c in request.filename if c.isalnum() or c in " ._-")
+    unique_id = str(uuid.uuid4())
+    s3_key = f"uploads/documents/{unique_id}-{safe_filename}"
+    content_type = request.content_type or "application/octet-stream"
+
+    presigned_url = s3_storage.generate_presigned_put(s3_key, content_type=content_type)
+    if not presigned_url:
+        raise HTTPException(status_code=500, detail="Failed to generate S3 upload URL. Is S3 configured?")
+
+    return {"success": True, "s3_key": s3_key, "url": presigned_url, "content_type": content_type}
+
+
+@app.post("/api/legal/analyze-document")
+async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
+    """Download a document from S3, extract its text, and return a structured AI legal analysis."""
+    s3_key = request.s3_key
+    filename = request.filename or os.path.basename(s3_key)
+    ext = os.path.splitext(filename)[1].lower()
+
+    tmp_dir = tempfile.gettempdir()
+    local_path = os.path.join(tmp_dir, os.path.basename(s3_key))
+
+    downloaded = s3_storage.download_from_s3(s3_key, local_path)
+    if not downloaded:
+        raise HTTPException(status_code=404, detail="File not found in S3 or download failed.")
+
+    extracted_text = ""
+
+    try:
+        with open(local_path, "rb") as f:
+            contents = f.read()
+
+        MAX_SIZE = 20 * 1024 * 1024
+        if len(contents) > MAX_SIZE:
+            raise HTTPException(status_code=400, detail="File too large. Maximum allowed size is 20MB.")
+
+        if ext == ".txt":
+            for enc in ["utf-8", "cp1252", "latin-1"]:
+                try:
+                    extracted_text = contents.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not extracted_text:
+                raise HTTPException(status_code=400, detail="Could not decode text file.")
+
+        elif ext == ".pdf":
+            try:
+                import PyPDF2
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(contents))
+                pages = [page.extract_text() for page in pdf_reader.pages if page.extract_text()]
+                extracted_text = "\n\n".join(p.strip() for p in pages)
+            except ImportError:
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(io.BytesIO(contents)) as pdf:
+                        extracted_text = "\n\n".join(p.extract_text() or "" for p in pdf.pages).strip()
+                except ImportError:
+                    raise HTTPException(status_code=500, detail="PDF library not installed. Run: pip install PyPDF2")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {e}")
+
+        elif ext in (".docx", ".doc"):
+            try:
+                import docx
+                doc = docx.Document(io.BytesIO(contents))
+                extracted_text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            except ImportError:
+                raise HTTPException(status_code=500, detail="DOCX library not installed. Run: pip install python-docx")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to parse DOCX: {e}")
+
+        elif ext in (".mp3", ".wav", ".m4a"):
+            if not _context.openai_api_key:
+                raise HTTPException(status_code=400, detail="OpenAI API key required for audio transcription.")
+            try:
+                client = OpenAI(api_key=_context.openai_api_key)
+                with open(local_path, "rb") as audio_file:
+                    transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+                extracted_text = transcription.text
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to transcribe audio: {e}")
+
+        elif ext in (".png", ".jpg", ".jpeg"):
+            if not _context.openai_api_key:
+                raise HTTPException(status_code=400, detail="OpenAI API key required for image OCR.")
+            try:
+                import base64, mimetypes
+                b64 = base64.b64encode(contents).decode("utf-8")
+                mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext[1:]}"
+                client = OpenAI(api_key=_context.openai_api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": "Extract all the text from this image exactly as written. If there is no text, describe the image briefly."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                    ]}],
+                    max_tokens=3000,
+                )
+                extracted_text = response.choices[0].message.content.strip()
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to process image OCR: {e}")
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type '{ext}'. Supported: PDF, DOCX, TXT, PNG, JPG, MP3, WAV, M4A.")
+
+        extracted_text = extracted_text.strip()
+        if not extracted_text:
+            raise HTTPException(status_code=400, detail="No text could be extracted from the document.")
+
+        CHAR_LIMIT = 50000
+        truncated = len(extracted_text) > CHAR_LIMIT
+        if truncated:
+            extracted_text = extracted_text[:CHAR_LIMIT]
+
+        logging.info(f"[Analyze Document] Extracted {len(extracted_text)} chars from '{filename}'")
+
+        ai_summary = None
+        if _context.openai_api_key:
+            try:
+                client = OpenAI(api_key=_context.openai_api_key)
+                system_prompt = (
+                    "You are an expert Philippine legal document analyst with deep knowledge of Philippine law, "
+                    "jurisprudence, and the Civil Code, Revised Penal Code, Labor Code, and Supreme Court decisions. "
+                    "Analyze the provided legal document and produce a comprehensive legal analysis with the following sections. "
+                    "Use bullet points and sub-points where appropriate.\n\n"
+                    "## 1. Document Overview\n"
+                    "Identify the document type, parties involved, date, jurisdiction, and overall legal purpose.\n\n"
+                    "## 2. Key Legal Issues & Provisions\n"
+                    "List all significant legal points, obligations, rights, conditions, and prohibitions with their implications.\n\n"
+                    "## 3. Relevant Philippine Laws & Jurisprudence\n"
+                    "Cite applicable statutes (Civil Code Articles, Labor Code provisions, RA numbers) and Supreme Court decisions (G.R. numbers).\n\n"
+                    "## 4. Notable Clauses or Concerns\n"
+                    "Highlight unusual, ambiguous, or potentially disadvantageous clauses and explain the legal risk.\n\n"
+                    "## 5. Parties' Rights & Obligations\n"
+                    "Summarize what each named party is entitled to and obligated to do.\n\n"
+                    "## 6. Potential Legal Issues or Disputes\n"
+                    "Identify scenarios that could lead to disputes or enforcement problems and how to mitigate them.\n\n"
+                    "## 7. Recommendations\n"
+                    "Provide specific, actionable legal advice: what to negotiate, watch out for, and suggested next steps.\n\n"
+                    "Be thorough and detailed. This analysis will be used by a lawyer or client seeking legal guidance."
+                )
+                text_for_summary = extracted_text[:25000]
+                if truncated:
+                    text_for_summary += f"\n\n[Note: Document was truncated — only the first {CHAR_LIMIT:,} characters were analyzed.]"
+
+                response = client.chat.completions.create(
+                    model=_context.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Document: **{filename}**\n\n---\n\n{text_for_summary}"},
+                    ],
+                    temperature=0.2,
+                    max_tokens=4000,
+                )
+                ai_summary = response.choices[0].message.content.strip()
+                logging.info(f"[Analyze Document] AI summary generated for '{filename}' ({len(ai_summary)} chars)")
+            except Exception as e:
+                logging.warning(f"[Analyze Document] AI summary failed (non-fatal): {e}")
+
+        file_url = s3_storage.generate_presigned_get(s3_key)
+
+        return {
+            "success": True,
+            "filename": filename,
+            "s3_key": s3_key,
+            "file_url": file_url,
+            "ai_summary": ai_summary,
+            "char_count": len(extracted_text),
+            "truncated": truncated,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[Analyze Document] Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+    finally:
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception as cleanup_err:
+                logging.warning(f"Failed to clean up temp file {local_path}: {cleanup_err}")
+
+
+@app.post("/api/legal/upload-and-analyze")
+async def upload_and_analyze(file: UploadFile = File(...)):
+    """Upload a document directly and get back an AI legal analysis in one step. Useful for testing."""
+    contents = await file.read()
+
+    if len(contents) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large. Maximum allowed size is 20MB.")
+
+    filename = file.filename or "document"
+    safe_filename = "".join(c for c in filename if c.isalnum() or c in " ._-")
+    s3_key = f"uploads/documents/{uuid.uuid4()}-{safe_filename}"
+
+    uploaded = s3_storage.upload_bytes_to_s3(contents, s3_key, content_type=file.content_type or "application/octet-stream")
+    if not uploaded:
+        raise HTTPException(status_code=500, detail="Failed to upload file to S3. Is S3 configured?")
+
+    # Reuse the analyze endpoint logic by calling it internally
+    from pydantic import BaseModel as _BM
+    class _Req(_BM):
+        s3_key: str
+        filename: Optional[str] = None
+        session_id: Optional[str] = None
+
+    return await analyze_legal_document(_Req(s3_key=s3_key, filename=filename))
+
+
+@app.post("/api/legal/synthesize-documents")
+async def synthesize_documents(request: SynthesizeDocumentsRequest):
+    """Cross-document synthesis: takes multiple AI summaries and produces a unified strategic analysis."""
+    if not request.summaries:
+        raise HTTPException(status_code=400, detail="No summaries provided for synthesis.")
+    if not _context.openai_api_key:
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+    client = OpenAI(api_key=_context.openai_api_key)
+
+    system_prompt = """
+You are an expert Philippine legal analyst and strategic advisor. The user has uploaded MULTIPLE legal documents.
+The text below contains individual AI analyses for each document.
+
+Provide a "Level 2" Cross-Document Synthesis with these sections:
+
+## Cross-Document Overview
+How these documents relate to each other overall.
+
+## Common Themes & Connections
+Consistent obligations, rights, or themes running across documents.
+
+## Conflicts & Discrepancies
+Contradictions or conflicts between documents. If none, state they appear aligned.
+
+## Aggregated Risk Assessment
+The biggest legal vulnerabilities or risks across the entire package of documents.
+
+## Unified Strategic Recommendations
+A single prioritized list of actionable next steps based on the combined context.
+
+Be legally precise, referencing Philippine law where applicable. Synthesize — do not regurgitate summaries verbatim.
+"""
+
+    combined_text = ""
+    for i, summary in enumerate(request.summaries):
+        combined_text += f"=== DOCUMENT {i + 1} ANALYSIS ===\n{summary}\n\n"
+
+    try:
+        response = client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": system_prompt.strip()},
+                {"role": "user", "content": combined_text.strip()},
+            ],
+            temperature=0.2,
+            max_tokens=3000,
+        )
+        synthesis = response.choices[0].message.content.strip()
+        logging.info(f"[Synthesize Documents] Synthesis generated for {len(request.summaries)} documents.")
+        return {"success": True, "synthesis": synthesis}
+    except Exception as e:
+        logging.error(f"[Synthesize Documents] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate synthesis: {e}")
