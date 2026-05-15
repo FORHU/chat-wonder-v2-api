@@ -37,6 +37,7 @@ from legal_rag.router import (
     LegalAskRequest as RouterLegalAskRequest,
     legal_ask as legal_rag_ask,
     legal_search as legal_rag_search,
+    get_legal_document as legal_rag_get_document,
     router as legal_rag_router,
 )
 import s3_storage
@@ -1217,6 +1218,131 @@ _context.expertise = "General"
 _context.tone = "factual"
 
 # ---------------------------------------------------------------------------
+# Legal Case Search & Detail Endpoints
+# ---------------------------------------------------------------------------
+
+class LegalSearchRequest(BaseModel):
+    prompt: str = ""
+    page: int = 1
+    limit: int = 5
+    optimized_query: Optional[str] = None  # pass on page 2+ to skip re-optimizing
+    content_types: List[str] = None
+
+_LEGAL_SEARCH_MAX_POOL = 50  # max results fetched from RAG per query
+
+@app.post("/api/legal/search")
+async def api_legal_search(request: LegalSearchRequest):
+    try:
+        prompt = request.prompt.strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="Prompt is required.")
+        if not _context.openai_api_key:
+            raise HTTPException(status_code=500, detail="OpenAI API key is not configured.")
+
+        page = max(1, request.page)
+        limit = max(1, min(request.limit, 20))
+        offset = (page - 1) * limit
+
+        # Reuse optimized_query on page 2+ to avoid an extra GPT call
+        if request.optimized_query:
+            optimized_query = request.optimized_query.strip()
+        else:
+            client = OpenAI(api_key=_context.openai_api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert Philippine legal researcher. "
+                            "Extract the core legal issue, relevant keywords, or specific laws from the user prompt "
+                            "to create a concise search query (max 10 words) optimized for semantic vector search. "
+                            "Return ONLY the search string, nothing else."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+            )
+            optimized_query = response.choices[0].message.content.strip()
+
+        logging.info(f"[Legal Search] page={page} '{prompt}' -> '{optimized_query}'")
+
+        rag_result = legal_rag_search(query=optimized_query, limit=_LEGAL_SEARCH_MAX_POOL)
+        rag_rows = rag_result.get("results", []) if isinstance(rag_result, dict) else []
+
+        all_results = [
+            {
+                **row,
+                "item_id": str(row.get("id")) if row.get("id") is not None else None,
+                "text_content": row.get("snippet", ""),
+                "metadata": {
+                    "category": row.get("category"),
+                    "bucket_slug": row.get("bucket_slug"),
+                    "year": row.get("year"),
+                    "source_url": row.get("source_url"),
+                    "s3_json_path": row.get("s3_json_path"),
+                },
+            }
+            for row in rag_rows
+        ]
+
+        total = len(all_results)
+        paged = all_results[offset: offset + limit]
+        total_pages = (total + limit - 1) // limit if total > 0 else 1
+
+        return {
+            "success": True,
+            "query": prompt,
+            "ai_optimized_query": optimized_query,
+            "page": page,
+            "limit": limit,
+            "total_results": total,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+            "results": paged,
+            "search_type": "hybrid_rag",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[Legal Search] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/legal/case/{item_id}")
+async def api_legal_case_detail(item_id: str):
+    try:
+        if not str(item_id).isdigit():
+            raise HTTPException(status_code=400, detail="item_id must be a numeric legal document id.")
+
+        doc = legal_rag_get_document(int(item_id))
+        if not isinstance(doc, dict):
+            raise HTTPException(status_code=404, detail=f"Case '{item_id}' not found.")
+
+        metadata = doc.get("metadata_json") or {}
+        return {
+            "id": doc.get("id"),
+            "item_id": str(doc.get("id")),
+            "type": doc.get("category"),
+            "title": doc.get("title"),
+            "url": doc.get("source_url"),
+            "text_content": doc.get("full_text") or doc.get("summary") or doc.get("concise_summary") or "",
+            "gr_number": metadata.get("gr_number", ""),
+            "law_number": metadata.get("law_number", ""),
+            "date": metadata.get("date", ""),
+            "year": doc.get("year", ""),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[Legal Case Detail] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Document Analyzer Endpoints
 # ---------------------------------------------------------------------------
 
