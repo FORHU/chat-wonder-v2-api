@@ -66,8 +66,6 @@ jobs:
             LEGAL_S3_BUCKET_NAME=${{ secrets.LEGAL_S3_BUCKET_NAME }}
             LEGAL_S3_PREFIX=${{ secrets.LEGAL_S3_PREFIX }}
             AWS_REGION=${{ secrets.AWS_REGION }}
-            AWS_ACCESS_KEY_ID=${{ secrets.APP_AWS_ACCESS_KEY_ID }}
-            AWS_SECRET_ACCESS_KEY=${{ secrets.APP_AWS_SECRET_ACCESS_KEY }}
             LEGAL_EMBEDDING_MODEL=${{ secrets.LEGAL_EMBEDDING_MODEL }}
             LEGAL_CHAT_MODEL=${{ secrets.LEGAL_CHAT_MODEL }}
             FUNCEOF
