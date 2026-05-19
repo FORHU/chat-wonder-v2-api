@@ -5,8 +5,8 @@ on:
     branches: [main]
 
 env:
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -38,8 +38,8 @@ jobs:
       - name: Write env files and deploy on EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ vars.EC2_HOST }}
-          username: ${{ vars.EC2_USER }}
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
@@ -50,32 +50,34 @@ jobs:
             # ── Write .env (main app config) ─────────────────────────────
             cat > /opt/chat-wonder-v2/.env << 'ENVEOF'
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-            CHAT_MODEL=${{ vars.CHAT_MODEL }}
+            CHAT_MODEL=${{ secrets.CHAT_MODEL }}
             LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
-            LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-            LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
-            LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
-            LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
-            AWS_REGION=${{ vars.AWS_REGION }}
+            LEGAL_S3_BUCKET_NAME=${{ secrets.LEGAL_S3_BUCKET_NAME }}
+            LEGAL_S3_PREFIX=${{ secrets.LEGAL_S3_PREFIX }}
+            LEGAL_EMBEDDING_MODEL=${{ secrets.LEGAL_EMBEDDING_MODEL }}
+            LEGAL_CHAT_MODEL=${{ secrets.LEGAL_CHAT_MODEL }}
+            AWS_REGION=${{ secrets.AWS_REGION }}
             ENVEOF
 
             # ── Write user_functions.env (legal RAG credentials) ─────────
             # Mounted into the container at resources/functions/user_functions.env
             cat > /opt/chat-wonder-v2/resources/functions/user_functions.env << 'FUNCEOF'
             LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
-            LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-            LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
-            AWS_REGION=${{ vars.AWS_REGION }}
-            LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
-            LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
+            LEGAL_S3_BUCKET_NAME=${{ secrets.LEGAL_S3_BUCKET_NAME }}
+            LEGAL_S3_PREFIX=${{ secrets.LEGAL_S3_PREFIX }}
+            AWS_REGION=${{ secrets.AWS_REGION }}
+            AWS_ACCESS_KEY_ID=${{ secrets.APP_AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.APP_AWS_SECRET_ACCESS_KEY }}
+            LEGAL_EMBEDDING_MODEL=${{ secrets.LEGAL_EMBEDDING_MODEL }}
+            LEGAL_CHAT_MODEL=${{ secrets.LEGAL_CHAT_MODEL }}
             FUNCEOF
 
             # ── Authenticate EC2 to ECR ───────────────────────────────────
-            aws ecr get-login-password --region ${{ vars.AWS_REGION }} \
-              | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+              | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}
 
             # ── Pull latest image ─────────────────────────────────────────
-            docker pull ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+            docker pull ${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY }}:latest
 
             # ── Stop and remove old container (ignore error if not running)
             docker stop chat-wonder-v2 || true
@@ -88,7 +90,7 @@ jobs:
               -p 8000:8000 \
               --env-file /opt/chat-wonder-v2/.env \
               -v /opt/chat-wonder-v2/resources/functions/user_functions.env:/app/resources/functions/user_functions.env:ro \
-              ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+              ${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY }}:latest
 
             # ── Cleanup old images ────────────────────────────────────────
             docker image prune -f

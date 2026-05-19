@@ -1,2 +1,4 @@
 .env
 resources/functions/user_functions.env
+/.agents
+/.claude
