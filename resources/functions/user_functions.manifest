@@ -96,6 +96,32 @@
   {
     "type": "function",
     "function": {
+      "name": "scan_cosmetic",
+      "description": "Analyze a cosmetic product by scanning its front and back label images stored in S3. Returns a per-ingredient breakdown (function, safety concern, skin-type verdict) and a markdown summary. Call this when the user uploads cosmetic product photos.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "front_s3_key": {
+            "type": "string",
+            "description": "S3 key of the front label image (e.g. 'uploads/cosmetics/uuid-front.jpg')"
+          },
+          "back_s3_key": {
+            "type": "string",
+            "description": "S3 key of the back label image containing the printed ingredient list"
+          },
+          "skin_type": {
+            "type": "string",
+            "enum": ["oily", "dry", "sensitive", "combination", "general"],
+            "description": "User's skin type for personalized ingredient verdicts. Defaults to 'general'."
+          }
+        },
+        "required": ["back_s3_key"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "generate_legal_document",
       "description": "Generate a Philippine legal document. Supported types: affidavit_of_loss, demand_letter, power_of_attorney, authorization_letter, promissory_note, lease_contract.",
       "parameters": {

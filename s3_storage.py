@@ -14,19 +14,19 @@ from botocore.exceptions import ClientError, NoCredentialsError
 logger = logging.getLogger(__name__)
 
 
-def get_s3_config() -> dict:
-    bucket_name = os.getenv("LEGAL_S3_BUCKET_NAME", "")
+def get_s3_config(bucket_name: str = None, region: str = None) -> dict:
+    resolved = bucket_name or os.getenv("LEGAL_S3_BUCKET_NAME", "")
     return {
-        "use_s3": bool(bucket_name),
-        "bucket_name": bucket_name,
-        "region": os.getenv("AWS_REGION", "us-east-1"),
+        "use_s3": bool(resolved),
+        "bucket_name": resolved,
+        "region": region or os.getenv("AWS_REGION", "us-east-1"),
         "access_key": os.getenv("AWS_ACCESS_KEY_ID", ""),
         "secret_key": os.getenv("AWS_SECRET_ACCESS_KEY", ""),
     }
 
 
-def get_s3_client():
-    config = get_s3_config()
+def get_s3_client(bucket_name: str = None, region: str = None):
+    config = get_s3_config(bucket_name, region)
     if not config["use_s3"]:
         return None
     try:
@@ -46,11 +46,11 @@ def get_s3_client():
         return None
 
 
-def download_from_s3(s3_key: str, local_path: str) -> Optional[str]:
-    config = get_s3_config()
+def download_from_s3(s3_key: str, local_path: str, bucket_name: str = None, region: str = None) -> Optional[str]:
+    config = get_s3_config(bucket_name, region)
     if not config["use_s3"]:
         return None
-    s3_client = get_s3_client()
+    s3_client = get_s3_client(bucket_name, region)
     if not s3_client:
         return None
     try:
@@ -68,11 +68,11 @@ def download_from_s3(s3_key: str, local_path: str) -> Optional[str]:
         return None
 
 
-def upload_bytes_to_s3(data: bytes, s3_key: str, content_type: str = "application/octet-stream") -> bool:
-    config = get_s3_config()
+def upload_bytes_to_s3(data: bytes, s3_key: str, content_type: str = "application/octet-stream", bucket_name: str = None, region: str = None) -> bool:
+    config = get_s3_config(bucket_name, region)
     if not config["use_s3"]:
         return False
-    s3_client = get_s3_client()
+    s3_client = get_s3_client(bucket_name, region)
     if not s3_client:
         return False
     try:
@@ -92,11 +92,13 @@ def generate_presigned_put(
     s3_key: str,
     content_type: str = "application/octet-stream",
     expiration_in_seconds: int = 3600,
+    bucket_name: str = None,
+    region: str = None,
 ) -> Optional[str]:
-    config = get_s3_config()
+    config = get_s3_config(bucket_name, region)
     if not config["use_s3"]:
         return None
-    s3_client = get_s3_client()
+    s3_client = get_s3_client(bucket_name, region)
     if not s3_client:
         return None
     try:
@@ -115,12 +117,12 @@ def generate_presigned_put(
 
 
 def generate_presigned_get(
-    s3_key: str, expiration_in_seconds: int = 604800
+    s3_key: str, expiration_in_seconds: int = 604800, bucket_name: str = None, region: str = None
 ) -> Optional[str]:
-    config = get_s3_config()
+    config = get_s3_config(bucket_name, region)
     if not config["use_s3"]:
         return None
-    s3_client = get_s3_client()
+    s3_client = get_s3_client(bucket_name, region)
     if not s3_client:
         return None
     try:
