@@ -174,6 +174,12 @@ class AnalyzeS3DocumentRequest(BaseModel):
 class SynthesizeDocumentsRequest(BaseModel):
     summaries: List[str]
 
+class CosmeticScanRequest(BaseModel):
+    front_s3_key: Optional[str] = None
+    back_s3_key: str
+    skin_type: Optional[str] = "general"
+    session_id: Optional[str] = None
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -1614,3 +1620,37 @@ Be legally precise, referencing Philippine law where applicable. Synthesize — 
     except Exception as e:
         logging.error(f"[Synthesize Documents] Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate synthesis: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Cosmetics
+# ---------------------------------------------------------------------------
+
+@app.post("/api/cosmetics/scan")
+async def scan_cosmetic_product(request: CosmeticScanRequest):
+    """Analyze a cosmetic product using S3 keys for its front and back label images."""
+    if not _context.openai_api_key:
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+    from resources.functions.user_functions import scan_cosmetic
+    analysis = scan_cosmetic(
+        front_s3_key=request.front_s3_key or "",
+        back_s3_key=request.back_s3_key,
+        skin_type=request.skin_type or "general",
+    )
+
+    if not analysis.get("success"):
+        raise HTTPException(status_code=500, detail=analysis.get("error", "Scan failed."))
+
+    if request.session_id and request.session_id in _context.sessions:
+        state = _context.sessions[request.session_id]
+        product_name = analysis.get("product_name", "this product")
+        seed_message = (
+            f"I've scanned **{product_name}** for you. Here's the ingredient analysis:\n\n"
+            f"{analysis.get('summary', '')}\n\n"
+            "Feel free to ask me anything about the ingredients or whether this product is right for you."
+        )
+        state.generated.append({"role": "assistant", "content": seed_message})
+
+    logging.info(f"[Cosmetics Scan] {analysis.get('product_name', 'unknown')} — front: {request.front_s3_key}")
+    return analysis

@@ -552,6 +552,130 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
                 pass
 
 
+def scan_cosmetic(front_s3_key: str, back_s3_key: str, skin_type: str = "general") -> dict:
+    """Analyze a cosmetic product by scanning its front and back label images stored in S3."""
+    import s3_storage
+    import base64
+    import mimetypes
+    import tempfile
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    model = os.getenv("COSMETICS_MODEL", "gpt-4o-mini")
+    cosmetics_bucket = os.getenv("COSMETICS_S3_BUCKET_NAME")
+    cosmetics_region = os.getenv("COSMETICS_AWS_REGION")
+    front_s3_key = front_s3_key.lstrip("/") if front_s3_key else ""
+    back_s3_key = back_s3_key.lstrip("/")
+    logging.info(f"[scan_cosmetic] bucket={cosmetics_bucket} region={cosmetics_region} model={model}")
+
+    client = OpenAI(api_key=api_key)
+
+    def _ocr_from_s3(s3_key: str, prompt: str) -> str:
+        fname = os.path.basename(s3_key)
+        ext = os.path.splitext(fname)[1].lower()
+        tmp_path = os.path.join(tempfile.gettempdir(), fname)
+        logging.info(f"[scan_cosmetic] downloading s3_key={s3_key} bucket={cosmetics_bucket} region={cosmetics_region}")
+        if not s3_storage.download_from_s3(s3_key, tmp_path, bucket_name=cosmetics_bucket, region=cosmetics_region):
+            logging.error(f"[scan_cosmetic] S3 download FAILED for key={s3_key}")
+            return ""
+        logging.info(f"[scan_cosmetic] S3 download OK, running OCR on {fname}")
+        try:
+            with open(tmp_path, "rb") as f:
+                contents = f.read()
+            mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
+            b64 = base64.b64encode(contents).decode("utf-8")
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                ]}],
+                max_tokens=2000,
+            )
+            result = resp.choices[0].message.content.strip()
+            logging.info(f"[scan_cosmetic] OCR OK for {fname}, chars={len(result)}")
+            return result
+        except Exception as e:
+            logging.error(f"[scan_cosmetic] OCR FAILED for {s3_key}: {e}")
+            return ""
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    front_text = _ocr_from_s3(
+        front_s3_key,
+        "Extract the product name, brand name, and any label claims (e.g. 'hypoallergenic', 'dermatologist tested', 'paraben-free') from this cosmetic product image. Return plain text only.",
+    ) if front_s3_key else ""
+    back_text = _ocr_from_s3(
+        back_s3_key,
+        "Extract the full ingredient list from this cosmetic product label exactly as written. Return only the ingredients, comma-separated, in the same order as on the label.",
+    )
+
+    if not back_text:
+        return {"success": False, "error": "Could not extract an ingredient list from the back label image."}
+
+    skin_type_normalized = (skin_type or "general").lower().strip()
+    if skin_type_normalized not in {"oily", "dry", "sensitive", "combination", "general"}:
+        skin_type_normalized = "general"
+
+    system_prompt = (
+        "You are a cosmetic ingredient expert and dermatologist. Analyze cosmetic product ingredients and return "
+        "a JSON object with this exact structure:\n"
+        "{\n"
+        '  "product_name": "...",\n'
+        '  "brand": "...",\n'
+        '  "label_claims": ["..."],\n'
+        '  "skin_type": "...",\n'
+        '  "ingredients": [\n'
+        '    {\n'
+        '      "name": "...",\n'
+        '      "function": "...",\n'
+        '      "safety_concern": "none | low | moderate | high",\n'
+        '      "safety_notes": "...",\n'
+        '      "skin_type_verdict": "beneficial | neutral | problematic",\n'
+        '      "skin_type_notes": "..."\n'
+        '    }\n'
+        '  ],\n'
+        '  "summary": "markdown overview of the product and key findings for the user\'s skin type"\n'
+        "}"
+    )
+    user_prompt = (
+        f"Front label:\n{front_text}\n\n"
+        f"Ingredients (back label):\n{back_text}\n\n"
+        f"Skin type: {skin_type_normalized}\n\n"
+        "Analyze every ingredient and return the JSON."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content.strip())
+        return {
+            "success": True,
+            "front_s3_key": front_s3_key,
+            "back_s3_key": back_s3_key,
+            "front_image_url": s3_storage.generate_presigned_get(front_s3_key, bucket_name=cosmetics_bucket, region=cosmetics_region),
+            "back_image_url": s3_storage.generate_presigned_get(back_s3_key, bucket_name=cosmetics_bucket, region=cosmetics_region),
+            **result,
+        }
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def generate_legal_document(document_type: str, details: dict = None, format: str = "markdown", **kwargs) -> dict:
     """Generate a Philippine legal document based on type and provided details."""
     from openai import OpenAI
