@@ -122,6 +122,42 @@
   {
     "type": "function",
     "function": {
+      "name": "match_cosmetics",
+      "description": "Check whether two cosmetic products are compatible to use together. Takes the ingredient lists from two prior scan results and the user's skin type. Returns a compatibility verdict (safe/caution/avoid), a list of ingredient conflicts with severity, and a markdown summary with usage recommendations.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "product_a_name": {
+            "type": "string",
+            "description": "Name of the first product"
+          },
+          "product_a_ingredients": {
+            "type": "array",
+            "items": { "type": "object" },
+            "description": "Ingredients array from the first product's scan result"
+          },
+          "product_b_name": {
+            "type": "string",
+            "description": "Name of the second product"
+          },
+          "product_b_ingredients": {
+            "type": "array",
+            "items": { "type": "object" },
+            "description": "Ingredients array from the second product's scan result"
+          },
+          "skin_type": {
+            "type": "string",
+            "enum": ["oily", "dry", "sensitive", "combination", "general"],
+            "description": "User's skin type for personalized conflict assessment. Defaults to 'general'."
+          }
+        },
+        "required": ["product_a_name", "product_a_ingredients", "product_b_name", "product_b_ingredients"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "generate_legal_document",
       "description": "Generate a Philippine legal document. Supported types: affidavit_of_loss, demand_letter, power_of_attorney, authorization_letter, promissory_note, lease_contract.",
       "parameters": {

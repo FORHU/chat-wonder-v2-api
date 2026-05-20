@@ -180,6 +180,12 @@ class CosmeticScanRequest(BaseModel):
     skin_type: Optional[str] = "general"
     session_id: Optional[str] = None
 
+class CosmeticMatchRequest(BaseModel):
+    product_a_s3_key: str
+    product_b_s3_key: str
+    skin_type: Optional[str] = "general"
+    session_id: Optional[str] = None
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -1654,3 +1660,51 @@ async def scan_cosmetic_product(request: CosmeticScanRequest):
 
     logging.info(f"[Cosmetics Scan] {analysis.get('product_name', 'unknown')} — front: {request.front_s3_key}")
     return analysis
+
+
+@app.post("/api/cosmetics/match")
+async def match_cosmetic_products(request: CosmeticMatchRequest):
+    """Scan two cosmetic back-label images from S3 and check if their ingredients are compatible."""
+    if not _context.openai_api_key:
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+    from resources.functions.user_functions import scan_cosmetic, match_cosmetics
+
+    skin_type = request.skin_type or "general"
+
+    scan_a = scan_cosmetic(front_s3_key="", back_s3_key=request.product_a_s3_key, skin_type=skin_type)
+    if not scan_a.get("success"):
+        raise HTTPException(status_code=500, detail=f"Failed to scan product A: {scan_a.get('error')}")
+
+    scan_b = scan_cosmetic(front_s3_key="", back_s3_key=request.product_b_s3_key, skin_type=skin_type)
+    if not scan_b.get("success"):
+        raise HTTPException(status_code=500, detail=f"Failed to scan product B: {scan_b.get('error')}")
+
+    result = match_cosmetics(
+        product_a_name=scan_a.get("product_name") or request.product_a_s3_key,
+        product_a_ingredients=scan_a.get("ingredients", []),
+        product_b_name=scan_b.get("product_name") or request.product_b_s3_key,
+        product_b_ingredients=scan_b.get("ingredients", []),
+        skin_type=skin_type,
+    )
+
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Match failed."))
+
+    result["product_a"] = {"name": scan_a.get("product_name"), "s3_key": request.product_a_s3_key}
+    result["product_b"] = {"name": scan_b.get("product_name"), "s3_key": request.product_b_s3_key}
+
+    if request.session_id and request.session_id in _context.sessions:
+        state = _context.sessions[request.session_id]
+        name_a = scan_a.get("product_name", "Product A")
+        name_b = scan_b.get("product_name", "Product B")
+        verdict = result.get("verdict", "unknown")
+        seed_message = (
+            f"I've checked the compatibility of **{name_a}** and **{name_b}**. "
+            f"Verdict: **{verdict}**.\n\n{result.get('summary', '')}\n\n"
+            "Feel free to ask me anything about using these products together."
+        )
+        state.generated.append({"role": "assistant", "content": seed_message})
+
+    logging.info(f"[Cosmetics Match] {scan_a.get('product_name')} + {scan_b.get('product_name')} → {result.get('verdict')}")
+    return result

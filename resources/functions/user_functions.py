@@ -676,6 +676,81 @@ def scan_cosmetic(front_s3_key: str, back_s3_key: str, skin_type: str = "general
         return {"success": False, "error": str(e)}
 
 
+def match_cosmetics(
+    product_a_name: str,
+    product_a_ingredients: list,
+    product_b_name: str,
+    product_b_ingredients: list,
+    skin_type: str = "general",
+) -> dict:
+    """Check whether two cosmetic products are compatible based on their ingredient lists and skin type."""
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    model = os.getenv("COSMETICS_MODEL", "gpt-4o-mini")
+    client = OpenAI(api_key=api_key)
+
+    skin_type_normalized = (skin_type or "general").lower().strip()
+    if skin_type_normalized not in {"oily", "dry", "sensitive", "combination", "general"}:
+        skin_type_normalized = "general"
+
+    def _ingredient_names(ingredients: list) -> str:
+        names = []
+        for item in ingredients:
+            if isinstance(item, dict):
+                names.append(item.get("name", ""))
+            elif isinstance(item, str):
+                names.append(item)
+        return ", ".join(n for n in names if n)
+
+    system_prompt = (
+        "You are a cosmetic chemist and dermatologist. Assess whether two cosmetic products are safe to use together.\n\n"
+        "Return a JSON object with this exact structure:\n"
+        "{\n"
+        '  "verdict": "safe | caution | avoid",\n'
+        '  "verdict_reason": "one-sentence explanation of the overall verdict",\n'
+        '  "conflicts": [\n'
+        '    {\n'
+        '      "ingredient_a": "...",\n'
+        '      "ingredient_b": "...",\n'
+        '      "issue": "...",\n'
+        '      "severity": "low | moderate | high",\n'
+        '      "skin_type_notes": "..."\n'
+        '    }\n'
+        '  ],\n'
+        '  "summary": "markdown summary with overall verdict, key conflicts, and usage recommendation (e.g. use product A in the morning, product B at night)"\n'
+        "}\n\n"
+        "If there are no conflicts, return an empty conflicts array and verdict of safe."
+    )
+
+    user_prompt = (
+        f"Skin type: {skin_type_normalized}\n\n"
+        f"Product A — {product_a_name}:\n{_ingredient_names(product_a_ingredients)}\n\n"
+        f"Product B — {product_b_name}:\n{_ingredient_names(product_b_ingredients)}\n\n"
+        "Check for ingredient interactions, efficacy conflicts, and skin-type-specific concerns. Return the JSON."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content.strip())
+        return {"success": True, "skin_type": skin_type_normalized, **result}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def generate_legal_document(document_type: str, details: dict = None, format: str = "markdown", **kwargs) -> dict:
     """Generate a Philippine legal document based on type and provided details."""
     from openai import OpenAI
