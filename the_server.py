@@ -39,6 +39,7 @@ from legal_rag.router import (
     legal_search as legal_rag_search,
     get_legal_document as legal_rag_get_document,
     router as legal_rag_router,
+    get_cached_db as legal_rag_get_cached_db,
 )
 import s3_storage
 
@@ -641,6 +642,80 @@ def streaming_reason_loop(state, query: str, session_id: str = None, tools: list
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health_check():
+    """Check connectivity to all dependent services. Returns 200 if healthy, 503 if any critical service is down."""
+    import time
+    checks = {}
+    overall = "healthy"
+
+    # PostgreSQL — prefer the LegalDatabase pool (used by /chat and /chat-stream legal persona),
+    # fall back to the startup pool (_context.db_pool) if legal services not yet initialized.
+    try:
+        legal_db = legal_rag_get_cached_db()
+        if legal_db is not None:
+            t0 = time.monotonic()
+            with legal_db.connect() as conn:
+                conn.cursor().execute("SELECT 1")
+            checks["postgres"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000)}
+        elif _context.db_pool:
+            t0 = time.monotonic()
+            conn = _context.db_pool.getconn()
+            try:
+                conn.cursor().execute("SELECT 1")
+            finally:
+                _context.db_pool.putconn(conn)
+            checks["postgres"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000)}
+        else:
+            checks["postgres"] = {"status": "unconfigured"}
+    except Exception as e:
+        checks["postgres"] = {"status": "error", "detail": str(e)}
+        overall = "degraded"
+
+    # S3 legal bucket
+    try:
+        legal_bucket = os.getenv("LEGAL_S3_BUCKET_NAME")
+        if not legal_bucket:
+            checks["s3_legal"] = {"status": "unconfigured"}
+        else:
+            t0 = time.monotonic()
+            s3 = s3_storage.get_s3_client()
+            s3.head_bucket(Bucket=legal_bucket)
+            checks["s3_legal"] = {"status": "ok", "bucket": legal_bucket, "latency_ms": round((time.monotonic() - t0) * 1000)}
+    except Exception as e:
+        checks["s3_legal"] = {"status": "error", "bucket": os.getenv("LEGAL_S3_BUCKET_NAME"), "detail": str(e)}
+        overall = "degraded"
+
+    # S3 cosmetics bucket
+    try:
+        cosmetics_bucket = os.getenv("COSMETICS_S3_BUCKET_NAME")
+        cosmetics_region = os.getenv("COSMETICS_AWS_REGION")
+        if not cosmetics_bucket:
+            checks["s3_cosmetics"] = {"status": "unconfigured"}
+        else:
+            t0 = time.monotonic()
+            s3 = s3_storage.get_s3_client(bucket_name=cosmetics_bucket, region=cosmetics_region)
+            s3.head_bucket(Bucket=cosmetics_bucket)
+            checks["s3_cosmetics"] = {"status": "ok", "bucket": cosmetics_bucket, "latency_ms": round((time.monotonic() - t0) * 1000)}
+    except Exception as e:
+        checks["s3_cosmetics"] = {"status": "error", "bucket": os.getenv("COSMETICS_S3_BUCKET_NAME"), "detail": str(e)}
+        overall = "degraded"
+
+    # OpenAI
+    if _context.openai_api_key:
+        checks["openai"] = {"status": "configured", "model": _context.model}
+    else:
+        checks["openai"] = {"status": "unconfigured"}
+        overall = "degraded"
+
+    status_code = 200 if overall == "healthy" else 503
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": overall, "checks": checks},
+    )
+
 
 @app.get("/session-id")
 async def get_new_session_id():

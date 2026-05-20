@@ -35,6 +35,12 @@ class LegalAskRequest(LegalSearchRequest):
 
 _svc_cache = None
 
+
+def get_cached_db():
+    """Return the LegalDatabase instance if already initialized, else None."""
+    return _svc_cache[1] if _svc_cache is not None else None
+
+
 def _services():
     global _svc_cache
     if _svc_cache is not None:

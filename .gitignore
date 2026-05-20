@@ -2,3 +2,4 @@
 resources/functions/user_functions.env
 /.agents
 /.claude
+/__pycache__
