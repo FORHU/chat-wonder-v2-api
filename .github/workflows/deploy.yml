@@ -45,7 +45,8 @@ jobs:
             set -e
 
             # ── App directories ──────────────────────────────────────────
-            mkdir -p /opt/chat-wonder-v2/resources/functions
+            sudo mkdir -p /opt/chat-wonder-v2/resources/functions
+            sudo chown -R ec2-user:ec2-user /opt/chat-wonder-v2
 
             # ── Write .env (main app config) ─────────────────────────────
             cat > /opt/chat-wonder-v2/.env << 'ENVEOF'
