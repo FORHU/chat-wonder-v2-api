@@ -58,6 +58,9 @@ jobs:
             LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
             LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
             AWS_REGION=${{ vars.AWS_REGION }}
+            COSMETICS_MODEL=${{ vars.COSMETICS_MODEL }}
+            COSMETICS_S3_BUCKET_NAME=${{ vars.COSMETICS_S3_BUCKET_NAME }}
+            COSMETICS_AWS_REGION=${{ vars.COSMETICS_AWS_REGION }}
             ENVEOF
 
             # ── Write user_functions.env (legal RAG credentials) ─────────
