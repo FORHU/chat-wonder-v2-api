@@ -1,104 +1,104 @@
 name: Deploy to EC2
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'Image tag to deploy (defaults to latest commit SHA)'
-        required: false
-        default: ''
+    push:
+        branches: [main]
+    workflow_dispatch:
+        inputs:
+            image_tag:
+                description: "Image tag to deploy (defaults to latest commit SHA)"
+                required: false
+                default: ""
 
 env:
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+    ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+    ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+    IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+    deploy:
+        runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+            - name: Configure AWS credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+            - name: Login to Amazon ECR
+              id: login-ecr
+              uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+            - name: Build and push Docker image
+              run: |
+                  docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+                  docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+                  docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+                  docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      - name: Write env files and deploy on EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ vars.EC2_HOST }}
-          username: ${{ vars.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
+            - name: Write env files and deploy on EC2
+              uses: appleboy/ssh-action@v1.0.3
+              with:
+                  host: ${{ vars.EC2_HOST }}
+                  username: ${{ vars.EC2_USER }}
+                  key: ${{ secrets.EC2_SSH_KEY }}
+                  script: |
+                      set -e
 
-            # ── App directories ──────────────────────────────────────────
-            sudo mkdir -p /opt/chat-wonder-v2/resources/functions
-            sudo chown -R ec2-user:ec2-user /opt/chat-wonder-v2
+                      # ── App directories ──────────────────────────────────────────
+                      sudo mkdir -p /opt/chat-wonder-v2/resources/functions
+                      sudo chown -R ec2-user:ec2-user /opt/chat-wonder-v2
 
-            # ── Write .env (main app config) ─────────────────────────────
-            cat > /opt/chat-wonder-v2/.env << 'ENVEOF'
-            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-            CHAT_MODEL=${{ vars.CHAT_MODEL }}
-            LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
-            LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-            LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
-            LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
-            LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
-            AWS_REGION=${{ vars.AWS_REGION }}
-            COSMETICS_MODEL=${{ vars.COSMETICS_MODEL }}
-            COSMETICS_S3_BUCKET_NAME=${{ vars.COSMETICS_S3_BUCKET_NAME }}
-            COSMETICS_AWS_REGION=${{ vars.COSMETICS_AWS_REGION }}
-            ENVEOF
+                      # ── Write .env (main app config) ─────────────────────────────
+                      cat > /opt/chat-wonder-v2/.env << 'ENVEOF'
+                      OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+                      CHAT_MODEL=${{ vars.CHAT_MODEL }}
+                      LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
+                      LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
+                      LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
+                      LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
+                      LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
+                      AWS_REGION=${{ vars.AWS_REGION }}
+                      COSMETICS_MODEL=${{ secrets.COSMETICS_MODEL }}
+                      COSMETICS_S3_BUCKET_NAME=${{ secrets.COSMETICS_S3_BUCKET_NAME }}
+                      COSMETICS_AWS_REGION=${{ secrets.COSMETICS_AWS_REGION }}
+                      ENVEOF
 
-            # ── Write user_functions.env (legal RAG credentials) ─────────
-            # Mounted into the container at resources/functions/user_functions.env
-            cat > /opt/chat-wonder-v2/resources/functions/user_functions.env << 'FUNCEOF'
-            LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
-            LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-            LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
-            AWS_REGION=${{ vars.AWS_REGION }}
-            LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
-            LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
-            FUNCEOF
+                      # ── Write user_functions.env (legal RAG credentials) ─────────
+                      # Mounted into the container at resources/functions/user_functions.env
+                      cat > /opt/chat-wonder-v2/resources/functions/user_functions.env << 'FUNCEOF'
+                      LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
+                      LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
+                      LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
+                      AWS_REGION=${{ vars.AWS_REGION }}
+                      LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
+                      LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
+                      FUNCEOF
 
-            # ── Authenticate EC2 to ECR ───────────────────────────────────
-            aws ecr get-login-password --region ${{ vars.AWS_REGION }} \
-              | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
+                      # ── Authenticate EC2 to ECR ───────────────────────────────────
+                      aws ecr get-login-password --region ${{ vars.AWS_REGION }} \
+                        | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
 
-            # ── Pull latest image ─────────────────────────────────────────
-            docker pull ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+                      # ── Pull latest image ─────────────────────────────────────────
+                      docker pull ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
 
-            # ── Stop and remove old container (ignore error if not running)
-            docker stop chat-wonder-v2 || true
-            docker rm   chat-wonder-v2 || true
+                      # ── Stop and remove old container (ignore error if not running)
+                      docker stop chat-wonder-v2 || true
+                      docker rm   chat-wonder-v2 || true
 
-            # ── Start new container ───────────────────────────────────────
-            docker run -d \
-              --name chat-wonder-v2 \
-              --restart unless-stopped \
-              -p 8000:8000 \
-              --env-file /opt/chat-wonder-v2/.env \
-              -v /opt/chat-wonder-v2/resources/functions/user_functions.env:/app/resources/functions/user_functions.env:ro \
-              ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
+                      # ── Start new container ───────────────────────────────────────
+                      docker run -d \
+                        --name chat-wonder-v2 \
+                        --restart unless-stopped \
+                        -p 8000:8000 \
+                        --env-file /opt/chat-wonder-v2/.env \
+                        -v /opt/chat-wonder-v2/resources/functions/user_functions.env:/app/resources/functions/user_functions.env:ro \
+                        ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
 
-            # ── Cleanup old images ────────────────────────────────────────
-            docker image prune -f
+                      # ── Cleanup old images ────────────────────────────────────────
+                      docker image prune -f
