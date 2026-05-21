@@ -3,11 +3,17 @@ name: Deploy to EC2
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (defaults to latest commit SHA)'
+        required: false
+        default: ''
 
 env:
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  IMAGE_TAG: ${{ github.sha }}
+  IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
 
 jobs:
   deploy:
