@@ -85,6 +85,14 @@ class LegalDatabase:
             self._pool.putconn(conn)
 
     def ensure_schema(self) -> None:
+        # Install vector extension via a raw connection before register_vector can succeed.
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            conn.commit()
+        finally:
+            self._pool.putconn(conn)
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
