@@ -74,6 +74,7 @@ if os.path.exists(user_env_path):
 _context.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
 _context.embedding_model: str = os.getenv("LEGAL_EMBEDDING_MODEL", "text-embedding-3-small")
 _context.model: str = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+_context.legal_library_url: str = os.getenv("LEGAL_LIBRARY_URL", "").rstrip("/")
 _context.temperature: float = 1.0
 _context.informed: bool = True
 _context.show_clues: list = []
@@ -300,14 +301,25 @@ def _search_results_to_source_metadata(results: list) -> list:
     ]
 
 
+def _resolve_citation_url(url: str) -> str:
+    """Rewrite /sources/{id} → {LEGAL_LIBRARY_URL}/{id}. Pass other URLs through unchanged."""
+    if url.startswith("/sources/"):
+        doc_id = url[len("/sources/"):]
+        base = _context.legal_library_url or ""
+        return f"{base}/{doc_id}"
+    return url
+
+
 def format_legal_citation_links(text: str) -> str:
     if not text or not isinstance(text, str):
         return text
     url_pattern = r"(https?://[^)]+|[^)]+)"
     def repl_law(m):
-        return f'<a href="{m.group(2)}" class="legal-ref law">{m.group(1)}</a>'
+        href = _resolve_citation_url(m.group(2))
+        return f'<a href="{href}" class="legal-ref law" target="_blank">{m.group(1)}</a>'
     def repl_juris(m):
-        return f'<a href="{m.group(2)}" class="legal-ref jurisprudence">{m.group(1)}</a>'
+        href = _resolve_citation_url(m.group(2))
+        return f'<a href="{href}" class="legal-ref jurisprudence" target="_blank">{m.group(1)}</a>'
     text = re.sub(r"\[([^\]]+ Law)\]\(" + url_pattern + r"\)", repl_law, text)
     text = re.sub(r"\[([^\]]+ Jurisprudence)\]\(" + url_pattern + r"\)", repl_juris, text)
     return text
@@ -733,6 +745,12 @@ async def health_check():
         status_code=status_code,
         content={"status": overall, "checks": checks},
     )
+
+
+@app.get("/config")
+async def get_config():
+    """Public config for frontend clients — no secrets."""
+    return {"legal_library_url": _context.legal_library_url}
 
 
 @app.get("/session-id")

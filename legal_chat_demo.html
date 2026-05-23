@@ -353,6 +353,7 @@
   let currentBubble = null;
   let currentRaw = "";
   let isStreaming = false;
+  let legalLibraryUrl = "";
 
   // ── Auto-resize textarea ──
   $("input").addEventListener("input", () => {
@@ -377,9 +378,12 @@
     setStatus("connecting");
 
     try {
-      const r = await fetch(`${base}/session-id`);
-      const data = await r.json();
-      sessionId = data.session_id;
+      const [sessionRes, configRes] = await Promise.all([
+        fetch(`${base}/session-id`),
+        fetch(`${base}/config`),
+      ]);
+      sessionId = (await sessionRes.json()).session_id;
+      legalLibraryUrl = ((await configRes.json()).legal_library_url || "").replace(/\/$/, "");
     } catch (e) {
       setStatus("error", "Cannot reach server");
       return;
@@ -543,9 +547,20 @@
     return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
-  // ── Citation link styling ──
+  // ── Citation link styling + URL rewrite ──
+  function resolveCitationUrl(href) {
+    if (href && href.startsWith("/sources/")) {
+      const id = href.slice("/sources/".length);
+      return `${legalLibraryUrl}/${id}`;
+    }
+    return href;
+  }
+
   function applyLegalLinks(el) {
     el.querySelectorAll("a").forEach(a => {
+      a.href = resolveCitationUrl(a.getAttribute("href"));
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
       const text = a.textContent;
       if (text.endsWith(" Law")) { a.classList.add("legal-ref","law"); }
       else if (text.endsWith(" Jurisprudence")) { a.classList.add("legal-ref","jurisprudence"); }
@@ -569,7 +584,9 @@
         : "default";
       const typeLabel = typeClass === "law" ? "Law" : typeClass === "jurisprudence" ? "Jurisprudence" : typeRaw || "Document";
       const snippet = s.snippet ? `<div class="s-snippet">${escHtml(s.snippet.slice(0,200))}</div>` : "";
-      const link = s.source_url ? `<a href="${escHtml(s.source_url)}" target="_blank">View source ↗</a>` : "";
+      const docId = s.item_id || s.id;
+      const libHref = docId ? `${legalLibraryUrl}/${docId}` : (s.source_url || "");
+      const link = libHref ? `<a href="${escHtml(libHref)}" target="_blank" rel="noopener noreferrer">View in library ↗</a>` : "";
       const card = document.createElement("div");
       card.className = "source-card";
       card.innerHTML = `

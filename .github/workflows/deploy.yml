@@ -67,6 +67,7 @@ jobs:
                       COSMETICS_MODEL=${{ secrets.COSMETICS_MODEL }}
                       COSMETICS_S3_BUCKET_NAME=${{ secrets.COSMETICS_S3_BUCKET_NAME }}
                       COSMETICS_AWS_REGION=${{ secrets.COSMETICS_AWS_REGION }}
+                      LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                       ENVEOF
 
                       # ── Write user_functions.env (legal RAG credentials) ─────────
