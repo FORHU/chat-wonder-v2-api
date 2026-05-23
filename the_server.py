@@ -282,6 +282,24 @@ def run_legal_persona_ask(query: str) -> dict:
 # Citation helpers
 # ---------------------------------------------------------------------------
 
+def _search_results_to_source_metadata(results: list) -> list:
+    return [
+        {
+            "type": "legal_document",
+            "title": r.get("title"),
+            "category": r.get("metadata", {}).get("category") or r.get("type"),
+            "bucket_slug": r.get("metadata", {}).get("bucket_slug"),
+            "year": r.get("metadata", {}).get("year"),
+            "source_url": r.get("url") or r.get("metadata", {}).get("source_url"),
+            "s3_json_path": r.get("metadata", {}).get("s3_json_path"),
+            "snippet": r.get("snippet"),
+            "full_text": r.get("text"),
+            "relevance": r.get("score", 1.0),
+        }
+        for r in results
+    ]
+
+
 def format_legal_citation_links(text: str) -> str:
     if not text or not isinstance(text, str):
         return text
@@ -748,25 +766,14 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="API key is required.")
     init_openai_client(state, _context.openai_api_key)
 
-    # Direct legal RAG path
+    # Normal path with optional HITL (legal persona always auto-approves its tools)
+    _was_auto = _context.auto_approval
     if persona == "legal":
-        try:
-            legal_result = run_legal_persona_ask(user_input)
-            state.prompt.append(user_input.strip())
-            state.generated.append(legal_result["answer"])
-            state.source_metadata = legal_result["source_metadata"]
-            _context.sessions[session_id] = state
-            logging.info("/chat [legal] %.2fs session=%s", time.time() - _t_start, session_id)
-            return {
-                "response": legal_result["answer"],
-                "lookup": state.lookup,
-                "source_metadata": state.source_metadata,
-            }
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Legal RAG ask failed: {str(e)}")
-
-    # Normal path with optional HITL
-    result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override)
+        _context.auto_approval = True
+    try:
+        result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override)
+    finally:
+        _context.auto_approval = _was_auto
 
     # HITL pending approval
     if isinstance(result, dict) and result.get("__hitl__"):
@@ -794,6 +801,8 @@ def chat(request: ChatRequest):
     final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
     if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
         final_text = format_legal_citation_links(final_text)
+    if persona == "legal" and state.last_search_legal_results:
+        state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -1058,22 +1067,10 @@ async def chat_stream(websocket: WebSocket):
 
             full_response = ""
             _ws_t_start = time.time()
+            _was_auto = _context.auto_approval
+            if persona == "legal":
+                _context.auto_approval = True
             try:
-                if persona == "legal":
-                    legal_result = await asyncio.get_event_loop().run_in_executor(
-                        None, run_legal_persona_ask, user_input
-                    )
-                    state.source_metadata = legal_result["source_metadata"]
-                    if state.source_metadata:
-                        await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
-                    await websocket.send_text(legal_result["answer"])
-                    await websocket.send_text(_context.__END__)
-                    state.prompt.append(user_input)
-                    state.generated.append(legal_result["answer"])
-                    _context.sessions[session_id] = state
-                    logging.info("/chat-stream [legal] %.2fs session=%s", time.time() - _ws_t_start, session_id)
-                    continue
-
                 for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override):
                     if chunk.startswith("__HITL__"):
                         hitl_data = json.loads(chunk[8:])
@@ -1102,6 +1099,9 @@ async def chat_stream(websocket: WebSocket):
                     final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
                     if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
                         final_text = format_legal_citation_links(final_text)
+                    if persona == "legal" and state.last_search_legal_results:
+                        state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
+                        await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
                     await websocket.send_text(_context.__END__)
@@ -1109,6 +1109,8 @@ async def chat_stream(websocket: WebSocket):
             except Exception as e:
                 await websocket.send_text(f"[Error] {e}")
                 await websocket.send_text(_context.__END__)
+            finally:
+                _context.auto_approval = _was_auto
 
     except WebSocketDisconnect:
         logging.debug("WebSocket connection closed.")

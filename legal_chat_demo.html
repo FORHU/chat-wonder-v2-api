@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Legal AI Chat</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f11;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 14px 20px;
+      background: #16161a;
+      border-bottom: 1px solid #2d2d3a;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-weight: 600;
+      letter-spacing: .4px;
+    }
+    .badge-legal { background: #1e3a5f; color: #60a5fa; }
+    .badge-general { background: #1a2a1a; color: #4ade80; }
+
+    #status {
+      margin-left: auto;
+      font-size: 12px;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #ef4444;
+      transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    /* ── Config bar ── */
+    .config-bar {
+      padding: 8px 20px;
+      background: #12121a;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: #94a3b8;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      color: #e2e8f0;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 13px;
+      width: 220px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #60a5fa; }
+    .toggle-switch {
+      position: relative; width: 36px; height: 20px;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0;
+      background: #2d2d3a; border-radius: 20px; cursor: pointer;
+      transition: background .2s;
+    }
+    .slider::before {
+      content: "";
+      position: absolute;
+      width: 14px; height: 14px;
+      left: 3px; top: 3px;
+      background: #fff; border-radius: 50%;
+      transition: transform .2s;
+    }
+    .toggle-switch input:checked + .slider { background: #3b82f6; }
+    .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+    /* ── Main layout ── */
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #2d2d3a; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 820px; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      color: #475569;
+    }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.65;
+      font-size: 14px;
+      max-width: 100%;
+    }
+    .msg.user .bubble {
+      background: #1e3a5f;
+      color: #bfdbfe;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.assistant .bubble {
+      background: #1a1a24;
+      color: #e2e8f0;
+      border-bottom-left-radius: 4px;
+      border: 1px solid #2d2d3a;
+    }
+
+    /* Markdown inside assistant bubble */
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
+    .bubble p { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble blockquote {
+      border-left: 3px solid #3b82f6;
+      padding: 6px 12px;
+      margin: 10px 0;
+      background: #111827;
+      border-radius: 0 6px 6px 0;
+      color: #94a3b8;
+      font-style: italic;
+    }
+    .bubble code {
+      background: #0f172a;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: "Fira Code", monospace;
+      font-size: 12px;
+      color: #7dd3fc;
+    }
+    .bubble pre { background: #0f172a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+    .bubble pre code { background: none; padding: 0; }
+
+    /* Citation links */
+    .bubble a.legal-ref { font-size: 12px; border-radius: 4px; padding: 1px 6px; text-decoration: none; font-weight: 600; }
+    .bubble a.legal-ref.law { background: #1e3a5f; color: #60a5fa; }
+    .bubble a.legal-ref.jurisprudence { background: #2d1a40; color: #c084fc; }
+    .bubble a:not(.legal-ref) { color: #60a5fa; }
+
+    /* Typing indicator */
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px;
+      background: #475569;
+      border-radius: 50%;
+      animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-6px); }
+    }
+
+    /* ── Sources sidebar ── */
+    #sources-panel {
+      width: 280px;
+      border-left: 1px solid #1e1e2e;
+      overflow-y: auto;
+      background: #12121a;
+      display: flex;
+      flex-direction: column;
+    }
+    #sources-panel::-webkit-scrollbar { width: 4px; }
+    #sources-panel::-webkit-scrollbar-thumb { background: #2d2d3a; }
+    .sources-header {
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .6px;
+      text-transform: uppercase;
+      color: #475569;
+      border-bottom: 1px solid #1e1e2e;
+      position: sticky; top: 0;
+      background: #12121a;
+    }
+    #sources-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .source-card {
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .source-card .s-type {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-bottom: 5px;
+      text-transform: uppercase;
+    }
+    .s-type.law { background: #1e3a5f; color: #60a5fa; }
+    .s-type.jurisprudence { background: #2d1a40; color: #c084fc; }
+    .s-type.default { background: #1e2a1e; color: #4ade80; }
+    .source-card .s-title { color: #e2e8f0; font-weight: 600; margin-bottom: 3px; }
+    .source-card .s-year { color: #64748b; font-size: 11px; }
+    .source-card .s-snippet {
+      color: #94a3b8;
+      margin-top: 5px;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .source-card a { color: #60a5fa; font-size: 11px; text-decoration: none; }
+    .source-card a:hover { text-decoration: underline; }
+    #sources-empty {
+      padding: 24px 16px;
+      color: #475569;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    /* ── Input area ── */
+    .input-area {
+      padding: 16px 20px;
+      border-top: 1px solid #1e1e2e;
+      background: #12121a;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    #input {
+      flex: 1;
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      color: #e2e8f0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      resize: none;
+      min-height: 42px;
+      max-height: 160px;
+      line-height: 1.5;
+      font-family: inherit;
+    }
+    #input:focus { outline: none; border-color: #3b82f6; }
+    #input::placeholder { color: #475569; }
+    #send-btn {
+      background: #2563eb;
+      border: none;
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+      white-space: nowrap;
+    }
+    #send-btn:hover { background: #1d4ed8; }
+    #send-btn:disabled { background: #1e2a40; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Legal AI Chat</h1>
+  <span class="badge badge-legal" id="persona-badge">⚖ Legal Mode</span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>
+    Server:
+    <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <label>
+    <span class="toggle-switch">
+      <input type="checkbox" id="legal-toggle" checked />
+      <span class="slider"></span>
+    </span>
+    Legal persona
+  </label>
+</div>
+
+<div class="main">
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">Legal AI</span>
+      <div class="bubble">
+        Hello! I'm your <strong>Philippine Legal AI Assistant</strong>. Ask me anything about Philippine law — cases, statutes, legal consequences, document drafting, or lawyer bookings.<br><br>
+        Prefix your message with <code>[legal ai]</code> or toggle <em>Legal persona</em> above to activate structured ALAC analysis with cited sources.
+      </div>
+    </div>
+  </div>
+
+  <div id="sources-panel">
+    <div class="sources-header">Sources</div>
+    <div id="sources-list">
+      <div id="sources-empty">Sources from legal searches will appear here.</div>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <textarea id="input" placeholder="Ask a legal question…" rows="1"></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let sessionId = null;
+  let ws = null;
+  let currentBubble = null;
+  let currentRaw = "";
+  let isStreaming = false;
+
+  // ── Auto-resize textarea ──
+  $("input").addEventListener("input", () => {
+    const el = $("input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  // ── Server URL change → reconnect ──
+  $("server-url").addEventListener("change", connect);
+
+  // ── Legal toggle badge ──
+  $("legal-toggle").addEventListener("change", () => {
+    const on = $("legal-toggle").checked;
+    $("persona-badge").textContent = on ? "⚖ Legal Mode" : "💬 General";
+    $("persona-badge").className = "badge " + (on ? "badge-legal" : "badge-general");
+  });
+
+  // ── Init session then WebSocket ──
+  async function connect() {
+    const base = `http://${$("server-url").value}`;
+    setStatus("connecting");
+
+    try {
+      const r = await fetch(`${base}/session-id`);
+      const data = await r.json();
+      sessionId = data.session_id;
+    } catch (e) {
+      setStatus("error", "Cannot reach server");
+      return;
+    }
+
+    const wsUrl = `ws://${$("server-url").value}/chat-stream`;
+    if (ws) ws.close();
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setStatus("ok", "Connected");
+      $("send-btn").disabled = false;
+    };
+
+    ws.onclose = () => {
+      setStatus("error", "Disconnected");
+      $("send-btn").disabled = true;
+    };
+
+    ws.onerror = () => setStatus("error", "WebSocket error");
+
+    ws.onmessage = ({ data }) => handleChunk(data);
+  }
+
+  // ── Chunk handler ──
+  function handleChunk(chunk) {
+    // End of message
+    if (chunk === "__END__") {
+      if (currentBubble && currentRaw) {
+        currentBubble.innerHTML = marked.parse(currentRaw);
+        applyLegalLinks(currentBubble);
+      }
+      currentBubble = null;
+      currentRaw = "";
+      isStreaming = false;
+      $("send-btn").disabled = false;
+      removeTyping();
+      return;
+    }
+
+    // Sources
+    if (chunk.startsWith("[Sources] ")) {
+      try {
+        const sources = JSON.parse(chunk.slice(10));
+        renderSources(sources);
+      } catch {}
+      return;
+    }
+
+    // HITL pending approval (not used in legal mode but handle gracefully)
+    if (chunk.startsWith("{") && chunk.includes("pending_approval")) {
+      try {
+        const ev = JSON.parse(chunk);
+        if (ev.status === "pending_approval") {
+          appendSystem(`⏳ Tool <strong>${ev.tool_name}</strong> needs approval. (HITL not active in legal mode)`);
+          return;
+        }
+      } catch {}
+    }
+
+    // Tool execution notice
+    if (chunk.startsWith("[Tool]")) {
+      appendSystem(chunk);
+      return;
+    }
+
+    // Error
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${chunk}</span>`);
+      isStreaming = false;
+      $("send-btn").disabled = false;
+      removeTyping();
+      return;
+    }
+
+    // Regular content — stream into bubble
+    if (!currentBubble) {
+      currentBubble = createAssistantBubble();
+    }
+    removeTyping();
+    currentRaw += chunk;
+    // Live preview (raw text until __END__ for final markdown render)
+    currentBubble.textContent = currentRaw;
+    scrollBottom();
+  }
+
+  // ── Send message ──
+  function send() {
+    const text = $("input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+    const legalOn = $("legal-toggle").checked;
+    const payload = legalOn && !text.startsWith("[legal ai]")
+      ? `[legal ai] ${text}`
+      : text;
+
+    appendUserMsg(text);
+    clearSources();
+    $("input").value = "";
+    $("input").style.height = "auto";
+    $("send-btn").disabled = true;
+    isStreaming = true;
+    appendTyping();
+
+    ws.send(JSON.stringify({ type: "chat", session_id: sessionId, user_input: payload }));
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  // ── DOM helpers ──
+  function appendUserMsg(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = `<span class="msg-label">You</span><div class="bubble">${escHtml(text)}</div>`;
+    $("messages").appendChild(div);
+    scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">Legal AI</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap);
+    scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant" ;
+    wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">Legal AI</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap);
+    scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:#475569;padding:4px 8px;align-self:center;";
+    div.innerHTML = html;
+    $("messages").appendChild(div);
+    scrollBottom();
+  }
+
+  function scrollBottom() {
+    const el = $("messages");
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  // ── Citation link styling ──
+  function applyLegalLinks(el) {
+    el.querySelectorAll("a").forEach(a => {
+      const text = a.textContent;
+      if (text.endsWith(" Law")) { a.classList.add("legal-ref","law"); }
+      else if (text.endsWith(" Jurisprudence")) { a.classList.add("legal-ref","jurisprudence"); }
+    });
+  }
+
+  // ── Sources panel ──
+  function renderSources(sources) {
+    const list = $("sources-list");
+    list.innerHTML = "";
+    if (!sources || !sources.length) {
+      list.innerHTML = '<div id="sources-empty">No sources found.</div>';
+      return;
+    }
+    sources.forEach(s => {
+      const typeRaw = (s.category || s.type || "").toLowerCase();
+      const typeClass = typeRaw.includes("statute") || typeRaw.includes("law")
+        ? "law"
+        : typeRaw.includes("case") || typeRaw.includes("juris")
+        ? "jurisprudence"
+        : "default";
+      const typeLabel = typeClass === "law" ? "Law" : typeClass === "jurisprudence" ? "Jurisprudence" : typeRaw || "Document";
+      const snippet = s.snippet ? `<div class="s-snippet">${escHtml(s.snippet.slice(0,200))}</div>` : "";
+      const link = s.source_url ? `<a href="${escHtml(s.source_url)}" target="_blank">View source ↗</a>` : "";
+      const card = document.createElement("div");
+      card.className = "source-card";
+      card.innerHTML = `
+        <span class="s-type ${typeClass}">${typeLabel}</span>
+        <div class="s-title">${escHtml(s.title || "Untitled")}</div>
+        <div class="s-year">${s.year || ""}</div>
+        ${snippet}
+        ${link}
+      `;
+      list.appendChild(card);
+    });
+  }
+
+  function clearSources() {
+    $("sources-list").innerHTML = '<div id="sources-empty">Searching…</div>';
+  }
+
+  // ── Status ──
+  function setStatus(state, label) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  // ── Boot ──
+  connect();
+</script>
+</body>
+</html>
