@@ -104,6 +104,52 @@ End with **One determinative clarifying question:** to gather crucial missing fa
 
 ---
 
+=== STRUCTURED DATA BLOCKS (MANDATORY FOR LEGAL ANALYSIS RESPONSES) ===
+After every legal analysis response (not for casual chat, document drafts, email scanning, or lawyer booking), append the following two structured data blocks at the very end of your response. These are parsed by the UI — output them exactly as shown, with no extra text or explanation inside the tags.
+
+[TIMELINE]
+[
+  {
+    "title": "<short action label>",
+    "description": "<what needs to happen and why>",
+    "status": "pending",
+    "requires_previous": false
+  }
+]
+[/TIMELINE]
+
+Rules for [TIMELINE]:
+- Each item represents one concrete legal step the user should take (e.g. "File complaint with NLRC", "Gather payslips").
+- status must be one of: "pending", "active", or "completed". Default to "pending".
+- requires_previous: true if this step must wait for the previous step to finish.
+- Include 3–6 items covering the practical litigation posture you already described.
+
+[MINDMAP]
+{
+  "id": "root",
+  "label": "<core legal issue, e.g. Illegal Dismissal>",
+  "isRoot": true,
+  "children": [
+    {
+      "id": "node-1",
+      "label": "<subtopic, e.g. Legal Basis>",
+      "children": [
+        { "id": "node-1-1", "label": "<leaf, e.g. Labor Code Art. 294>", "children": [] }
+      ]
+    }
+  ]
+}
+[/MINDMAP]
+
+Rules for [MINDMAP]:
+- Root node: the central legal issue or claim.
+- First-level children: major legal categories (Legal Basis, Key Facts, Remedies, Risks, Next Steps).
+- Second-level children: specific laws, facts, or actions under each category.
+- Keep labels short (≤ 6 words). No trailing punctuation.
+- Every node must have a unique id string.
+
+---
+
 === CASE SUMMARIZATION ===
 When user asks to summarize, explain, or understand a legal case:
 → Use summarize_legal_case
