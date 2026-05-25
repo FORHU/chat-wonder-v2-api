@@ -287,6 +287,7 @@ def _search_results_to_source_metadata(results: list) -> list:
     return [
         {
             "type": "legal_document",
+            "item_id": str(r.get("item_id") or "").strip() or None,
             "title": r.get("title"),
             "category": r.get("metadata", {}).get("category") or r.get("type"),
             "bucket_slug": r.get("metadata", {}).get("bucket_slug"),
@@ -631,7 +632,7 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
 
         # HITL gate: emit pending_approval event and stop streaming
         if not _context.auto_approval:
-            yield f"\n__HITL__{json.dumps({'function_call': function_call, 'messages': messages, 'tools': [t['function']['name'] for t in (tools or [])]})}"
+            yield f"__HITL__{json.dumps({'function_call': function_call, 'messages': messages, 'tools': [t['function']['name'] for t in (tools or [])]})}"
             return
 
         try:
@@ -1086,6 +1087,7 @@ async def chat_stream(websocket: WebSocket):
             full_response = ""
             _ws_t_start = time.time()
             _was_auto = _context.auto_approval
+            end_sent = False
             if persona == "legal":
                 _context.auto_approval = True
             try:
@@ -1122,13 +1124,20 @@ async def chat_stream(websocket: WebSocket):
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
-                    await websocket.send_text(_context.__END__)
+                await websocket.send_text(_context.__END__)
+                end_sent = True
 
             except Exception as e:
                 await websocket.send_text(f"[Error] {e}")
                 await websocket.send_text(_context.__END__)
+                end_sent = True
             finally:
                 _context.auto_approval = _was_auto
+                if not end_sent:
+                    try:
+                        await websocket.send_text(_context.__END__)
+                    except Exception:
+                        pass
 
     except WebSocketDisconnect:
         logging.debug("WebSocket connection closed.")
