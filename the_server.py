@@ -25,7 +25,7 @@ import pandas as pd
 import tiktoken
 import langid
 from openai import OpenAI
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -41,6 +41,7 @@ from legal_rag.router import (
     router as legal_rag_router,
     get_cached_db as legal_rag_get_cached_db,
 )
+from legal_rag.markdown_format import format_document_combined, prepend_title_heading
 import s3_storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -326,17 +327,29 @@ def format_legal_citation_links(text: str) -> str:
     return text
 
 def repair_legal_source_links(text: str, search_results) -> str:
+    """Replace broken /sources/... hrefs with numeric legal document ids from search results."""
     if not text or not isinstance(text, str) or not search_results:
         return text
-    source_ids = [str(r.get("item_id") or "").strip() for r in search_results if r.get("item_id")]
+    source_ids = []
+    for r in search_results:
+        raw = str(r.get("item_id") or r.get("id") or "").strip()
+        if raw.isdigit():
+            source_ids.append(raw)
     if not source_ids:
         return text
-    broken = re.compile(r"/sources/(?:\{[^)}]*\}|<[^>]*>|ACTUAL_ITEM_ID_HERE)?(?=[)\"\\s])")
+
+    # Match /sources/{segment} in markdown links; keep valid numeric ids unchanged.
+    broken = re.compile(r"/sources/([^)\s\"\]]*)")
     idx = [0]
+
     def repl(m):
+        segment = m.group(1)
+        if segment.isdigit():
+            return m.group(0)
         replacement = source_ids[min(idx[0], len(source_ids) - 1)]
         idx[0] += 1
         return f"/sources/{replacement}"
+
     return broken.sub(repl, text)
 
 # ---------------------------------------------------------------------------
@@ -1446,6 +1459,7 @@ async def api_legal_case_detail(item_id: str):
             "title": doc.get("title"),
             "url": doc.get("source_url"),
             "text_content": doc.get("full_text") or doc.get("summary") or doc.get("concise_summary") or "",
+            "formatted_markdown": doc.get("formatted_markdown"),
             "gr_number": metadata.get("gr_number", ""),
             "law_number": metadata.get("law_number", ""),
             "date": metadata.get("date", ""),
@@ -1456,6 +1470,190 @@ async def api_legal_case_detail(item_id: str):
         raise
     except Exception as e:
         logging.error(f"[Legal Case Detail] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _format_and_store_legal_markdown(
+    document_id: int,
+    force: bool = False,
+    generate_title: bool = True,
+) -> dict:
+    db = legal_rag_get_cached_db()
+    if db is None:
+        from legal_rag.router import _services
+        db = _services()[1]
+
+    doc = db.get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is required")
+
+    existing_title = (doc.get("title") or "").strip() or None
+    existing_md = (doc.get("formatted_markdown") or "").strip()
+    if existing_md and not force and (existing_title or not generate_title):
+        return {
+            "item_id": str(document_id),
+            "title": existing_title,
+            "title_generated": False,
+            "formatted_markdown": existing_md,
+            "cached": True,
+        }
+
+    source_text = doc.get("full_text") or doc.get("summary") or doc.get("concise_summary") or ""
+    if not str(source_text).strip():
+        raise HTTPException(status_code=400, detail="Document has no text to format")
+
+    model = os.getenv("LEGAL_CHAT_MODEL", "gpt-4o-mini")
+    title, markdown, title_generated = format_document_combined(
+        str(source_text),
+        existing_title=existing_title,
+        generate_title=generate_title,
+        category=doc.get("category"),
+        case_no=doc.get("case_no"),
+        openai_api_key=api_key,
+        model=model,
+        openai_base_url=os.getenv("OPENAI_BASE_URL"),
+    )
+    if not markdown:
+        raise HTTPException(status_code=500, detail="Formatter returned empty markdown")
+
+    if title_generated and title:
+        db.set_document_title(document_id, title)
+
+    markdown = prepend_title_heading(markdown, title or existing_title)
+    db.set_formatted_markdown(document_id, markdown)
+    return {
+        "item_id": str(document_id),
+        "title": title or existing_title,
+        "title_generated": title_generated,
+        "formatted_markdown": markdown,
+        "cached": False,
+    }
+
+
+@app.post("/api/legal/format-document/{item_id}")
+async def api_format_legal_document(
+    item_id: str,
+    force: bool = Query(False),
+    generate_title: bool = Query(True, description="Generate documents.title when empty"),
+):
+    """Generate structured markdown (and title when missing) for a legal document."""
+    try:
+        if not str(item_id).isdigit():
+            raise HTTPException(status_code=400, detail="item_id must be a numeric legal document id.")
+        return _format_and_store_legal_markdown(int(item_id), force=force, generate_title=generate_title)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[Legal Format Document] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _list_document_ids_to_format(force: bool = False, limit: int | None = 50, all_docs: bool = False) -> list[int]:
+    db = legal_rag_get_cached_db()
+    if db is None:
+        from legal_rag.router import _services
+        db = _services()[1]
+
+    limit_clause = "" if all_docs else "LIMIT %s"
+    params: tuple = () if all_docs else (limit,)
+    if force:
+        sql = f"""
+            SELECT id FROM documents
+            WHERE full_text IS NOT NULL AND length(trim(full_text)) > 100
+            ORDER BY id
+            {limit_clause}
+        """
+    else:
+        sql = f"""
+            SELECT id FROM documents
+            WHERE formatted_markdown IS NULL
+              AND full_text IS NOT NULL
+              AND length(trim(full_text)) > 100
+            ORDER BY id
+            {limit_clause}
+        """
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [row[0] for row in cur.fetchall()]
+
+
+@app.post("/api/legal/format-documents")
+async def api_format_legal_documents(
+    force: bool = Query(False, description="Reformat even when formatted_markdown already exists"),
+    limit: int = Query(50, ge=1, le=5000, description="Max documents per request (ignored when all=true)"),
+    all_docs: bool = Query(False, alias="all", description="Process every matching document"),
+    delay: float = Query(0.5, ge=0, le=10, description="Seconds between OpenAI calls"),
+    generate_title: bool = Query(True, description="Generate documents.title when empty"),
+):
+    """
+    Batch-format documents into formatted_markdown.
+
+    curl examples:
+      curl -X POST 'http://localhost:8000/api/legal/format-documents?limit=10'
+      curl -X POST 'http://localhost:8000/api/legal/format-documents?all=true'
+      curl -X POST 'http://localhost:8000/api/legal/format-document/150'
+    """
+    try:
+        doc_ids = _list_document_ids_to_format(force=force, limit=None if all_docs else limit, all_docs=all_docs)
+        if not doc_ids:
+            return {
+                "total": 0,
+                "ok": 0,
+                "failed": 0,
+                "cached": 0,
+                "formatted": 0,
+                "titles_generated": 0,
+                "errors": [],
+                "message": "No documents to format",
+            }
+
+        ok = 0
+        failed = 0
+        cached = 0
+        formatted = 0
+        titles_generated = 0
+        errors: list[dict] = []
+
+        for doc_id in doc_ids:
+            try:
+                result = _format_and_store_legal_markdown(
+                    doc_id, force=force, generate_title=generate_title
+                )
+                ok += 1
+                if result.get("cached"):
+                    cached += 1
+                else:
+                    formatted += 1
+                if result.get("title_generated"):
+                    titles_generated += 1
+            except HTTPException as exc:
+                failed += 1
+                errors.append({"item_id": str(doc_id), "detail": exc.detail})
+            except Exception as exc:
+                failed += 1
+                errors.append({"item_id": str(doc_id), "detail": str(exc)})
+
+            if delay > 0:
+                time.sleep(delay)
+
+        return {
+            "total": len(doc_ids),
+            "ok": ok,
+            "failed": failed,
+            "cached": cached,
+            "formatted": formatted,
+            "titles_generated": titles_generated,
+            "errors": errors[:50],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[Legal Format Documents] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
