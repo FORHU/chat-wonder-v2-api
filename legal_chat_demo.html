@@ -328,7 +328,7 @@
       <span class="msg-label">Legal AI</span>
       <div class="bubble">
         Hello! I'm your <strong>Philippine Legal AI Assistant</strong>. Ask me anything about Philippine law — cases, statutes, legal consequences, document drafting, or lawyer bookings.<br><br>
-        Prefix your message with <code>[legal ai]</code> or toggle <em>Legal persona</em> above to activate structured ALAC analysis with cited sources.
+        Toggle <em>Legal persona</em> above to activate structured ALAC analysis with cited sources (the tag is added automatically; same contract as law-ph).
       </div>
     </div>
   </div>
@@ -413,8 +413,13 @@
     // End of message
     if (chunk === "__END__") {
       if (currentBubble && currentRaw) {
-        currentBubble.innerHTML = marked.parse(currentRaw);
-        applyLegalLinks(currentBubble);
+        try {
+          currentBubble.innerHTML = marked.parse(currentRaw);
+          applyLegalLinks(currentBubble);
+        } catch (e) {
+          console.error("[demo] markdown render failed:", e);
+          currentBubble.textContent = currentRaw;
+        }
       }
       currentBubble = null;
       currentRaw = "";
@@ -470,15 +475,20 @@
     scrollBottom();
   }
 
+  // Canonical legal tag at demo boundary only (matches law-ph stream proxy).
+  function withLegalTag(input) {
+    const lower = input.toLowerCase();
+    const stripped = lower.startsWith("[legal ai]") ? input.slice(10).trimStart() : input;
+    return `[legal ai] ${stripped}`;
+  }
+
   // ── Send message ──
   function send() {
     const text = $("input").value.trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
 
     const legalOn = $("legal-toggle").checked;
-    const payload = legalOn && !text.startsWith("[legal ai]")
-      ? `[legal ai] ${text}`
-      : text;
+    const userInput = legalOn ? withLegalTag(text) : text;
 
     appendUserMsg(text);
     clearSources();
@@ -488,7 +498,7 @@
     isStreaming = true;
     appendTyping();
 
-    ws.send(JSON.stringify({ type: "chat", session_id: sessionId, user_input: payload }));
+    ws.send(JSON.stringify({ type: "chat", session_id: sessionId, user_input: userInput }));
   }
 
   $("send-btn").addEventListener("click", send);

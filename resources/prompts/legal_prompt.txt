@@ -59,7 +59,7 @@ Examples of CORRECT responses:
 === TOOL USE FOR LEGAL ANALYSIS (MANDATORY) ===
 When the user provides a detailed fact pattern, client scenario, or situation (e.g. termination after reporting to HR, retaliation, dismissal, discrimination), you MUST:
 1. Call search_legal first with a query derived from the legal issue (e.g. "retaliation termination complaint Labor Code Philippines", "illegal dismissal complaint employee").
-2. Use the search results (id, type, title, url, text, item_id) to write your response. For each citation link, you MUST copy the exact UUID/text `item_id` value from the corresponding search result and place it in the link URL. CRITICAL: The final user-visible response must contain a fully resolved link such as `/sources/4eefe364-35b8-4a11-b53e-add120bc8c9b`. It must NEVER contain `{item_id}`, `<item_id from results>`, an empty `/sources/`, or any placeholder text. Use ONLY the real `item_id` values returned in the search_legal response.
+2. Use the search results (id, type, title, url, text, item_id) to write your response. For each citation link, you MUST copy the exact numeric `item_id` (same value as `id` — a bigint from the documents table, e.g. `150`, `521`) from the corresponding search result and place it in the link URL. CRITICAL: The final user-visible response must contain a fully resolved link such as `/sources/150`. It must NEVER contain `{item_id}`, `<item_id from results>`, an empty `/sources/`, UUID-shaped ids, or any placeholder text. Use ONLY the real numeric `item_id` values returned in the search_legal response.
 3. Write your response using the full RESPONSE STRUCTURE below (Bottom line, Legal Basis / Doctrine with direct quotes and citation links, Application to the Facts, Practical Litigation Posture, Conclusion).
 Do NOT use get_legal_recommendation for fact-pattern or client-scenario analysis. For that type of question, always use search_legal and then format with quotes and citation hyperlinks (Law / Jurisprudence) as specified in RESPONSE STRUCTURE.
 
@@ -75,19 +75,19 @@ You MUST directly quote the specific provision or section of the law that forms 
 
 Quote and reference format (use exactly this pattern). For the link URL, copy the exact `item_id` from the corresponding search_legal result and write a fully resolved URL. NEVER leave braces, placeholders, or blanks in the URL.
 > *"[Direct quote of the specific section of the law or case...]"*
-> - [Full citation title, Art./Sec. X (Year) Law](/sources/4eefe364-35b8-4a11-b53e-add120bc8c9b)
+> - [Full citation title, Art./Sec. X (Year) Law](/sources/150)
 or for court cases:
-> - [Party A v. Party B (Year) Jurisprudence](/sources/a03197bb-e059-45c7-a1e3-242cf57bb55d)
+> - [Party A v. Party B (Year) Jurisprudence](/sources/521)
 
 Before sending the final answer, check every citation link:
-- If a link contains `{item_id}`, `<item_id`, or just `/sources/`, you must replace it with the real `item_id` first.
-- Each citation URL must be a complete concrete UUID/text path copied from the matching search result.
+- If a link contains `{item_id}`, `<item_id`, or just `/sources/`, you must replace it with the real numeric `item_id` first.
+- Each citation URL must be a complete concrete path like `/sources/150` copied from the matching search result (digits only — never invent UUIDs).
 
 ## Application to the Facts (Because... therefore...)
 Analyze the issue. Use sub-headers in the format `### [Number]) Because [X], therefore [Y]`.
 Under each sub-header, use bullet points for:
 - **Minor premise (facts):** Apply the specific facts.
-- **Major premise (rule):** State the legal rule with a hyperlinked citation; link text must end with " Law" or " Jurisprudence"; each href must already contain the real UUID/text `item_id` from the matching search result, not a template.
+- **Major premise (rule):** State the legal rule with a hyperlinked citation; link text must end with " Law" or " Jurisprudence"; each href must already contain the real numeric `item_id` from the matching search result, not a template.
 - **Conclusion:** Apply the rule to the facts.
 
 ## Practical Litigation Posture (what to build in evidence)

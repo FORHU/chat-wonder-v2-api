@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS documents (
     concise_summary TEXT,
     full_text TEXT,
     full_text_source TEXT,
+    formatted_markdown TEXT,
     s3_json_path TEXT NOT NULL,
     s3_manifest_path TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -89,6 +90,33 @@ class LegalDatabase:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
                 cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash TEXT")
+                cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS formatted_markdown TEXT")
+            conn.commit()
+
+    def set_formatted_markdown(self, document_id: int, markdown: str) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE documents
+                    SET formatted_markdown = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (markdown, document_id),
+                )
+            conn.commit()
+
+    def set_document_title(self, document_id: int, title: str) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE documents
+                    SET title = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (title, document_id),
+                )
             conn.commit()
 
     def create_ingestion_run(self, source_type: str, source_ref: str) -> int:
