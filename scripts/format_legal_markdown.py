@@ -33,11 +33,17 @@ if os.path.exists(user_env):
 from legal_rag.db import LegalDatabase
 from legal_rag.markdown_format import format_document_combined, prepend_title_heading
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    print("format_legal_markdown: starting", flush=True)
     parser = argparse.ArgumentParser(description="Format legal documents to markdown")
     parser.add_argument("--limit", type=int, default=50, help="Max documents per run (ignored with --all)")
     parser.add_argument("--all", action="store_true", help="Process every matching document (no LIMIT)")
@@ -49,6 +55,11 @@ def main() -> None:
         action="store_true",
         help="Skip AI title generation for documents with empty title",
     )
+    parser.add_argument(
+        "--count-only",
+        action="store_true",
+        help="Only print how many documents would be processed, then exit",
+    )
     args = parser.parse_args()
 
     db_url = os.getenv("LEGAL_DATABASE_URL", "")
@@ -59,6 +70,8 @@ def main() -> None:
     if not api_key:
         logger.error("OPENAI_API_KEY is not set")
         sys.exit(1)
+
+    logger.info("DB configured: yes | OPENAI_API_KEY: yes | --all=%s --force=%s", args.all, args.force)
 
     db = LegalDatabase(db_url)
     db.ensure_schema()
@@ -89,8 +102,17 @@ def main() -> None:
                     cur.execute(sql, () if args.all else (args.limit,))
                 doc_ids = [row[0] for row in cur.fetchall()]
 
+    if args.count_only:
+        logger.info("Would process %s document(s).", len(doc_ids))
+        if doc_ids[:5]:
+            logger.info("First ids: %s", doc_ids[:5])
+        return
+
     if not doc_ids:
-        logger.info("No documents to format.")
+        logger.info(
+            "No documents to format (all may already have formatted_markdown). "
+            "Use --force to re-run, or check with --count-only."
+        )
         return
 
     logger.info("Formatting %s document(s)...", len(doc_ids))
