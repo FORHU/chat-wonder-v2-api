@@ -242,7 +242,7 @@ def process_persona(user_input: str):
     if user_input.lower().startswith("[legal ai]"):
         persona = "legal"
         user_input = user_input[10:].strip()
-        legal_whitelist = ["search_legal", "summarize_legal_case", "get_legal_recommendation", "generate_legal_document"]
+        legal_whitelist = ["search_legal", "summarize_legal_case"]
         filtered_tools = [t for t in _context.fun_manifest if t["function"]["name"] in legal_whitelist]
         try:
             with open("resources/prompts/legal_prompt.txt", "r", encoding="utf-8") as f:
@@ -275,6 +275,36 @@ def process_persona(user_input: str):
 # ---------------------------------------------------------------------------
 # Legal RAG persona flow
 # ---------------------------------------------------------------------------
+
+def _generate_structured_data(legal_response: str, state) -> dict | None:
+    """Second lightweight LLM call to produce TIMELINE and MINDMAP from the completed legal analysis."""
+    try:
+        prompt = (
+            "You are a legal UI data generator. Based on the legal analysis below, "
+            "return ONLY a JSON object with two keys: 'timeline' and 'mindMap'.\n\n"
+            "timeline: array of 3–6 concrete legal steps the user should take.\n"
+            "Each item: {\"title\": str, \"description\": str, \"status\": \"pending\", \"requires_previous\": bool}\n\n"
+            "mindMap: tree rooted at the core legal issue.\n"
+            "Shape: {\"id\": \"root\", \"label\": str, \"isRoot\": true, \"children\": [{\"id\": str, \"label\": str, \"children\": [...]}]}\n"
+            "First-level children: Legal Basis, Key Facts, Remedies, Risks, Next Steps. Labels ≤ 6 words.\n\n"
+            f"Legal analysis (first 2500 chars):\n{legal_response[:2500]}"
+        )
+        t0 = time.time()
+        completion = state.openai_client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+        )
+        raw = completion.choices[0].message.content or ""
+        logging.info("_generate_structured_data %.2fs", time.time() - t0)
+        return json.loads(raw)
+    except Exception as e:
+        logging.warning("_generate_structured_data failed: %s", e)
+        return None
+
 
 def run_legal_persona_ask(query: str) -> dict:
     request = RouterLegalAskRequest(query=query)
@@ -625,6 +655,7 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
     funcall_chains = []
     function_outputs = []
     full_response = ""
+    _chain_start = time.time()
 
     def perform_chat(msgs):
         args = {
@@ -639,10 +670,12 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
             args["function_call"] = "auto"
         return state.openai_client.chat.completions.create(**args)
 
-    for _ in range(max_chains):
+    for iteration in range(max_chains):
         function_call = {"name": None, "arguments": ""}
+        _iter_start = time.time()
         stream_resp = perform_chat(messages)
         last_response = ""
+        _first_token_time = None
 
         for chunk in stream_resp:
             delta = chunk.choices[0].delta
@@ -653,9 +686,24 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
                 if fc.arguments:
                     function_call["arguments"] += fc.arguments
             elif hasattr(delta, "content") and delta.content:
+                if _first_token_time is None:
+                    _first_token_time = time.time()
                 part = delta.content.replace("~", "-")
                 last_response += part
                 yield part
+
+        _iter_elapsed = time.time() - _iter_start
+        if function_call["name"]:
+            logging.info(
+                "chain[%d] LLM→tool=%s llm=%.2fs session=%s",
+                iteration, function_call["name"], _iter_elapsed, session_id,
+            )
+        else:
+            ttft_iter = (_first_token_time - _iter_start) if _first_token_time else 0
+            logging.info(
+                "chain[%d] LLM→text chars=%d ttft=%.2fs total=%.2fs session=%s",
+                iteration, len(last_response), ttft_iter, _iter_elapsed, session_id,
+            )
 
         if last_response.strip():
             full_response = last_response.strip()
@@ -681,7 +729,12 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
         yield f"[Tool] Executing `{function_call['name']}`...\n"
 
+        _tool_start = time.time()
         result = execute_function_call(function_call, session_id=session_id)
+        logging.info(
+            "chain[%d] tool=%s exec=%.2fs session=%s",
+            iteration, function_call["name"], time.time() - _tool_start, session_id,
+        )
         if result is None:
             continue
         function_outputs.append((function_call["name"], result))
@@ -1119,6 +1172,7 @@ async def chat_stream(websocket: WebSocket):
 
             full_response = ""
             _ws_t_start = time.time()
+            _ws_t_first_chunk = None
             _was_auto = _context.auto_approval
             end_sent = False
             if persona in ("legal", "garment"):
@@ -1143,6 +1197,8 @@ async def chat_stream(websocket: WebSocket):
                             "arguments": args_parsed,
                         }))
                         break
+                    if _ws_t_first_chunk is None:
+                        _ws_t_first_chunk = time.time()
                     await websocket.send_text(chunk)
                     full_response += chunk
 
@@ -1157,10 +1213,29 @@ async def chat_stream(websocket: WebSocket):
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
+                _ws_t_end = time.time()
+                ttft = (_ws_t_first_chunk - _ws_t_start) if _ws_t_first_chunk else 0
+                logging.info(
+                    "/chat-stream [%s] ttft=%.2fs total=%.2fs chars=%d session=%s",
+                    persona, ttft, _ws_t_end - _ws_t_start, len(full_response), session_id,
+                )
+                # Send __END__ now so the client unlocks immediately, then generate
+                # timeline/mindmap in a background thread and send before [DONE].
                 await websocket.send_text(_context.__END__)
+                if persona == "legal" and full_response:
+                    t_sd = time.time()
+                    structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
+                    logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
+                    if structured:
+                        await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
+                await websocket.send_text("[DONE]")
                 end_sent = True
 
             except Exception as e:
+                logging.warning(
+                    "/chat-stream [%s] ERROR after %.2fs session=%s: %s",
+                    persona, time.time() - _ws_t_start, session_id, e,
+                )
                 await websocket.send_text(f"[Error] {e}")
                 await websocket.send_text(_context.__END__)
                 end_sent = True

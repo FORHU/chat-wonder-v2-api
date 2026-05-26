@@ -11,6 +11,7 @@ from datetime import datetime, date
 
 # Simple in-memory cache with TTL
 _search_cache = {}
+_logger = logging.getLogger(__name__)
 CACHE_TTL_SECONDS = 30
 
 # Garments API
@@ -228,13 +229,21 @@ def search_legal(query: str, page: int = 1, limit: int = 5, content_types: list 
         cached = _search_cache[cache_key]
         if time.time() - cached["timestamp"] < CACHE_TTL_SECONDS:
             cached["result"]["cached"] = True
+            _logger.info("search_legal cache HIT query=%r", query[:80])
             return cached["result"]
         del _search_cache[cache_key]
 
     try:
         from legal_rag.router import legal_search as legal_rag_search
 
-        rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit))
+        t0 = time.perf_counter()
+        category = content_types[0] if content_types else None
+        rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), category=category)
+        # If category filter returns no results, retry without it
+        if category and (not rag_payload or not rag_payload.get("results")):
+            _logger.info("search_legal category=%r returned 0 results, retrying unfiltered", category)
+            rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit))
+        _logger.info("search_legal MISS query=%r total=%.0fms", query[:80], (time.perf_counter() - t0) * 1000)
         rag_results = rag_payload.get("results", []) if isinstance(rag_payload, dict) else []
 
         mapped = []
