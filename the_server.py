@@ -250,6 +250,26 @@ def process_persona(user_input: str):
         except Exception as e:
             logging.error(f"Failed to load legal_prompt.txt: {e}")
 
+    elif user_input.lower().startswith("[garment]"):
+        persona = "garment"
+        user_input = user_input[9:].strip()
+        garment_whitelist = ["recommend_garments"]
+        filtered_tools = [t for t in _context.fun_manifest if t["function"]["name"] in garment_whitelist]
+        addendum_override = (
+            "GARMENT ASSISTANT MODE\n\n"
+            "You are a helpful personal stylist and fashion advisor. "
+            "Use the recommend_garments function to fetch weather data and garment recommendations. "
+            "If the user's gender is not clear from context, ask for it before calling the function.\n\n"
+            "When presenting results, format each set exactly like this:\n"
+            "## Set 1 — [Vibe Name]\n"
+            "*[trend_note]*\n\n"
+            "For each garment in the set, write its name in bold then show its image on the next line:\n"
+            "**[Garment Name]** — [reason]\n"
+            "![Garment Name](imageUrl)\n\n"
+            "Repeat the ## Set N — [Vibe] header for each additional set. "
+            "Keep the tone friendly and conversational. Mention the weather context briefly at the start."
+        )
+
     return persona, user_input, filtered_tools, addendum_override
 
 # ---------------------------------------------------------------------------
@@ -798,9 +818,9 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="API key is required.")
     init_openai_client(state, _context.openai_api_key)
 
-    # Normal path with optional HITL (legal persona always auto-approves its tools)
+    # Normal path with optional HITL (legal and garment personas always auto-approve their tools)
     _was_auto = _context.auto_approval
-    if persona == "legal":
+    if persona in ("legal", "garment"):
         _context.auto_approval = True
     try:
         result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override)
@@ -1101,7 +1121,7 @@ async def chat_stream(websocket: WebSocket):
             _ws_t_start = time.time()
             _was_auto = _context.auto_approval
             end_sent = False
-            if persona == "legal":
+            if persona in ("legal", "garment"):
                 _context.auto_approval = True
             try:
                 for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override):

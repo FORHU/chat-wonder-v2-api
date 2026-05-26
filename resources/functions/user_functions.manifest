@@ -196,5 +196,39 @@
         "required": ["document_type"]
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "recommend_garments",
+      "description": "Recommend garments for a given event, weather, and gender. Call this when the user asks what to wear, needs outfit suggestions, or uses the [garment] prefix. Fetches live weather via Open-Meteo and a real garment catalogue to produce personalized, weather-aware outfit recommendations as JSON with reasons.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gender": {
+            "type": "string",
+            "enum": ["MALE", "FEMALE"],
+            "description": "User's gender for filtering garments. Required — ask the user if not stated."
+          },
+          "event_type": {
+            "type": "string",
+            "description": "Type of event or occasion, e.g. 'formal dinner', 'casual day out', 'business meeting', 'wedding', 'beach outing'. Infer from context when possible."
+          },
+          "event_date": {
+            "type": "string",
+            "description": "Event date in YYYY-MM-DD format. Defaults to today if not provided."
+          },
+          "location": {
+            "type": "string",
+            "description": "User's location as a city name (e.g. 'Cebu City', 'BGC Taguig'), landmark, or 'lat,lon' coordinates. Defaults to Manila if not provided."
+          },
+          "sets": {
+            "type": "integer",
+            "description": "Number of distinct outfit sets to recommend. Defaults to 1. Maximum is 3. Each set has a unique vibe tied to local fashion trends. Infer from user prompt — e.g. 'give me 2 outfits' → sets=2."
+          }
+        },
+        "required": ["gender"]
+      }
+    }
   }
 ]

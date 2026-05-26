@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Garment AI Stylist</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0c0c10;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 14px 20px;
+      background: #111118;
+      border-bottom: 1px solid #22222e;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      font-weight: 600; letter-spacing: .4px;
+    }
+    .badge-garment { background: #2a1a40; color: #c084fc; }
+    .badge-general { background: #1a2a1a; color: #4ade80; }
+    #status {
+      margin-left: auto; font-size: 12px; color: #64748b;
+      display: flex; align-items: center; gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #ef4444; transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    /* ── Config bar ── */
+    .config-bar {
+      padding: 8px 20px; background: #0e0e14;
+      border-bottom: 1px solid #1a1a24;
+      display: flex; align-items: center; gap: 16px;
+      font-size: 13px; color: #94a3b8; flex-shrink: 0;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 6px;
+      padding: 4px 10px; font-size: 13px; width: 220px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #a855f7; }
+    .toggle-switch { position: relative; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; background: #252535;
+      border-radius: 20px; cursor: pointer; transition: background .2s;
+    }
+    .slider::before {
+      content: ""; position: absolute;
+      width: 14px; height: 14px; left: 3px; top: 3px;
+      background: #fff; border-radius: 50%; transition: transform .2s;
+    }
+    .toggle-switch input:checked + .slider { background: #9333ea; }
+    .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+    /* ── Main layout ── */
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1; overflow-y: auto;
+      padding: 24px 20px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #252535; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 800px; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px; font-weight: 600;
+      letter-spacing: .5px; text-transform: uppercase; color: #475569;
+    }
+    .bubble {
+      padding: 12px 16px; border-radius: 12px;
+      line-height: 1.65; font-size: 14px; max-width: 100%;
+    }
+    .msg.user .bubble { background: #2a1a40; color: #e9d5ff; border-bottom-right-radius: 4px; }
+    .msg.assistant .bubble {
+      background: #111118; color: #e2e8f0;
+      border-bottom-left-radius: 4px; border: 1px solid #22222e;
+    }
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
+    .bubble p { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble em { color: #a78bfa; }
+    .bubble a { color: #a855f7; }
+    .bubble img {
+      max-width: 110px; max-height: 110px;
+      border-radius: 8px; object-fit: cover;
+      margin: 5px 4px 4px 0; border: 1px solid #22222e;
+      vertical-align: middle;
+    }
+    .bubble blockquote {
+      border-left: 3px solid #9333ea; padding: 6px 12px; margin: 10px 0;
+      background: #0e0e14; border-radius: 0 6px 6px 0;
+      color: #94a3b8; font-style: italic;
+    }
+
+    /* Typing */
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px; background: #475569;
+      border-radius: 50%; animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-7px); }
+    }
+
+    /* ── Outfit panel ── */
+    #outfit-panel {
+      width: 310px; flex-shrink: 0;
+      border-left: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 12px 16px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: .6px; text-transform: uppercase; color: #475569;
+      border-bottom: 1px solid #1a1a24;
+      flex-shrink: 0;
+    }
+
+    /* Set tabs */
+    #set-tabs {
+      display: flex; gap: 0;
+      border-bottom: 1px solid #1a1a24;
+      background: #0e0e14;
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    #set-tabs::-webkit-scrollbar { display: none; }
+    .set-tab {
+      padding: 9px 16px;
+      font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .set-tab.active { color: #c084fc; border-bottom-color: #9333ea; }
+    .set-tab:hover:not(.active) { color: #94a3b8; }
+
+    /* Panel body */
+    #panel-body { flex: 1; overflow-y: auto; }
+    #panel-body::-webkit-scrollbar { width: 4px; }
+    #panel-body::-webkit-scrollbar-thumb { background: #252535; }
+
+    /* Weather block */
+    #weather-block {
+      margin: 12px 12px 0;
+      padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      display: none;
+    }
+    .w-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+    .w-temp { font-size: 22px; font-weight: 700; color: #e2e8f0; }
+    .w-desc { font-size: 13px; color: #7dd3fc; font-weight: 600; text-transform: capitalize; }
+    .w-location { font-size: 11px; color: #475569; margin-top: 2px; }
+    .w-note { font-size: 11px; color: #64748b; margin-top: 6px; padding-top: 6px; border-top: 1px solid #22222e; }
+
+    /* Vibe note */
+    #vibe-note {
+      margin: 10px 12px 0;
+      padding: 8px 12px;
+      background: #1a1028; border: 1px solid #3b1f5a; border-radius: 8px;
+      font-size: 11px; color: #c084fc; line-height: 1.5;
+      display: none;
+    }
+
+    /* Garment cards list */
+    #outfit-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+
+    .outfit-empty {
+      padding: 32px 16px; color: #475569; font-size: 12px;
+      text-align: center; line-height: 1.7;
+    }
+    .outfit-empty .empty-icon { font-size: 36px; margin-bottom: 10px; display: block; }
+
+    /* Garment card */
+    .garment-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color .2s, transform .15s;
+    }
+    .garment-card:hover { border-color: #7e22ce; transform: translateY(-1px); }
+    .garment-card .card-img {
+      width: 100%; height: 160px;
+      object-fit: cover; display: block; background: #1a1a24;
+    }
+    .card-img-placeholder {
+      width: 100%; height: 160px;
+      background: linear-gradient(135deg, #1a1a24, #22222e);
+      display: none; align-items: center; justify-content: center; font-size: 40px;
+    }
+    .card-body { padding: 9px 12px 11px; }
+    .card-slot {
+      font-size: 10px; font-weight: 700; letter-spacing: .4px;
+      text-transform: uppercase; color: #9333ea; margin-bottom: 4px;
+    }
+    .card-name { font-size: 12px; font-weight: 600; color: #e2e8f0; line-height: 1.4; margin-bottom: 4px; }
+    .card-reason { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+
+    /* Styling tips */
+    #tips-block {
+      margin: 4px 12px 12px;
+      padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      font-size: 11px; display: none;
+    }
+    .tips-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .5px; color: #9333ea; margin-bottom: 6px;
+    }
+    #tips-list { padding-left: 16px; }
+    #tips-list li { margin: 3px 0; color: #94a3b8; line-height: 1.5; }
+
+    /* ── Input area ── */
+    .input-area {
+      padding: 16px 20px; border-top: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 10px; padding: 10px 14px;
+      font-size: 14px; resize: none; min-height: 42px; max-height: 160px;
+      line-height: 1.5; font-family: inherit;
+    }
+    #chat-input:focus { outline: none; border-color: #9333ea; }
+    #chat-input::placeholder { color: #475569; }
+    #send-btn {
+      background: #9333ea; border: none; color: #fff;
+      border-radius: 10px; padding: 10px 20px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background .15s; white-space: nowrap;
+    }
+    #send-btn:hover { background: #7e22ce; }
+    #send-btn:disabled { background: #1a1a24; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🧥 Garment AI Stylist</h1>
+  <span class="badge badge-garment" id="persona-badge">✦ Stylist Mode</span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>
+    Server: <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <label>
+    <span class="toggle-switch">
+      <input type="checkbox" id="garment-toggle" checked />
+      <span class="slider"></span>
+    </span>
+    Garment persona
+  </label>
+</div>
+
+<div class="main">
+
+  <!-- Chat -->
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">Stylist AI</span>
+      <div class="bubble">
+        Hi! I'm your <strong>AI Personal Stylist</strong>. Tell me what you're dressing for and I'll put together complete outfits — checking live weather at your location automatically.<br><br>
+        <strong>Try:</strong><br>
+        • <em>"What should I wear to a business meeting in Cebu today? I'm a man."</em><br>
+        • <em>"Give me 2 outfit options for a casual date night in BGC. Female."</em><br>
+        • <em>"Formal wedding in Manila next week, I'm a guy, give me 3 sets."</em>
+      </div>
+    </div>
+  </div>
+
+  <!-- Outfit panel -->
+  <div id="outfit-panel">
+    <div class="panel-header">Outfit Picks</div>
+    <div id="set-tabs"></div>
+
+    <div id="panel-body">
+      <div id="weather-block">
+        <div class="w-row">
+          <span class="w-temp" id="w-temp">—</span>
+          <span class="w-desc" id="w-desc"></span>
+        </div>
+        <div class="w-location" id="w-location"></div>
+        <div class="w-note" id="w-note"></div>
+      </div>
+
+      <div id="vibe-note"></div>
+
+      <div id="outfit-list">
+        <div class="outfit-empty">
+          <span class="empty-icon">🧥</span>
+          Ask me what to wear and your outfit picks will appear here, organized by set.
+        </div>
+      </div>
+
+      <div id="tips-block">
+        <div class="tips-title">✦ Styling Tips</div>
+        <ul id="tips-list"></ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="input-area">
+  <textarea id="chat-input" rows="1"
+    placeholder='What should I wear? e.g. "2 outfit options for a wedding in Cebu Saturday, I'm a woman."'></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const CDN = /https:\/\/d1bdogktone6hj\.cloudfront\.net\/[^\s"')\]<]+/g;
+
+  let sessionId = null, ws = null;
+  let currentBubble = null, currentRaw = "", isStreaming = false;
+  let _sets = [];   // parsed sets from last response
+
+  // ── Auto-resize textarea ──
+  $("chat-input").addEventListener("input", () => {
+    const el = $("chat-input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  $("server-url").addEventListener("change", connect);
+  $("garment-toggle").addEventListener("change", () => {
+    const on = $("garment-toggle").checked;
+    $("persona-badge").textContent = on ? "✦ Stylist Mode" : "💬 General";
+    $("persona-badge").className = "badge " + (on ? "badge-garment" : "badge-general");
+  });
+
+  // ── Connect ──
+  async function connect() {
+    setStatus("connecting", "Connecting…");
+    try {
+      sessionId = (await (await fetch(`http://${$("server-url").value}/session-id`)).json()).session_id;
+    } catch { setStatus("error", "Cannot reach server"); return; }
+
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://${$("server-url").value}/chat-stream`);
+    ws.onopen  = () => { setStatus("ok", "Connected"); $("send-btn").disabled = false; };
+    ws.onclose = () => { setStatus("error", "Disconnected"); $("send-btn").disabled = true; };
+    ws.onerror = () => setStatus("error", "WebSocket error");
+    ws.onmessage = ({ data }) => handleChunk(data);
+  }
+
+  // ── Chunk handler ──
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      if (currentBubble && currentRaw) {
+        currentBubble.innerHTML = marked.parse(currentRaw);
+        processResponse(currentBubble, currentRaw);
+      }
+      currentBubble = null; currentRaw = "";
+      isStreaming = false; $("send-btn").disabled = false;
+      removeTyping(); return;
+    }
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false; $("send-btn").disabled = false; removeTyping(); return;
+    }
+    if (chunk.startsWith("[Tool]")) { appendSystem(escHtml(chunk)); return; }
+
+    if (!currentBubble) currentBubble = createAssistantBubble();
+    removeTyping();
+    currentRaw += chunk;
+    currentBubble.textContent = currentRaw;
+    scrollBottom();
+  }
+
+  // ── Send ──
+  function withGarmentTag(text) {
+    return text.toLowerCase().startsWith("[garment]")
+      ? `[garment] ${text.slice(9).trimStart()}`
+      : `[garment] ${text}`;
+  }
+
+  function send() {
+    const text = $("chat-input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+    const userInput = $("garment-toggle").checked ? withGarmentTag(text) : text;
+    appendUserMsg(text);
+    $("chat-input").value = ""; $("chat-input").style.height = "auto";
+    $("send-btn").disabled = true; isStreaming = true;
+    appendTyping(); resetPanel();
+    ws.send(JSON.stringify({ type: "chat", session_id: sessionId, user_input: userInput }));
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("chat-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  // ── Parse sets from rendered bubble ──
+  function processResponse(bubbleEl, rawText) {
+    const children = Array.from(bubbleEl.children);
+
+    // Find h2/h3 elements that look like "Set N"
+    const setIndices = children
+      .map((el, i) => ({ el, i }))
+      .filter(({ el }) => /^h[123]$/i.test(el.tagName) && /set\s*\d/i.test(el.textContent));
+
+    let parsedSets;
+    if (setIndices.length > 0) {
+      parsedSets = setIndices.map(({ el, i }, si) => {
+        const endI = setIndices[si + 1]?.i ?? children.length;
+        const sectionEls = children.slice(i + 1, endI);
+        const images = collectImagesFromEls(sectionEls);
+        const vibeNote = sectionEls.find(e => e.tagName === "P" && e.querySelector("em"))
+          ?.querySelector("em")?.textContent || "";
+        return { label: el.textContent.trim(), vibeNote, images };
+      });
+    } else {
+      // Single set fallback — grab all images + CDN URLs
+      const images = collectImagesFromEls(children);
+      for (const m of rawText.matchAll(CDN)) {
+        const url = m[0].replace(/[.,;!?)>]+$/, "");
+        if (!images.find(x => x.src === url)) images.push({ src: url, alt: "Garment", slot: "" });
+      }
+      parsedSets = [{ label: "Your Outfit", vibeNote: "", images }];
+    }
+
+    // Weather context from raw text
+    const weather = extractWeather(rawText);
+
+    // Styling tips
+    const tips = extractTips(rawText);
+
+    renderWeather(weather);
+    renderTips(tips);
+    buildTabs(parsedSets);
+    showTab(0);
+  }
+
+  function collectImagesFromEls(els) {
+    const seen = new Set();
+    const imgs = [];
+    els.forEach(el => {
+      const process = img => {
+        if (!seen.has(img.src)) {
+          seen.add(img.src);
+          // Try to infer slot from preceding sibling text
+          const prevText = img.closest("p")?.previousElementSibling?.textContent || "";
+          const slot = inferSlot(prevText + " " + img.alt);
+          imgs.push({ src: img.src, alt: img.alt || "Garment", slot });
+        }
+      };
+      if (el.tagName === "IMG") process(el);
+      el.querySelectorAll("img").forEach(process);
+    });
+    return imgs;
+  }
+
+  function inferSlot(text) {
+    const t = text.toLowerCase();
+    if (/shirt|blouse|blazer|sweater|top|upper/.test(t)) return "UpperGarment";
+    if (/pants|trousers|skirt|lower/.test(t)) return "LowerGarment";
+    if (/shoes|boots|heels|footwear|foot/.test(t)) return "FootGarment";
+    if (/earring/.test(t)) return "Earrings";
+    if (/necklace|neck/.test(t)) return "NeckAccessory";
+    if (/watch|bracelet|wrist/.test(t)) return "Accessory";
+    if (/cap|hat|head/.test(t)) return "HeadGarment";
+    if (/glasses|sunglass/.test(t)) return "Glasses";
+    return "";
+  }
+
+  function extractWeather(text) {
+    const info = {};
+    const tm = text.match(/([\d.]+)\s*°C/);
+    if (tm) info.temp = tm[0];
+    const conds = [
+      { re: /\bstorm\b|\bthunder\b/i,             label: "⛈ Stormy",  note: "Opt for waterproof layers." },
+      { re: /\brain\b|\bdrizzle\b|\bshower\b/i,   label: "🌧 Rainy",  note: "Carry a compact umbrella." },
+      { re: /\bfog\b|\bmist\b/i,                  label: "🌫 Foggy",  note: "Layer up — fog feels cooler." },
+      { re: /\bhot\b|\bwarm\b|\bsunny\b|\bclear/i,label: "☀ Sunny",  note: "Light fabrics recommended." },
+      { re: /\bovercast\b|\bcloudy\b/i,            label: "🌥 Cloudy", note: "Comfortable layering weather." },
+      { re: /\bcool\b|\bcold\b|\bchilly\b/i,      label: "🌬 Cool",   note: "Layering is key." },
+    ];
+    for (const c of conds) {
+      if (c.re.test(text)) { info.condition = c.label; info.note = c.note; break; }
+    }
+    const lm = text.match(/\bin\s+([A-Z][a-zA-Z ,]+?)(?:\s+today|\s+on\s|\s+this|\.|,)/);
+    if (lm) info.location = lm[1].trim();
+    return info;
+  }
+
+  function extractTips(text) {
+    const tips = [];
+    const m = text.match(/(?:styling\s+tips?|tips?)[:\s]*\n([\s\S]*?)(?:\n\n|$)/i);
+    if (m) {
+      m[1].split("\n").forEach(line => {
+        const c = line.replace(/^[-*•\d.]\s*/, "").trim();
+        if (c.length > 5) tips.push(c);
+      });
+    }
+    return tips.slice(0, 4);
+  }
+
+  // ── Tabs ──
+  function buildTabs(sets) {
+    _sets = sets;
+    const bar = $("set-tabs");
+    bar.innerHTML = "";
+    if (sets.length <= 1) {
+      bar.style.display = "none";
+      return;
+    }
+    bar.style.display = "flex";
+    sets.forEach((s, i) => {
+      const tab = document.createElement("div");
+      tab.className = "set-tab" + (i === 0 ? " active" : "");
+      // Shorten "Set 1 — BGC Smart Casual" to just "Set 1" for the tab
+      const shortLabel = s.label.replace(/\s*[—–-].*/, "").trim() || `Set ${i + 1}`;
+      tab.textContent = shortLabel;
+      tab.addEventListener("click", () => showTab(i));
+      bar.appendChild(tab);
+    });
+  }
+
+  function showTab(idx) {
+    document.querySelectorAll(".set-tab").forEach((t, i) =>
+      t.className = "set-tab" + (i === idx ? " active" : ""));
+
+    const set = _sets[idx];
+    if (!set) return;
+
+    // Vibe note
+    const vn = $("vibe-note");
+    if (set.vibeNote) {
+      vn.textContent = `✦ ${set.vibeNote}`;
+      vn.style.display = "block";
+    } else {
+      vn.style.display = "none";
+    }
+
+    // Garment cards
+    const list = $("outfit-list");
+    list.innerHTML = "";
+    if (!set.images.length) {
+      list.innerHTML = `<div class="outfit-empty">
+        <span class="empty-icon">🧥</span>No garment images found in this set.
+      </div>`;
+      return;
+    }
+    const slotEmoji = {
+      UpperGarment: "👔", LowerGarment: "👖", FootGarment: "👟",
+      Earrings: "💎", NeckAccessory: "📿", HeadGarment: "🧢",
+      Glasses: "🕶", LeftHandAccessory: "⌚", RightHandAccessory: "💍",
+      Accessory: "✨",
+    };
+    set.images.forEach(({ src, alt, slot }) => {
+      const card = document.createElement("div");
+      card.className = "garment-card";
+      const emoji = slotEmoji[slot] || "🧥";
+      const slotLabel = slot ? slot.replace(/([A-Z])/g, " $1").trim() : "";
+      card.innerHTML = `
+        <img class="card-img" src="${escAttr(src)}" alt="${escAttr(alt)}" loading="lazy"
+          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
+        <div class="card-img-placeholder" style="display:none">${emoji}</div>
+        <div class="card-body">
+          ${slotLabel ? `<div class="card-slot">${escHtml(slotLabel)}</div>` : ""}
+          <div class="card-name">${escHtml(alt)}</div>
+        </div>
+      `;
+      list.appendChild(card);
+    });
+  }
+
+  // ── Weather & tips rendering ──
+  function renderWeather(w) {
+    const wb = $("weather-block");
+    if (w.temp || w.condition) {
+      $("w-temp").textContent = w.temp || "—";
+      $("w-desc").textContent = w.condition || "";
+      $("w-location").textContent = w.location || "";
+      $("w-note").textContent = w.note || "";
+      wb.style.display = "block";
+    } else {
+      wb.style.display = "none";
+    }
+  }
+
+  function renderTips(tips) {
+    const tb = $("tips-block");
+    if (tips.length) {
+      $("tips-list").innerHTML = tips.map(t => `<li>${escHtml(t)}</li>`).join("");
+      tb.style.display = "block";
+    } else {
+      tb.style.display = "none";
+    }
+  }
+
+  function resetPanel() {
+    _sets = [];
+    $("set-tabs").innerHTML = "";
+    $("set-tabs").style.display = "none";
+    $("weather-block").style.display = "none";
+    $("vibe-note").style.display = "none";
+    $("tips-block").style.display = "none";
+    $("outfit-list").innerHTML = `<div class="outfit-empty">
+      <span class="empty-icon">⏳</span>
+      Checking weather and browsing the catalogue…
+    </div>`;
+  }
+
+  // ── DOM helpers ──
+  function appendUserMsg(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = `<span class="msg-label">You</span><div class="bubble">${escHtml(text)}</div>`;
+    $("messages").appendChild(div); scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">Stylist AI</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant"; wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">Stylist AI</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:#475569;padding:4px 8px;align-self:center;";
+    div.innerHTML = html; $("messages").appendChild(div); scrollBottom();
+  }
+
+  function scrollBottom() { const el = $("messages"); el.scrollTop = el.scrollHeight; }
+  function escHtml(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function escAttr(s) { return String(s).replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+  function setStatus(state, label) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  connect();
+</script>
+</body>
+</html>

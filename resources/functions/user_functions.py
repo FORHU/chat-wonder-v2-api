@@ -5,10 +5,32 @@ import time
 import hashlib
 import tempfile
 import logging
+import urllib.request
+import urllib.parse
+from datetime import datetime, date
 
 # Simple in-memory cache with TTL
 _search_cache = {}
 CACHE_TTL_SECONDS = 30
+
+# Garments API
+_GARMENTS_API_BASE = "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/garments"
+_GARMENTS_CACHE_TTL = 300  # 5 minutes
+_garments_cache: dict = {"data": None, "timestamp": 0}
+_DEFAULT_LAT = 14.5995  # Manila
+_DEFAULT_LON = 120.9842
+
+_WMO_DESCRIPTIONS = {
+    0: ("clear sky", "sunny"), 1: ("mainly clear", "mostly sunny"),
+    2: ("partly cloudy", "partly cloudy"), 3: ("overcast", "cloudy"),
+    45: ("foggy", "foggy"), 48: ("icy fog", "foggy"),
+    51: ("light drizzle", "drizzly"), 53: ("moderate drizzle", "drizzly"), 55: ("heavy drizzle", "drizzly"),
+    61: ("light rain", "rainy"), 63: ("moderate rain", "rainy"), 65: ("heavy rain", "rainy"),
+    71: ("light snow", "snowy"), 73: ("moderate snow", "snowy"), 75: ("heavy snow", "snowy"),
+    80: ("rain showers", "showery"), 81: ("moderate showers", "showery"), 82: ("heavy showers", "showery"),
+    95: ("thunderstorm", "stormy"), 96: ("thunderstorm with hail", "stormy"), 99: ("severe thunderstorm", "stormy"),
+}
+_RAINY_CODES = {51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99}
 
 
 DOCUMENT_TEMPLATES = {
@@ -817,5 +839,279 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
                 "If notarization is required, bring valid ID to a notary public",
             ],
         }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Garments helpers
+# ---------------------------------------------------------------------------
+
+def _http_get_json(url: str, headers: dict = None) -> dict:
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _fetch_all_garments() -> list:
+    api_key = os.getenv("GARMENTS_API_KEY", "e8b6bc99b1b1eddb1a1bc5f4a3178b3b4a72b8e9266d6f96d5f601f9f0706507")
+    if _garments_cache["data"] and (time.time() - _garments_cache["timestamp"]) < _GARMENTS_CACHE_TTL:
+        return _garments_cache["data"]
+    try:
+        first = _http_get_json(f"{_GARMENTS_API_BASE}?page=1&limit=100", {"x-api-key": api_key})
+        if first.get("status") != "success":
+            return _garments_cache["data"] or []
+        data = first["data"]
+        items = list(data["items"])
+        for page in range(2, data["totalPages"] + 1):
+            try:
+                pd = _http_get_json(f"{_GARMENTS_API_BASE}?page={page}&limit=100", {"x-api-key": api_key})
+                if pd.get("status") == "success":
+                    items.extend(pd["data"]["items"])
+            except Exception as e:
+                logging.warning(f"[garments] page {page} fetch failed: {e}")
+        _garments_cache["data"] = items
+        _garments_cache["timestamp"] = time.time()
+        return items
+    except Exception as e:
+        logging.error(f"[garments] catalogue fetch failed: {e}")
+        return _garments_cache["data"] or []
+
+
+def _geocode_location(location: str) -> tuple:
+    if not location:
+        return (_DEFAULT_LAT, _DEFAULT_LON)
+    parts = location.replace(" ", "").split(",")
+    if len(parts) == 2:
+        try:
+            return (float(parts[0]), float(parts[1]))
+        except ValueError:
+            pass
+    try:
+        data = _http_get_json(
+            f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(location)}&count=1&format=json"
+        )
+        results = data.get("results", [])
+        if results:
+            return (results[0]["latitude"], results[0]["longitude"])
+    except Exception as e:
+        logging.warning(f"[garments] geocode failed for '{location}': {e}")
+    return (_DEFAULT_LAT, _DEFAULT_LON)
+
+
+def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
+    today = date.today()
+    try:
+        event_date = datetime.strptime(event_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        event_date = today
+    days_ahead = (event_date - today).days
+    if days_ahead > 16 or days_ahead < 0:
+        from calendar import month_name as _mn
+        return {"estimated": True, "date": event_date_str, "month": event_date.month, "month_name": _mn[event_date.month]}
+    try:
+        if days_ahead == 0:
+            url = (
+                f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                "&current=temperature_2m,weathercode,precipitation,relative_humidity_2m&timezone=auto"
+            )
+            d = _http_get_json(url).get("current", {})
+            wmo = d.get("weathercode", 0)
+            temp = d.get("temperature_2m")
+            precip = d.get("precipitation", 0)
+        else:
+            url = (
+                f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                f"&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum"
+                f"&timezone=auto&start_date={event_date_str}&end_date={event_date_str}"
+            )
+            daily = _http_get_json(url).get("daily", {})
+            wmo = (daily.get("weathercode") or [0])[0]
+            tmax = (daily.get("temperature_2m_max") or [None])[0]
+            tmin = (daily.get("temperature_2m_min") or [None])[0]
+            temp = round(((tmax or 0) + (tmin or 0)) / 2, 1) if tmax and tmin else None
+            precip = (daily.get("precipitation_sum") or [0])[0]
+        desc, cond = _WMO_DESCRIPTIONS.get(wmo, ("unknown conditions", "unknown"))
+        return {
+            "estimated": False, "date": event_date_str,
+            "temperature_c": temp, "weathercode": wmo,
+            "description": desc, "condition": cond,
+            "precipitation_mm": precip or 0,
+            "is_rainy": wmo in _RAINY_CODES or (precip or 0) > 1,
+            "is_hot": (temp or 0) >= 32,
+            "is_cold": (temp or 99) <= 20,
+        }
+    except Exception as e:
+        logging.error(f"[garments] weather fetch failed: {e}")
+        return {"estimated": True, "date": event_date_str, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Garment recommendation function
+# ---------------------------------------------------------------------------
+
+_CORE_SLOTS = {"UpperGarment", "LowerGarment", "FootGarment"}
+_ACCESSORY_SLOTS = {"HeadGarment", "Earrings", "Glasses", "NeckAccessory", "LeftHandAccessory", "RightHandAccessory"}
+
+
+def recommend_garments(
+    gender: str,
+    event_type: str = None,
+    event_date: str = None,
+    location: str = None,
+    sets: int = 1,
+) -> dict:
+    """Fetch live weather and garment catalogue, then return AI-curated outfit sets as JSON.
+
+    Each set contains exactly one garment per fittingSlot (no duplicates).
+    Core slots (UpperGarment, LowerGarment, FootGarment) are required per set.
+    Accessories are optional. Multiple sets have distinct vibes tied to local fashion trends.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {"success": False, "error": "gender must be 'MALE' or 'FEMALE'."}
+
+    n_sets = max(1, min(int(sets or 1), 3))
+
+    resolved_date = date.today().isoformat()
+    if event_date:
+        try:
+            datetime.strptime(event_date, "%Y-%m-%d")
+            resolved_date = event_date
+        except ValueError:
+            pass
+
+    lat, lon = _geocode_location(location)
+    location_label = location or "Manila, Philippines"
+    weather = _fetch_weather(lat, lon, resolved_date)
+
+    all_garments = _fetch_all_garments()
+    if not all_garments:
+        return {"success": False, "error": "Garment catalogue is unavailable. Please try again later."}
+
+    filtered = [g for g in all_garments if g.get("gender") in (gender_upper, "UNISEX")]
+    if not filtered:
+        filtered = all_garments
+
+    garment_lookup = {g["id"]: g for g in filtered}
+    slim = [{k: v for k, v in g.items() if k != "imageUrl"} for g in filtered]
+
+    if weather.get("estimated"):
+        month_label = weather.get("month_name", "this time of year")
+        weather_ctx = (
+            f"No live forecast available for {resolved_date}. "
+            f"Use your knowledge of typical {month_label} climate at {location_label} to guide recommendations."
+        )
+    else:
+        temp = weather.get("temperature_c")
+        temp_str = f"{temp:.1f}°C" if temp is not None else "unknown temperature"
+        weather_ctx = f"Weather on {resolved_date} at {location_label}: {weather['description']}, {temp_str}, precipitation {weather['precipitation_mm']}mm."
+        if weather.get("is_rainy"):
+            weather_ctx += " Rain expected — favor water-resistant or quick-dry garments."
+        elif weather.get("is_hot"):
+            weather_ctx += " Hot — favor breathable, lightweight fabrics and lighter colors."
+        elif weather.get("is_cold"):
+            weather_ctx += " Cool — consider layering options."
+
+    event_ctx = f"Event/occasion: {event_type}." if event_type else "No specific event — recommend versatile everyday wear."
+
+    system_prompt = (
+        f"You are a personal stylist. Curate exactly {n_sets} distinct outfit set(s) from the provided garment catalogue "
+        f"based on weather, event, gender, and local fashion trends at the user's location.\n\n"
+        "CRITICAL RULES — follow these exactly:\n"
+        "1. Each set must contain EXACTLY ONE garment per fittingSlot. Never include two items with the same fittingSlot in one set.\n"
+        "2. Every set MUST include all three core fittingSlots: UpperGarment, LowerGarment, FootGarment.\n"
+        "3. Accessories (HeadGarment, Earrings, Glasses, NeckAccessory, LeftHandAccessory, RightHandAccessory) are optional — include only when they genuinely enhance the outfit.\n"
+        "4. Do NOT reuse the same garment id across different sets.\n"
+        f"5. Each set must have a DISTINCT vibe that reflects different local fashion trends or sub-cultures at {location_label}.\n\n"
+        "Return a JSON object with this exact structure:\n"
+        "{\n"
+        '  "sets": [\n'
+        '    {\n'
+        '      "set_number": 1,\n'
+        '      "vibe": "Short vibe name e.g. BGC Smart Casual",\n'
+        '      "trend_note": "One sentence on how this vibe reflects local fashion culture at the location",\n'
+        '      "recommendations": [\n'
+        '        {\n'
+        '          "id": "...",\n'
+        '          "name": "...",\n'
+        '          "description": "...",\n'
+        '          "fittingSlot": "UpperGarment",\n'
+        '          "garmentType": [...],\n'
+        '          "category": [...],\n'
+        '          "reason": "Why this piece suits the weather and event"\n'
+        '        }\n'
+        '      ]\n'
+        '    }\n'
+        '  ],\n'
+        '  "weather_note": "How weather conditions shaped these picks",\n'
+        '  "styling_tips": ["tip1", "tip2"]\n'
+        "}\n\n"
+        "Additional rules:\n"
+        "- Rain: prefer darker colors, avoid suede-tagged items\n"
+        "- Heat: prefer lighter colors and breathable tags\n"
+        "- Cold: recommend layering\n"
+        "- Formal events: Formal/Business category items\n"
+        "- Casual events: Casual/SmartCasual category items\n"
+        "- Only use garments from the provided catalogue — do not invent items\n"
+        f"- Return exactly {n_sets} set(s) in the sets array"
+    )
+    user_prompt = (
+        f"Gender: {gender_upper}\n"
+        f"Requested sets: {n_sets}\n"
+        f"{weather_ctx}\n"
+        f"{event_ctx}\n\n"
+        f"Garment catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Curate {n_sets} distinct outfit set(s) and return the JSON."
+    )
+
+    client = OpenAI(api_key=api_key)
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+
+        # Hydrate imageUrl + enforce fittingSlot uniqueness per set
+        for s in result.get("sets", []):
+            seen_slots: set = set()
+            deduped = []
+            for rec in s.get("recommendations", []):
+                slot = rec.get("fittingSlot", "")
+                if slot and slot in seen_slots:
+                    continue
+                if slot:
+                    seen_slots.add(slot)
+                full = garment_lookup.get(rec.get("id"), {})
+                rec["imageUrl"] = full.get("imageUrl", "")
+                deduped.append(rec)
+            s["recommendations"] = deduped
+
+        return {
+            "success": True,
+            "gender": gender_upper,
+            "event_type": event_type,
+            "event_date": resolved_date,
+            "location": location_label,
+            "coordinates": {"lat": lat, "lon": lon},
+            "weather": weather,
+            "sets_requested": n_sets,
+            **result,
+        }
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
