@@ -969,6 +969,7 @@ def recommend_garments(
     event_date: str = None,
     location: str = None,
     sets: int = 1,
+    weather_json: str = None,
 ) -> dict:
     """Fetch live weather and garment catalogue, then return AI-curated outfit sets as JSON.
 
@@ -996,9 +997,20 @@ def recommend_garments(
         except ValueError:
             pass
 
-    lat, lon = _geocode_location(location)
     location_label = location or "Manila, Philippines"
-    weather = _fetch_weather(lat, lon, resolved_date)
+
+    # Weather always comes from the frontend — never fetch it here
+    weather: dict = {}
+    if weather_json:
+        try:
+            weather = json.loads(weather_json)
+            weather.setdefault("estimated", False)
+            weather.pop("lat", None)
+            weather.pop("lon", None)
+        except Exception as e:
+            logging.warning(f"[garments] weather_json parse failed: {e}")
+    if not weather:
+        weather = {"description": "weather unavailable", "estimated": True}
 
     all_garments = _fetch_all_garments()
     if not all_garments:

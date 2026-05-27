@@ -260,6 +260,10 @@ def process_persona(user_input: str):
             "You are a helpful personal stylist and fashion advisor. "
             "Use the recommend_garments function to fetch weather data and garment recommendations. "
             "If the user's gender is not clear from context, ask for it before calling the function.\n\n"
+            "IMPORTANT — weather handling: If the message contains [FRONTEND_WEATHER:{...}], "
+            "you MUST extract that JSON string exactly as-is and pass it as the weather_json parameter "
+            "when calling recommend_garments. Do not modify, summarize, or omit it. "
+            "Never show, repeat, or mention the [FRONTEND_WEATHER] annotation in your response to the user — it is internal data only.\n\n"
             "When presenting results, format each set exactly like this:\n"
             "## Set 1 — [Vibe Name]\n"
             "*[trend_note]*\n\n"
@@ -1160,6 +1164,13 @@ async def chat_stream(websocket: WebSocket):
 
             user_input = request.user_input or getattr(request, "user_history_select", "") or ""
             persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
+
+            # Inject frontend-provided weather for garment persona
+            if persona == "garment" and data.get("weather"):
+                try:
+                    user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
+                except Exception:
+                    pass
 
             if getattr(request, "document_context", None):
                 doc_injection = f"\n\n[CONTEXT: User is viewing:]\n{request.document_context}"

@@ -225,6 +225,10 @@
           "sets": {
             "type": "integer",
             "description": "Number of distinct outfit sets to recommend. Defaults to 1. Maximum is 3. Each set has a unique vibe tied to local fashion trends. Infer from user prompt — e.g. 'give me 2 outfits' → sets=2."
+          },
+          "weather_json": {
+            "type": "string",
+            "description": "Pre-fetched weather data from the frontend as a JSON string. When the message contains [FRONTEND_WEATHER:{...}], extract that exact JSON string and pass it here verbatim. The function will skip internal weather fetching and use this data directly."
           }
         },
         "required": ["gender"]

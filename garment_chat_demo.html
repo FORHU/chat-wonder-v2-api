@@ -303,9 +303,10 @@
       <div class="bubble">
         Hi! I'm your <strong>AI Personal Stylist</strong>. Tell me what you're dressing for and I'll put together complete outfits — checking live weather at your location automatically.<br><br>
         <strong>Try:</strong><br>
-        • <em>"What should I wear to a business meeting in Cebu today? I'm a man."</em><br>
-        • <em>"Give me 2 outfit options for a casual date night in BGC. Female."</em><br>
-        • <em>"Formal wedding in Manila next week, I'm a guy, give me 3 sets."</em>
+        • <em>"Give me 3 outfit sets for a beach day in Cebu. I'm a woman."</em><br>
+        • <em>"What should I wear to a job interview in BGC today? Male, 2 sets."</em><br>
+        • <em>"Casual weekend brunch in Makati — female, show me 2 vibes."</em><br>
+        • <em>"Formal wedding guest outfit in Davao next Saturday. I'm a guy."</em>
       </div>
     </div>
   </div>
@@ -352,10 +353,54 @@
 <script>
   const $ = id => document.getElementById(id);
   const CDN = /https:\/\/d1bdogktone6hj\.cloudfront\.net\/[^\s"')\]<]+/g;
+  const RAINY_CODES = new Set([51,53,55,61,63,65,80,81,82,95,96,99]);
+  const WMO = {
+    0:"clear sky",1:"mainly clear",2:"partly cloudy",3:"overcast",
+    45:"foggy",48:"icy fog",
+    51:"light drizzle",53:"moderate drizzle",55:"heavy drizzle",
+    61:"light rain",63:"moderate rain",65:"heavy rain",
+    71:"light snow",73:"moderate snow",75:"heavy snow",
+    80:"rain showers",81:"moderate showers",82:"heavy showers",
+    95:"thunderstorm",96:"thunderstorm with hail",99:"severe thunderstorm",
+  };
 
   let sessionId = null, ws = null;
   let currentBubble = null, currentRaw = "", isStreaming = false;
-  let _sets = [];   // parsed sets from last response
+  let _sets = [];        // parsed sets from last response
+  let _weatherData = null; // weather fetched from browser before each send
+
+  // ── Fetch weather from browser geolocation + Open-Meteo ──
+  async function fetchWeather() {
+    let lat = 14.5995, lon = 120.9842; // Manila default
+    try {
+      const pos = await new Promise((res, rej) =>
+        navigator.geolocation.getCurrentPosition(res, rej, { timeout: 6000 }));
+      lat = pos.coords.latitude;
+      lon = pos.coords.longitude;
+    } catch { /* denied or unavailable — use Manila */ }
+
+    try {
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        `&current=temperature_2m,weathercode,precipitation,relative_humidity_2m&timezone=auto`;
+      const data = await (await fetch(url)).json();
+      const cur = data.current || {};
+      const wmo = cur.weathercode ?? 0;
+      const temp = cur.temperature_2m ?? null;
+      const precip = cur.precipitation ?? 0;
+      return {
+        estimated: false,
+        date: new Date().toISOString().split("T")[0],
+        temperature_c: temp,
+        weathercode: wmo,
+        description: WMO[wmo] ?? "unknown conditions",
+        precipitation_mm: precip,
+        is_rainy: RAINY_CODES.has(wmo) || precip > 1,
+        is_hot: (temp ?? 0) >= 32,
+        is_cold: (temp ?? 99) <= 20,
+        lat, lon,
+      };
+    } catch { return null; }
+  }
 
   // ── Auto-resize textarea ──
   $("chat-input").addEventListener("input", () => {
@@ -383,7 +428,7 @@
     ws.onopen  = () => { setStatus("ok", "Connected"); $("send-btn").disabled = false; };
     ws.onclose = () => { setStatus("error", "Disconnected"); $("send-btn").disabled = true; };
     ws.onerror = () => setStatus("error", "WebSocket error");
-    ws.onmessage = ({ data }) => handleChunk(data);
+    ws.onmessage = ({ data }) => { console.log("[chat-stream]", data); handleChunk(data); };
   }
 
   // ── Chunk handler ──
@@ -417,15 +462,29 @@
       : `[garment] ${text}`;
   }
 
-  function send() {
+  async function send() {
     const text = $("chat-input").value.trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
-    const userInput = $("garment-toggle").checked ? withGarmentTag(text) : text;
+
+    const garmentOn = $("garment-toggle").checked;
+    const userInput = garmentOn ? withGarmentTag(text) : text;
+
     appendUserMsg(text);
     $("chat-input").value = ""; $("chat-input").style.height = "auto";
     $("send-btn").disabled = true; isStreaming = true;
     appendTyping(); resetPanel();
-    ws.send(JSON.stringify({ type: "chat", session_id: sessionId, user_input: userInput }));
+
+    // Fetch live weather from browser before sending (garment mode only)
+    _weatherData = null;
+    if (garmentOn) {
+      setStatus("ok", "Fetching weather…");
+      _weatherData = await fetchWeather();
+      setStatus("ok", "Connected");
+    }
+
+    const payload = { type: "chat", session_id: sessionId, user_input: userInput };
+    if (_weatherData) payload.weather = _weatherData;
+    ws.send(JSON.stringify(payload));
   }
 
   $("send-btn").addEventListener("click", send);
@@ -462,8 +521,8 @@
       parsedSets = [{ label: "Your Outfit", vibeNote: "", images }];
     }
 
-    // Weather context from raw text
-    const weather = extractWeather(rawText);
+    // Use pre-fetched browser weather; fall back to parsing AI response text
+    const weather = _weatherData ? buildWeatherDisplay(_weatherData) : extractWeather(rawText);
 
     // Styling tips
     const tips = extractTips(rawText);
@@ -504,6 +563,25 @@
     if (/cap|hat|head/.test(t)) return "HeadGarment";
     if (/glasses|sunglass/.test(t)) return "Glasses";
     return "";
+  }
+
+  function buildWeatherDisplay(w) {
+    const conds = [
+      { test: w => w.weathercode >= 95,              label: "⛈ Stormy",  note: "Opt for waterproof layers." },
+      { test: w => RAINY_CODES.has(w.weathercode),   label: "🌧 Rainy",  note: "Carry a compact umbrella." },
+      { test: w => [45,48].includes(w.weathercode),  label: "🌫 Foggy",  note: "Layer up — fog feels cooler." },
+      { test: w => w.is_hot,                         label: "☀ Sunny",  note: "Light fabrics recommended." },
+      { test: w => [2,3].includes(w.weathercode),    label: "🌥 Cloudy", note: "Comfortable layering weather." },
+      { test: w => w.is_cold,                        label: "🌬 Cool",   note: "Layering is key." },
+    ];
+    const match = conds.find(c => c.test(w));
+    const temp = w.temperature_c != null ? `${w.temperature_c.toFixed(1)}°C` : null;
+    return {
+      temp,
+      condition: match?.label || (w.description ? `🌤 ${w.description}` : ""),
+      note: match?.note || "",
+      location: null,
+    };
   }
 
   function extractWeather(text) {
@@ -634,6 +712,7 @@
 
   function resetPanel() {
     _sets = [];
+    _weatherData = null;
     $("set-tabs").innerHTML = "";
     $("set-tabs").style.display = "none";
     $("weather-block").style.display = "none";
