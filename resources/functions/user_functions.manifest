@@ -199,6 +199,7 @@
   },
   {
     "type": "function",
+    "persona": "garment",
     "function": {
       "name": "recommend_garments",
       "description": "Recommend garments for a given event, weather, and gender. Call this when the user asks what to wear, needs outfit suggestions, or uses the [garment] prefix. Fetches live weather via Open-Meteo and a real garment catalogue to produce personalized, weather-aware outfit recommendations as JSON with reasons.",

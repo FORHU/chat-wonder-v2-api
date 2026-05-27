@@ -53,12 +53,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 class ApiContext:
     embeddings = None
     addendum = ""
-    fun_manifest: list = []
+    fun_manifest: list = []      # general tools only (no persona tag)
+    all_fun_manifest: list = []  # all tools including persona-specific
     fun_names: list = []
     user_functions: dict = {}
     sessions: dict = {}
     db_pool = None
     auto_approval: bool = False  # HITL: when True all tool calls execute without asking
+    xai_reason_visible: bool = False  # XAI: when True, REASON line is passed through to clients
 
 _context = ApiContext()
 _context.FUNCTIONS_DIR = os.path.join("resources", "functions")
@@ -135,6 +137,50 @@ app.add_middleware(
 app.include_router(legal_rag_router)
 
 # ---------------------------------------------------------------------------
+# Glass-box trace broadcast (SCL — Supervised Cognitive Loop)
+# ---------------------------------------------------------------------------
+
+_trace_queues: set = set()
+_app_event_loop = None  # captured at startup so worker threads can schedule on the main loop
+
+def broadcast_trace(event_type: str, text: str, session_id: str = None):
+    data = json.dumps({"type": event_type, "text": text.strip(), "session_id": session_id, "ts": time.time()})
+    def _put_all():
+        for q in list(_trace_queues):
+            try:
+                q.put_nowait(data)
+            except asyncio.QueueFull:
+                pass
+    if _app_event_loop is not None and _app_event_loop.is_running():
+        _app_event_loop.call_soon_threadsafe(_put_all)
+    else:
+        _put_all()
+
+@app.get("/trace-stream", summary="Glass-box trace SSE stream (consumed by scl-core-v2)")
+async def trace_stream():
+    async def _generator():
+        q: asyncio.Queue = asyncio.Queue(maxsize=200)
+        _trace_queues.add(q)
+        try:
+            yield "data: {\"type\":\"connected\"}\n\n"
+            while True:
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=25)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield "data: {\"type\":\"ping\"}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _trace_queues.discard(q)
+    return StreamingResponse(_generator(), media_type="text/event-stream",
+                             headers={
+                                 "Cache-Control": "no-cache",
+                                 "X-Accel-Buffering": "no",
+                                 "Access-Control-Allow-Origin": "*",
+                             })
+
+# ---------------------------------------------------------------------------
 # Pydantic Models
 # ---------------------------------------------------------------------------
 
@@ -195,6 +241,8 @@ class CosmeticMatchRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
+    global _app_event_loop
+    _app_event_loop = asyncio.get_event_loop()
     logging.info("Starting Chat Wonder v2...")
     try:
         from psycopg2 import pool as pg_pool
@@ -243,7 +291,7 @@ def process_persona(user_input: str):
         persona = "legal"
         user_input = user_input[10:].strip()
         legal_whitelist = ["search_legal", "summarize_legal_case"]
-        filtered_tools = [t for t in _context.fun_manifest if t["function"]["name"] in legal_whitelist]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_whitelist]
         try:
             with open("resources/prompts/legal_prompt.txt", "r", encoding="utf-8") as f:
                 addendum_override = f.read()
@@ -254,7 +302,7 @@ def process_persona(user_input: str):
         persona = "garment"
         user_input = user_input[9:].strip()
         garment_whitelist = ["recommend_garments"]
-        filtered_tools = [t for t in _context.fun_manifest if t["function"]["name"] in garment_whitelist]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in garment_whitelist]
         addendum_override = (
             "GARMENT ASSISTANT MODE\n\n"
             "You are a helpful personal stylist and fashion advisor. "
@@ -507,6 +555,16 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None):
         if functions_enabled:
             system_content += generic_system_metaprompt
 
+    if bool(_context.fun_names):
+        system_content += (
+            "\n\n[XAI Transparency Requirement]\n"
+            "When you decide to call a tool, write EXACTLY ONE LINE immediately before the tool call:\n"
+            "REASON: <one sentence — why this tool, referencing the user's specific request>\n"
+            "Write ONLY the REASON line. No other text before or after it when calling a tool.\n"
+            "Never write a REASON line in a text-only response.\n"
+            "The REASON line is for system logging only — do not reference it in your answer.\n"
+        )
+
     from datetime import datetime
     system_content += f"\n\n[Context Info]\nCurrent Date: {datetime.now().strftime('%A, %B %d, %Y')}\n"
 
@@ -575,18 +633,25 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             "temperature": _context.temperature,
         }
         if available_manifest:
-            args["functions"] = clean_function_definitions(available_manifest)
-            args["function_call"] = "auto"
+            args["tools"] = available_manifest
+            args["tool_choice"] = "auto"
         return state.openai_client.chat.completions.create(**args)
 
     for _ in range(max_chains):
         function_call = {"name": None, "arguments": ""}
+        broadcast_trace("cognition", f"Cycle {_ + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id)
         stream_resp = perform_chat(messages)
         last_response = ""
 
         for chunk in stream_resp:
             delta = chunk.choices[0].delta
-            if hasattr(delta, "function_call") and delta.function_call:
+            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                tc = delta.tool_calls[0]
+                if tc.function.name:
+                    function_call["name"] = tc.function.name
+                if tc.function.arguments:
+                    function_call["arguments"] += tc.function.arguments
+            elif hasattr(delta, "function_call") and delta.function_call:
                 fc = delta.function_call
                 if fc.name:
                     function_call["name"] = fc.name
@@ -594,6 +659,34 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
                     function_call["arguments"] += fc.arguments
             elif hasattr(delta, "content") and delta.content:
                 last_response += delta.content.replace("~", "-")
+
+        if not function_call["name"] and last_response:
+            preview = last_response[:200].replace('\n', ' ')
+            broadcast_trace("cognition", f"LLM produced final text ({len(last_response)} chars): \"{preview}{'…' if len(last_response) > 200 else ''}\"", session_id)
+
+        _xai_reason = None
+        if last_response:
+            _clean_lines = []
+            for _ln in last_response.split("\n"):
+                if _ln.strip().startswith("REASON:") and _xai_reason is None:
+                    _xai_reason = _ln.strip()[7:].strip()
+                else:
+                    _clean_lines.append(_ln)
+            last_response = "\n".join(_clean_lines).strip()
+
+        if _xai_reason and function_call["name"]:
+            broadcast_trace("cognition", f"Reasoning: {_xai_reason}", session_id)
+
+        if function_call["name"]:
+            _tool_desc = next((t['function'].get('description', '') for t in available_manifest if t['function']['name'] == function_call['name']), '')
+            _why_lines = [f"Proposed tool call: `{function_call['name']}`"]
+            if _tool_desc:
+                _why_lines.append(f"Why this tool: \"{_tool_desc[:200]}\"")
+            try:
+                _why_lines.append(f"Arguments passed: {json.dumps(json.loads(function_call['arguments']), ensure_ascii=False)}")
+            except Exception:
+                _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
+            broadcast_trace("cognition", "\n".join(_why_lines), session_id)
 
         if last_response.strip():
             full_response = last_response.strip()
@@ -616,14 +709,25 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             for fc in funcall_chains
         )
         if is_dup:
+            broadcast_trace("control", f"BLOCKED duplicate call: `{function_call['name']}` — injecting memory reminder", session_id)
             messages.append({"role": "system", "content": f"Function `{function_call['name']}` already called with same args. Do not repeat."})
             continue
+
+        broadcast_trace("control", f"APPROVED: `{function_call['name']}` — no prior identical call found", session_id)
+        broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id)
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
         result = execute_function_call(function_call, session_id=session_id)
         if result is None:
             continue
         function_outputs.append((function_call["name"], result))
+
+        try:
+            _rp = json.dumps(result, ensure_ascii=False)
+        except Exception:
+            _rp = str(result)
+        broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id)
+        broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id)
 
         try:
             content = json.dumps(result, ensure_ascii=False)
@@ -646,8 +750,38 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
 
     return full_response
 
+def _broadcast_retrieval_context(state, tools, addendum_override, session_id):
+    rag_sources = getattr(state, "source_metadata", [])
+    if rag_sources:
+        lines = [f"RAG retrieved {len(rag_sources)} chunk(s) — injected as evidence:"]
+        for s in rag_sources[:5]:
+            score = f"{s.get('relevance', 0):.2f}" if s.get('relevance') is not None else "?"
+            title = (s.get('title') or '')[:60]
+            excerpt = (s.get('text_content') or '')[:150].replace('\n', ' ').strip()
+            lines.append(f"  [{score}] {title}")
+            if excerpt:
+                lines.append(f"         \"{excerpt}{'…' if len(s.get('text_content','')) > 150 else ''}\"")
+        broadcast_trace("retrieval", "\n".join(lines), session_id)
+    else:
+        broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id)
+    if addendum_override:
+        persona = "Legal AI" if "LEGAL" in addendum_override.upper() else "Custom persona active"
+    else:
+        persona = "Default (general assistant)"
+    available_tools = tools if tools is not None else _context.fun_manifest
+    history_turns = len(state.prompt) if state.prompt else 0
+    if available_tools:
+        tool_lines = [f"Mode: {persona} | History turns: {history_turns} | LLM was given {len(available_tools)} tool(s):"]
+        for t in available_tools:
+            fn = t['function']
+            tool_lines.append(f"  • {fn['name']}: {fn.get('description', '')[:120]}")
+        broadcast_trace("cognition", "\n".join(tool_lines), session_id)
+    else:
+        broadcast_trace("cognition", f"Mode: {persona} | History turns: {history_turns} | No tools available", session_id)
+
 def reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
+    _broadcast_retrieval_context(state, tools, addendum_override, session_id)
     return run_function_chain(state, messages, session_id=session_id, tools=tools)
 
 # ---------------------------------------------------------------------------
@@ -670,12 +804,16 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
             "temperature": _context.temperature,
         }
         if available_manifest:
-            args["functions"] = clean_function_definitions(available_manifest)
-            args["function_call"] = "auto"
+            args["tools"] = available_manifest
+            args["tool_choice"] = "auto"
         return state.openai_client.chat.completions.create(**args)
 
     for iteration in range(max_chains):
         function_call = {"name": None, "arguments": ""}
+        broadcast_trace("cognition", f"Cycle {iteration + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id)
+        _xai_buffer = ""
+        _xai_first_line_done = False
+        _xai_reason = None
         _iter_start = time.time()
         stream_resp = perform_chat(messages)
         last_response = ""
@@ -683,7 +821,13 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
 
         for chunk in stream_resp:
             delta = chunk.choices[0].delta
-            if hasattr(delta, "function_call") and delta.function_call:
+            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                tc = delta.tool_calls[0]
+                if tc.function.name:
+                    function_call["name"] = tc.function.name
+                if tc.function.arguments:
+                    function_call["arguments"] += tc.function.arguments
+            elif hasattr(delta, "function_call") and delta.function_call:
                 fc = delta.function_call
                 if fc.name:
                     function_call["name"] = fc.name
@@ -693,8 +837,32 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
                 if _first_token_time is None:
                     _first_token_time = time.time()
                 part = delta.content.replace("~", "-")
-                last_response += part
-                yield part
+                if not _xai_first_line_done:
+                    _xai_buffer += part
+                    if "\n" in _xai_buffer:
+                        _xai_first_line_done = True
+                        newline_pos = _xai_buffer.index("\n")
+                        first_line = _xai_buffer[:newline_pos]
+                        remainder = _xai_buffer[newline_pos + 1:]
+                        if first_line.strip().startswith("REASON:"):
+                            _xai_reason = first_line.strip()[7:].strip()
+                        else:
+                            last_response += first_line + "\n"
+                            yield first_line + "\n"
+                        if remainder:
+                            last_response += remainder
+                            yield remainder
+                        _xai_buffer = ""
+                else:
+                    last_response += part
+                    yield part
+
+        if _xai_buffer and not _xai_first_line_done:
+            if _xai_buffer.strip().startswith("REASON:"):
+                _xai_reason = _xai_buffer.strip()[7:].strip()
+            else:
+                last_response += _xai_buffer
+                yield _xai_buffer
 
         _iter_elapsed = time.time() - _iter_start
         if function_call["name"]:
@@ -708,6 +876,24 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
                 "chain[%d] LLM→text chars=%d ttft=%.2fs total=%.2fs session=%s",
                 iteration, len(last_response), ttft_iter, _iter_elapsed, session_id,
             )
+
+        if not function_call["name"] and last_response:
+            preview = last_response[:200].replace('\n', ' ')
+            broadcast_trace("cognition", f"LLM produced final text ({len(last_response)} chars): \"{preview}{'…' if len(last_response) > 200 else ''}\"", session_id)
+
+        if _xai_reason and function_call["name"]:
+            broadcast_trace("cognition", f"Reasoning: {_xai_reason}", session_id)
+
+        if function_call["name"]:
+            _tool_desc = next((t['function'].get('description', '') for t in available_manifest if t['function']['name'] == function_call['name']), '')
+            _why_lines = [f"Proposed tool call: `{function_call['name']}`"]
+            if _tool_desc:
+                _why_lines.append(f"Why this tool: \"{_tool_desc[:200]}\"")
+            try:
+                _why_lines.append(f"Arguments passed: {json.dumps(json.loads(function_call['arguments']), ensure_ascii=False)}")
+            except Exception:
+                _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
+            broadcast_trace("cognition", "\n".join(_why_lines), session_id)
 
         if last_response.strip():
             full_response = last_response.strip()
@@ -727,11 +913,14 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
 
         is_dup = any(fc["name"] == function_call["name"] and fc["args"] == cur_args for fc in funcall_chains)
         if is_dup:
+            broadcast_trace("control", f"BLOCKED duplicate call: `{function_call['name']}` — injecting memory reminder", session_id)
             messages.append({"role": "system", "content": f"Function `{function_call['name']}` already called. Do not repeat."})
             continue
 
+        broadcast_trace("control", f"APPROVED: `{function_call['name']}` — no prior identical call found", session_id)
+        broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id)
+
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
-        yield f"[Tool] Executing `{function_call['name']}`...\n"
 
         _tool_start = time.time()
         result = execute_function_call(function_call, session_id=session_id)
@@ -742,6 +931,13 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
         if result is None:
             continue
         function_outputs.append((function_call["name"], result))
+
+        try:
+            _rp = json.dumps(result, ensure_ascii=False)
+        except Exception:
+            _rp = str(result)
+        broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id)
+        broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id)
 
         try:
             content = json.dumps(result, ensure_ascii=False)
@@ -758,6 +954,7 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
 
 def streaming_reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
+    _broadcast_retrieval_context(state, tools, addendum_override, session_id)
     yield from streaming_run_function_chain(state, messages, session_id=session_id, tools=tools)
 
 # ---------------------------------------------------------------------------
@@ -875,6 +1072,8 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="API key is required.")
     init_openai_client(state, _context.openai_api_key)
 
+    broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id)
+
     # Normal path with optional HITL (legal and garment personas always auto-approve their tools)
     _was_auto = _context.auto_approval
     if persona in ("legal", "garment"):
@@ -937,6 +1136,7 @@ def approve(request: ApproveRequest):
         raise HTTPException(status_code=400, detail="No pending function call for this session.")
 
     fc = state.pending_function_call
+    broadcast_trace("control", f"HITL decision: {decision} — tool: `{fc['name']}`", session_id)
     messages = state.pending_messages
     tools = state.pending_tools
     addendum_override = state.pending_addendum
@@ -1111,7 +1311,7 @@ async def chat_stream(websocket: WebSocket):
                         "content": f"[Memory Fact]\nFunction `{fc['name']}` returned:\n{content}\n\nUse this fact.",
                     })
 
-                available_manifest = _context.fun_manifest
+                available_manifest = [t for t in _context.all_fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
                 _context.auto_approval = True
                 full_response = ""
                 try:
@@ -1180,6 +1380,8 @@ async def chat_stream(websocket: WebSocket):
                 await websocket.send_text("[Error] User input is empty.")
                 await websocket.send_text(_context.__END__)
                 continue
+
+            broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id)
 
             full_response = ""
             _ws_t_start = time.time()
@@ -1435,8 +1637,10 @@ def _load_user_functions(overwrite_globals: bool = False):
         try:
             loaded = safe_load_json(manifest_path)
             # Reset and rebuild (keep execute_code)
-            _context.fun_manifest = [ec_manifest] + [item for item in loaded if item.get("function", {}).get("name") != "execute_code"]
-            _context.fun_names = [item["function"]["name"] for item in _context.fun_manifest]
+            all_loaded = [ec_manifest] + [item for item in loaded if item.get("function", {}).get("name") != "execute_code"]
+            _context.all_fun_manifest = all_loaded
+            _context.fun_manifest = [t for t in all_loaded if not t.get("persona")]
+            _context.fun_names = [t["function"]["name"] for t in _context.fun_manifest]
             logging.info(f"Manifest loaded: {_context.fun_names}")
         except Exception as e:
             logging.warning(f"Manifest load failed: {e}")
@@ -1478,10 +1682,14 @@ async def api_legal_search(request: LegalSearchRequest):
         limit = max(1, min(request.limit, 20))
         offset = (page - 1) * limit
 
+        session_id = getattr(request, "session_id", None)
+        broadcast_trace("request", f"Legal search — query: {prompt[:120]}", session_id)
+
         # Reuse optimized_query on page 2+ to avoid an extra GPT call
         if request.optimized_query:
             optimized_query = request.optimized_query.strip()
         else:
+            broadcast_trace("action", "Optimizing query with LLM...", session_id)
             client = OpenAI(api_key=_context.openai_api_key)
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -1503,8 +1711,10 @@ async def api_legal_search(request: LegalSearchRequest):
 
         logging.info(f"[Legal Search] page={page} '{prompt}' -> '{optimized_query}'")
 
+        broadcast_trace("action", f"Running pgvector search — optimized query: {optimized_query[:120]}", session_id)
         rag_result = legal_rag_search(query=optimized_query, limit=_LEGAL_SEARCH_MAX_POOL)
         rag_rows = rag_result.get("results", []) if isinstance(rag_result, dict) else []
+        broadcast_trace("retrieval", f"Legal search returned {len(rag_rows)} result(s)", session_id)
 
         all_results = [
             {
@@ -1553,10 +1763,12 @@ async def api_legal_case_detail(item_id: str):
         if not str(item_id).isdigit():
             raise HTTPException(status_code=400, detail="item_id must be a numeric legal document id.")
 
+        broadcast_trace("request", f"Legal case fetch — item: {item_id}", None)
         doc = legal_rag_get_document(int(item_id))
         if not isinstance(doc, dict):
             raise HTTPException(status_code=404, detail=f"Case '{item_id}' not found.")
 
+        broadcast_trace("retrieval", f"Fetched legal document: {str(doc.get('title', ''))[:100]}", None)
         metadata = doc.get("metadata_json") or {}
         return {
             "id": doc.get("id"),
@@ -1650,7 +1862,11 @@ async def api_format_legal_document(
     try:
         if not str(item_id).isdigit():
             raise HTTPException(status_code=400, detail="item_id must be a numeric legal document id.")
-        return _format_and_store_legal_markdown(int(item_id), force=force, generate_title=generate_title)
+        broadcast_trace("request", f"Legal format — item: {item_id}", None)
+        broadcast_trace("action", "Calling LLM to format legal document as markdown...", None)
+        result = _format_and_store_legal_markdown(int(item_id), force=force, generate_title=generate_title)
+        broadcast_trace("memory", "Formatted markdown stored.", None)
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -1706,6 +1922,7 @@ async def api_format_legal_documents(
     """
     try:
         doc_ids = _list_document_ids_to_format(force=force, limit=None if all_docs else limit, all_docs=all_docs)
+        broadcast_trace("request", f"Legal format-documents — {len(doc_ids)} document(s) to format", None)
         if not doc_ids:
             return {
                 "total": 0,
@@ -1787,6 +2004,8 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
     s3_key = request.s3_key
     filename = request.filename or os.path.basename(s3_key)
     ext = os.path.splitext(filename)[1].lower()
+    session_id = getattr(request, "session_id", None)
+    broadcast_trace("request", f"Legal document analysis — file: {filename}", session_id)
 
     tmp_dir = tempfile.gettempdir()
     local_path = os.path.join(tmp_dir, os.path.basename(s3_key))
@@ -1845,6 +2064,7 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
             if not _context.openai_api_key:
                 raise HTTPException(status_code=400, detail="OpenAI API key required for audio transcription.")
             try:
+                broadcast_trace("action", "Transcribing audio with Whisper...", session_id)
                 client = OpenAI(api_key=_context.openai_api_key)
                 with open(local_path, "rb") as audio_file:
                     transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
@@ -1856,6 +2076,7 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
             if not _context.openai_api_key:
                 raise HTTPException(status_code=400, detail="OpenAI API key required for image OCR.")
             try:
+                broadcast_trace("action", "Running vision OCR on document image...", session_id)
                 import base64, mimetypes
                 b64 = base64.b64encode(contents).decode("utf-8")
                 mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext[1:]}"
@@ -1885,10 +2106,12 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
             extracted_text = extracted_text[:CHAR_LIMIT]
 
         logging.info(f"[Analyze Document] Extracted {len(extracted_text)} chars from '{filename}'")
+        broadcast_trace("retrieval", f"Text extracted — {len(extracted_text)} chars from '{filename}'", session_id)
 
         ai_summary = None
         if _context.openai_api_key:
             try:
+                broadcast_trace("action", "Analysing document content with LLM...", session_id)
                 client = OpenAI(api_key=_context.openai_api_key)
                 system_prompt = (
                     "You are an expert Philippine legal document analyst with deep knowledge of Philippine law, "
@@ -1925,6 +2148,7 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
                     max_tokens=4000,
                 )
                 ai_summary = response.choices[0].message.content.strip()
+                broadcast_trace("cognition", f"Analysis complete — {len(ai_summary)} chars extracted", session_id)
                 logging.info(f"[Analyze Document] AI summary generated for '{filename}' ({len(ai_summary)} chars)")
             except Exception as e:
                 logging.warning(f"[Analyze Document] AI summary failed (non-fatal): {e}")
@@ -1963,6 +2187,7 @@ async def upload_and_analyze(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="File too large. Maximum allowed size is 20MB.")
 
     filename = file.filename or "document"
+    broadcast_trace("request", f"Upload and analyse — file: {filename}", None)
     safe_filename = "".join(c for c in filename if c.isalnum() or c in " ._-")
     s3_key = f"uploads/documents/{uuid.uuid4()}-{safe_filename}"
 
@@ -1987,6 +2212,9 @@ async def synthesize_documents(request: SynthesizeDocumentsRequest):
         raise HTTPException(status_code=400, detail="No summaries provided for synthesis.")
     if not _context.openai_api_key:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+    session_id = getattr(request, "session_id", None)
+    broadcast_trace("request", f"Legal synthesis — {len(request.summaries)} document(s)", session_id)
 
     client = OpenAI(api_key=_context.openai_api_key)
 
@@ -2018,6 +2246,7 @@ Be legally precise, referencing Philippine law where applicable. Synthesize — 
     for i, summary in enumerate(request.summaries):
         combined_text += f"=== DOCUMENT {i + 1} ANALYSIS ===\n{summary}\n\n"
 
+    broadcast_trace("action", "Calling LLM to synthesize across documents...", session_id)
     try:
         response = client.chat.completions.create(
             model=_context.model,
@@ -2029,6 +2258,7 @@ Be legally precise, referencing Philippine law where applicable. Synthesize — 
             max_tokens=3000,
         )
         synthesis = response.choices[0].message.content.strip()
+        broadcast_trace("cognition", f"Synthesis complete — {len(synthesis)} chars", session_id)
         logging.info(f"[Synthesize Documents] Synthesis generated for {len(request.summaries)} documents.")
         return {"success": True, "synthesis": synthesis}
     except Exception as e:
@@ -2046,7 +2276,9 @@ async def scan_cosmetic_product(request: CosmeticScanRequest):
     if not _context.openai_api_key:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
 
+    broadcast_trace("request", f"Cosmetics scan — s3_key: {request.back_s3_key[:60]}", request.session_id)
     from resources.functions.user_functions import scan_cosmetic
+    broadcast_trace("action", "Running cosmetic ingredient scan...", request.session_id)
     analysis = scan_cosmetic(
         front_s3_key=request.front_s3_key or "",
         back_s3_key=request.back_s3_key,
@@ -2066,6 +2298,7 @@ async def scan_cosmetic_product(request: CosmeticScanRequest):
         )
         state.generated.append({"role": "assistant", "content": seed_message})
 
+    broadcast_trace("cognition", "Scan complete.", request.session_id)
     logging.info(f"[Cosmetics Scan] {analysis.get('product_name', 'unknown')} — front: {request.front_s3_key}")
     return analysis
 
@@ -2076,10 +2309,12 @@ async def match_cosmetic_products(request: CosmeticMatchRequest):
     if not _context.openai_api_key:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
 
+    broadcast_trace("request", f"Cosmetics match — A: {request.product_a_s3_key[:40]} B: {request.product_b_s3_key[:40]}", request.session_id)
     from resources.functions.user_functions import scan_cosmetic, match_cosmetics
 
     skin_type = request.skin_type or "general"
 
+    broadcast_trace("action", "Scanning both products...", request.session_id)
     scan_a = scan_cosmetic(front_s3_key="", back_s3_key=request.product_a_s3_key, skin_type=skin_type)
     if not scan_a.get("success"):
         raise HTTPException(status_code=500, detail=f"Failed to scan product A: {scan_a.get('error')}")
@@ -2088,6 +2323,7 @@ async def match_cosmetic_products(request: CosmeticMatchRequest):
     if not scan_b.get("success"):
         raise HTTPException(status_code=500, detail=f"Failed to scan product B: {scan_b.get('error')}")
 
+    broadcast_trace("action", "Running compatibility match...", request.session_id)
     result = match_cosmetics(
         product_a_name=scan_a.get("product_name") or request.product_a_s3_key,
         product_a_ingredients=scan_a.get("ingredients", []),
@@ -2114,5 +2350,6 @@ async def match_cosmetic_products(request: CosmeticMatchRequest):
         )
         state.generated.append({"role": "assistant", "content": seed_message})
 
+    broadcast_trace("cognition", "Match complete.", request.session_id)
     logging.info(f"[Cosmetics Match] {scan_a.get('product_name')} + {scan_b.get('product_name')} → {result.get('verdict')}")
     return result
