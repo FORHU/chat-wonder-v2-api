@@ -518,6 +518,26 @@ def repair_legal_source_links(text: str, search_results) -> str:
     if not source_ids:
         return text
 
+    # Keep only ids that currently exist in the legal documents table.
+    # This protects against stale/mismatched ids leaking into /sources/{id}.
+    try:
+        legal_db = legal_rag_get_cached_db()
+        if legal_db is not None:
+            with legal_db.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM documents WHERE id = ANY(%s::bigint[])",
+                        ([int(x) for x in source_ids],),
+                    )
+                    existing = {str(row[0]) for row in cur.fetchall()}
+            source_ids = [x for x in source_ids if x in existing]
+    except Exception as e:
+        logging.warning("[legal-citation] source id existence validation skipped: %s", e)
+
+    if not source_ids:
+        logging.warning("[legal-citation] no valid existing source ids available for repair")
+        return text
+
     # Match /sources/{segment} in markdown links.
     # Keep numeric ids only when they exist in current search results.
     broken = re.compile(r"/sources/([^)\s\"\]]*)")
