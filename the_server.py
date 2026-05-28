@@ -251,21 +251,26 @@ async def startup_event():
         if db_url:
             if "?schema=" in db_url:
                 db_url = db_url.split("?schema=")[0]
-            # urlparse mishandles passwords with encoded brackets/colons, so split manually.
-            # Safe because @ in passwords must be encoded as %40.
-            scheme_userinfo, hostinfo = db_url.rsplit("@", 1)
-            userinfo = scheme_userinfo.split("://", 1)[1]
-            db_user, db_pass_enc = userinfo.split(":", 1)
-            host_port, dbname = hostinfo.split("/", 1)
-            db_host, db_port = host_port.rsplit(":", 1)
-            _context.db_pool = pg_pool.SimpleConnectionPool(
-                minconn=1, maxconn=10,
-                host=db_host,
-                port=int(db_port),
-                dbname=dbname,
-                user=unquote(db_user),
-                password=unquote(db_pass_enc),
-            )
+            if db_url.startswith(("postgres://", "postgresql://")):
+                # URI format — urlparse mishandles passwords with encoded brackets/colons, so split manually.
+                # Safe because @ in passwords must be encoded as %40.
+                scheme_userinfo, hostinfo = db_url.rsplit("@", 1)
+                userinfo = scheme_userinfo.split("://", 1)[1]
+                db_user, db_pass_enc = userinfo.split(":", 1)
+                host_port, dbname = hostinfo.split("/", 1)
+                db_host, db_port = host_port.rsplit(":", 1)
+                _context.db_pool = pg_pool.SimpleConnectionPool(
+                    minconn=1, maxconn=10,
+                    host=db_host,
+                    port=int(db_port),
+                    dbname=dbname,
+                    user=unquote(db_user),
+                    password=unquote(db_pass_enc),
+                )
+            else:
+                # key=value DSN format (e.g. "host=... port=... dbname=... user=... password=...")
+                # psycopg2 accepts this natively and handles special characters without encoding.
+                _context.db_pool = pg_pool.SimpleConnectionPool(minconn=1, maxconn=10, dsn=db_url)
             logging.info("DB connection pool created")
         else:
             logging.warning("LEGAL_DATABASE_URL not set")
