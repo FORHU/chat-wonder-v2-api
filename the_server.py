@@ -83,6 +83,7 @@ _context.informed: bool = True
 _context.show_clues: list = []
 _context.expertise: str = "General"
 _context.tone: str = "factual"
+_context.build_marker: str = os.getenv("APP_BUILD_MARKER", "legal-citation-guard-v1")
 
 if os.path.exists("addendum.txt"):
     try:
@@ -1157,6 +1158,24 @@ async def health_check():
 async def get_config():
     """Public config for frontend clients — no secrets."""
     return {"legal_library_url": _context.legal_library_url}
+
+
+@app.get("/version")
+async def get_version():
+    """Runtime build marker for deployment verification."""
+    return {
+        "service": "chat-wonder-v2-api",
+        "build_marker": _context.build_marker,
+        "chat_model": _context.model,
+        "citation_guard": {
+            "enabled": True,
+            "strict_out_of_set_validation": True,
+            "metrics": [
+                "legal.citation_invalid_detected.count",
+                "legal.citation_repair.count",
+            ],
+        },
+    }
 
 
 @app.get("/session-id")
