@@ -142,6 +142,7 @@ app.include_router(legal_rag_router)
 
 _trace_queues: set = set()
 _app_event_loop = None  # captured at startup so worker threads can schedule on the main loop
+_metric_counters: dict = {}
 
 def broadcast_trace(event_type: str, text: str, session_id: str = None):
     data = json.dumps({"type": event_type, "text": text.strip(), "session_id": session_id, "ts": time.time()})
@@ -155,6 +156,59 @@ def broadcast_trace(event_type: str, text: str, session_id: str = None):
         _app_event_loop.call_soon_threadsafe(_put_all)
     else:
         _put_all()
+
+
+def increment_metric_counter(name: str, value: int = 1, tags: dict = None, session_id: str = None):
+    """Emit a lightweight counter metric via logs + optional trace."""
+    if not name:
+        return
+    key = (name, tuple(sorted((tags or {}).items())))
+    _metric_counters[key] = _metric_counters.get(key, 0) + int(value)
+    logging.info(
+        "[metric] type=counter name=%s value=%s total=%s tags=%s",
+        name,
+        value,
+        _metric_counters[key],
+        tags or {},
+    )
+    # CloudWatch Embedded Metric Format (EMF) for native metrics ingestion.
+    try:
+        dimensions = ["metric_name"]
+        emf_payload = {
+            "_aws": {
+                "Timestamp": int(time.time() * 1000),
+                "CloudWatchMetrics": [
+                    {
+                        "Namespace": "ChatWonder/Legal",
+                        "Dimensions": [dimensions],
+                        "Metrics": [{"Name": name, "Unit": "Count"}],
+                    }
+                ],
+            },
+            "metric_name": name,
+            name: int(value),
+            "counter_total": _metric_counters[key],
+        }
+        if tags:
+            for k, v in tags.items():
+                safe_key = re.sub(r"[^A-Za-z0-9_]", "_", str(k))
+                if safe_key and safe_key not in emf_payload:
+                    emf_payload[safe_key] = str(v)
+                    dimensions.append(safe_key)
+        logging.info(json.dumps(emf_payload, ensure_ascii=True))
+    except Exception as e:
+        logging.warning("[metric] EMF emit failed name=%s err=%s", name, e)
+    tracer = globals().get("broadcast_trace")
+    if callable(tracer):
+        try:
+            tracer(
+                "metric",
+                f"counter {name} +{value} total={_metric_counters[key]} tags={tags or {}}",
+                session_id,
+            )
+        except Exception:
+            # Metrics must never break response generation.
+            pass
 
 @app.get("/trace-stream", summary="Glass-box trace SSE stream (consumed by scl-core-v2)")
 async def trace_stream():
@@ -449,7 +503,10 @@ def format_legal_citation_links(text: str) -> str:
     return text
 
 def repair_legal_source_links(text: str, search_results) -> str:
-    """Replace broken /sources/... hrefs with numeric legal document ids from search results."""
+    """Ensure /sources/... links map to ids present in current search results.
+
+    Any missing/placeholder/out-of-set id is rewritten using the active result ids.
+    """
     if not text or not isinstance(text, str) or not search_results:
         return text
     source_ids = []
@@ -460,19 +517,60 @@ def repair_legal_source_links(text: str, search_results) -> str:
     if not source_ids:
         return text
 
-    # Match /sources/{segment} in markdown links; keep valid numeric ids unchanged.
+    # Match /sources/{segment} in markdown links.
+    # Keep numeric ids only when they exist in current search results.
     broken = re.compile(r"/sources/([^)\s\"\]]*)")
     idx = [0]
+    source_id_set = set(source_ids)
 
     def repl(m):
         segment = m.group(1)
-        if segment.isdigit():
+        if segment.isdigit() and segment in source_id_set:
             return m.group(0)
         replacement = source_ids[min(idx[0], len(source_ids) - 1)]
         idx[0] += 1
         return f"/sources/{replacement}"
+    repaired = broken.sub(repl, text)
 
-    return broken.sub(repl, text)
+    # Hard validation gate: no outbound citation id may fall outside current search results.
+    invalid_ids = []
+    for m in broken.finditer(repaired):
+        segment = m.group(1)
+        if not (segment.isdigit() and segment in source_id_set):
+            invalid_ids.append(segment)
+
+    if invalid_ids:
+        increment_metric_counter(
+            "legal.citation_invalid_detected.count",
+            value=len(invalid_ids),
+            tags={"reason": "invalid_or_out_of_set_id"},
+            session_id=None,
+        )
+        logging.warning(
+            "[legal-citation] invalid source ids after repair=%s; forcing fallback id=%s",
+            invalid_ids,
+            source_ids[0],
+        )
+        increment_metric_counter(
+            "legal.citation_repair.count",
+            value=1,
+            tags={"reason": "invalid_or_out_of_set_id"},
+            session_id=None,
+        )
+        tracer = globals().get("broadcast_trace")
+        if callable(tracer):
+            try:
+                tracer(
+                    "action",
+                    f"Legal citation guard rewrote invalid source ids: {invalid_ids} -> {source_ids[0]}",
+                    None,
+                )
+            except Exception:
+                # Trace must never break response generation.
+                pass
+        repaired = broken.sub(f"/sources/{source_ids[0]}", repaired)
+
+    return repaired
 
 # ---------------------------------------------------------------------------
 # System prompts
