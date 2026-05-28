@@ -246,11 +246,26 @@ async def startup_event():
     logging.info("Starting Chat Wonder v2...")
     try:
         from psycopg2 import pool as pg_pool
+        from urllib.parse import unquote
         db_url = os.getenv("LEGAL_DATABASE_URL")
         if db_url:
             if "?schema=" in db_url:
                 db_url = db_url.split("?schema=")[0]
-            _context.db_pool = pg_pool.SimpleConnectionPool(minconn=1, maxconn=10, dsn=db_url)
+            # urlparse mishandles passwords with encoded brackets/colons, so split manually.
+            # Safe because @ in passwords must be encoded as %40.
+            scheme_userinfo, hostinfo = db_url.rsplit("@", 1)
+            userinfo = scheme_userinfo.split("://", 1)[1]
+            db_user, db_pass_enc = userinfo.split(":", 1)
+            host_port, dbname = hostinfo.split("/", 1)
+            db_host, db_port = host_port.rsplit(":", 1)
+            _context.db_pool = pg_pool.SimpleConnectionPool(
+                minconn=1, maxconn=10,
+                host=db_host,
+                port=int(db_port),
+                dbname=dbname,
+                user=unquote(db_user),
+                password=unquote(db_pass_enc),
+            )
             logging.info("DB connection pool created")
         else:
             logging.warning("LEGAL_DATABASE_URL not set")
