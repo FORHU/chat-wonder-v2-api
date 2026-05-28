@@ -2,7 +2,7 @@ name: Deploy to EC2
 
 on:
     push:
-        branches: [main]
+        branches: [staging]
     workflow_dispatch:
         inputs:
             image_tag:
@@ -50,6 +50,22 @@ jobs:
                   envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION
                   script: |
                       set -e
+
+                      # ── Bootstrap: Docker ─────────────────────────────────────────
+                      if ! command -v docker &> /dev/null; then
+                        sudo dnf install -y docker
+                        sudo systemctl enable --now docker
+                        sudo usermod -aG docker ec2-user
+                        newgrp docker
+                      fi
+
+                      # ── Bootstrap: AWS CLI ────────────────────────────────────────
+                      if ! command -v aws &> /dev/null; then
+                        curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+                        unzip -q /tmp/awscliv2.zip -d /tmp
+                        sudo /tmp/aws/install
+                        rm -rf /tmp/awscliv2.zip /tmp/aws
+                      fi
 
                       # ── App directories ──────────────────────────────────────────
                       sudo mkdir -p /opt/chat-wonder-v2/resources/functions
