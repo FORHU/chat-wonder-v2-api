@@ -997,20 +997,34 @@ def recommend_garments(
         except ValueError:
             pass
 
-    location_label = location or "Manila, Philippines"
-
-    # Weather always comes from the frontend — never fetch it here
     weather: dict = {}
+    frontend_lat, frontend_lon = None, None
     if weather_json:
+        # Frontend-provided weather takes priority
         try:
             weather = json.loads(weather_json)
             weather.setdefault("estimated", False)
-            weather.pop("lat", None)
-            weather.pop("lon", None)
+            frontend_lat = weather.pop("lat", None)
+            frontend_lon = weather.pop("lon", None)
         except Exception as e:
             logging.warning(f"[garments] weather_json parse failed: {e}")
+
+    if location:
+        # User mentioned a location — geocode it
+        location_label = location
+        lat, lon = _geocode_location(location)
+    elif frontend_lat is not None and frontend_lon is not None:
+        # No location in prompt — use frontend geolocation
+        location_label = "your current location"
+        lat, lon = float(frontend_lat), float(frontend_lon)
+    else:
+        # Final fallback
+        location_label = "Manila, Philippines"
+        lat, lon = _DEFAULT_LAT, _DEFAULT_LON
+
     if not weather:
-        weather = {"description": "weather unavailable", "estimated": True}
+        # No frontend weather — fetch server-side using resolved coordinates
+        weather = _fetch_weather(lat, lon, resolved_date)
 
     all_garments = _fetch_all_garments()
     if not all_garments:
