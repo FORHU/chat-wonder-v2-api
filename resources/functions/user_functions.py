@@ -15,7 +15,7 @@ _logger = logging.getLogger(__name__)
 CACHE_TTL_SECONDS = 30
 
 # Garments API
-_GARMENTS_API_BASE = "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/garments"
+_GARMENTS_API_BASE = os.getenv("GARMENTS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/garments")
 _GARMENTS_CACHE_TTL = 300  # 5 minutes
 _garments_cache: dict = {"data": None, "timestamp": 0}
 _DEFAULT_LAT = 14.5995  # Manila
@@ -863,7 +863,7 @@ def _http_get_json(url: str, headers: dict = None) -> dict:
 
 
 def _fetch_all_garments() -> list:
-    api_key = os.getenv("GARMENTS_API_KEY", "e8b6bc99b1b1eddb1a1bc5f4a3178b3b4a72b8e9266d6f96d5f601f9f0706507")
+    api_key = os.getenv("GARMENTS_API_KEY", "")
     if _garments_cache["data"] and (time.time() - _garments_cache["timestamp"]) < _GARMENTS_CACHE_TTL:
         return _garments_cache["data"]
     try:
