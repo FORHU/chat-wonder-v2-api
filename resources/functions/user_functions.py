@@ -1127,7 +1127,6 @@ def recommend_garments(
             "event_type": event_type,
             "event_date": resolved_date,
             "location": location_label,
-            "coordinates": {"lat": lat, "lon": lon},
             "weather": weather,
             "sets_requested": n_sets,
             **result,

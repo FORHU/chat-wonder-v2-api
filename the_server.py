@@ -104,6 +104,7 @@ class ChatState:
         self.summary: str = ""
         self.source_metadata: list = []
         self.last_search_legal_results: list = []
+        self.last_garment_result: dict = {}
         self.openai_client = None
         self.last_used: float = time.time()
         # HITL pending state
@@ -244,6 +245,7 @@ class ChatRequest(BaseModel):
     user_history_select: Optional[str] = None
     session_id: Optional[str] = None
     document_context: Optional[str] = None
+    weather: Optional[dict] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -390,9 +392,9 @@ def process_persona(user_input: str):
             "When presenting results, format each set exactly like this:\n"
             "## Set 1 — [Vibe Name]\n"
             "*[trend_note]*\n\n"
-            "For each garment in the set, write its name in bold then show its image on the next line:\n"
-            "**[Garment Name]** — [reason]\n"
-            "![Garment Name](imageUrl)\n\n"
+            "For each garment in the set, write its name in bold followed by the reason:\n"
+            "**[Garment Name]** — [reason]\n\n"
+            "Do NOT include image tags or image URLs in your text response — images are handled separately by the frontend.\n\n"
             "Repeat the ## Set N — [Vibe] header for each additional set. "
             "Keep the tone friendly and conversational. Mention the weather context briefly at the start."
         )
@@ -747,6 +749,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_search_legal_results = result.get("results", [])
+        if func_name == "recommend_garments" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                state.last_garment_result = result
         logging.info(f"Function {func_name} executed successfully.")
         return result
     except Exception as e:
@@ -1236,6 +1242,12 @@ def chat(request: ChatRequest):
 
     persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
 
+    if persona == "garment" and request.weather:
+        try:
+            user_input = f"[FRONTEND_WEATHER:{json.dumps(request.weather, ensure_ascii=False)}]\n\n{user_input}"
+        except Exception:
+            pass
+
     if getattr(request, "document_context", None):
         doc_injection = f"\n\n[CONTEXT: The user is viewing the following document:]\n{request.document_context}"
         addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
@@ -1300,6 +1312,7 @@ def chat(request: ChatRequest):
         "response": final_text,
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
+        "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
     }
 
 
@@ -1407,6 +1420,7 @@ def approve(request: ApproveRequest):
         "status": "completed",
         "response": final_text,
         "hitl_decision": hitl_decision_record,
+        "garment_sets": state.last_garment_result if state.last_garment_result else None,
     }
 
 
@@ -1607,6 +1621,8 @@ async def chat_stream(websocket: WebSocket):
                     if persona == "legal" and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
+                    if persona == "garment" and state.last_garment_result:
+                        await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
                 _ws_t_end = time.time()
