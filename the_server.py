@@ -105,6 +105,7 @@ class ChatState:
         self.source_metadata: list = []
         self.last_search_legal_results: list = []
         self.last_garment_result: dict = {}
+        self.last_cosmetics_result: dict = {}
         self.openai_client = None
         self.last_used: float = time.time()
         # HITL pending state
@@ -246,6 +247,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     document_context: Optional[str] = None
     weather: Optional[dict] = None
+    skin_analysis: Optional[dict] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -397,6 +399,29 @@ def process_persona(user_input: str):
             "Do NOT include image tags or image URLs in your text response — images are handled separately by the frontend.\n\n"
             "Repeat the ## Set N — [Vibe] header for each additional set. "
             "Keep the tone friendly and conversational. Mention the weather context briefly at the start."
+        )
+
+    elif user_input.lower().startswith("[cosmetics]"):
+        persona = "cosmetics"
+        user_input = user_input[11:].strip()
+        cosmetics_whitelist = ["recommend_cosmetics"]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in cosmetics_whitelist]
+        addendum_override = (
+            "COSMETICS ASSISTANT MODE\n\n"
+            "You are a helpful skincare advisor and dermatology assistant. "
+            "Use the recommend_cosmetics function to fetch personalised skincare routine recommendations.\n\n"
+            "IMPORTANT — skin analysis handling: If the message contains [SKIN_ANALYSIS:{...}], "
+            "you MUST extract that JSON string exactly as-is and pass it as the skin_analysis_json parameter "
+            "when calling recommend_cosmetics. Do not modify, summarize, or omit it. "
+            "Never show, repeat, or mention the [SKIN_ANALYSIS] annotation in your response to the user — it is internal data only.\n\n"
+            "When presenting results, format each routine exactly like this:\n"
+            "## Routine 1 — [Vibe Name]\n"
+            "*[concern_note]*\n\n"
+            "For each product in the routine, write its name in bold followed by the reason:\n"
+            "**[Product Name]** (brand) — [reason]\n\n"
+            "Do NOT include image tags or image URLs in your text response — images are handled separately by the frontend.\n\n"
+            "Repeat the ## Routine N — [Vibe] header for each additional routine. "
+            "Start with a brief summary of what the skin analysis reveals. Keep the tone friendly and supportive."
         )
 
     return persona, user_input, filtered_tools, addendum_override
@@ -753,6 +778,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_garment_result = result
+        if func_name == "recommend_cosmetics" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                state.last_cosmetics_result = result
         logging.info(f"Function {func_name} executed successfully.")
         return result
     except Exception as e:
@@ -1305,6 +1334,12 @@ def chat(request: ChatRequest):
         except Exception:
             pass
 
+    if persona == "cosmetics" and request.skin_analysis:
+        try:
+            user_input = f"[SKIN_ANALYSIS:{json.dumps(request.skin_analysis, ensure_ascii=False)}]\n\n{user_input}"
+        except Exception:
+            pass
+
     if getattr(request, "document_context", None):
         doc_injection = f"\n\n[CONTEXT: The user is viewing the following document:]\n{request.document_context}"
         addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
@@ -1325,9 +1360,9 @@ def chat(request: ChatRequest):
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received. Persona: {persona}. {_tool_count} tool(s) available.\n\nQuestion: \"{user_input[:400]}\"")
 
-    # Normal path with optional HITL (legal and garment personas always auto-approve their tools)
+    # Normal path with optional HITL (legal, garment, and cosmetics personas always auto-approve their tools)
     _was_auto = _context.auto_approval
-    if persona in ("legal", "garment"):
+    if persona in ("legal", "garment", "cosmetics"):
         _context.auto_approval = True
     try:
         result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override)
@@ -1371,6 +1406,7 @@ def chat(request: ChatRequest):
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
+        "cosmetics_sets": state.last_cosmetics_result if persona == "cosmetics" and state.last_cosmetics_result else None,
     }
 
 
@@ -1628,6 +1664,13 @@ async def chat_stream(websocket: WebSocket):
                 except Exception:
                     pass
 
+            # Inject frontend-provided skin analysis for cosmetics persona
+            if persona == "cosmetics" and data.get("skin_analysis"):
+                try:
+                    user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
+                except Exception:
+                    pass
+
             if getattr(request, "document_context", None):
                 doc_injection = f"\n\n[CONTEXT: User is viewing:]\n{request.document_context}"
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
@@ -1646,7 +1689,7 @@ async def chat_stream(websocket: WebSocket):
             _ws_t_first_chunk = None
             _was_auto = _context.auto_approval
             end_sent = False
-            if persona in ("legal", "garment"):
+            if persona in ("legal", "garment", "cosmetics"):
                 _context.auto_approval = True
             try:
                 for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override):
@@ -1684,6 +1727,8 @@ async def chat_stream(websocket: WebSocket):
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                     if persona == "garment" and state.last_garment_result:
                         await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
+                    if persona == "cosmetics" and state.last_cosmetics_result:
+                        await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
                 _ws_t_end = time.time()

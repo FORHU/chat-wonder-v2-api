@@ -21,11 +21,15 @@
           },
           "content_types": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Optional filter by content type: case, statute, scelibrary"
           }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       }
     }
   },
@@ -43,11 +47,17 @@
           },
           "summary_type": {
             "type": "string",
-            "enum": ["brief", "detailed", "legal-analysis"],
+            "enum": [
+              "brief",
+              "detailed",
+              "legal-analysis"
+            ],
             "description": "Type of summary: brief (2-3 paragraphs), detailed (full breakdown), legal-analysis (includes ratio decidendi and obiter dicta)"
           }
         },
-        "required": ["case_identifier"]
+        "required": [
+          "case_identifier"
+        ]
       }
     }
   },
@@ -68,7 +78,9 @@
             "description": "Optional context about the user's specific situation"
           }
         },
-        "required": ["legal_issue"]
+        "required": [
+          "legal_issue"
+        ]
       }
     }
   },
@@ -89,7 +101,9 @@
             "description": "Optional display filename for the document"
           }
         },
-        "required": ["s3_key"]
+        "required": [
+          "s3_key"
+        ]
       }
     }
   },
@@ -111,11 +125,19 @@
           },
           "skin_type": {
             "type": "string",
-            "enum": ["oily", "dry", "sensitive", "combination", "general"],
+            "enum": [
+              "oily",
+              "dry",
+              "sensitive",
+              "combination",
+              "general"
+            ],
             "description": "User's skin type for personalized ingredient verdicts. Defaults to 'general'."
           }
         },
-        "required": ["back_s3_key"]
+        "required": [
+          "back_s3_key"
+        ]
       }
     }
   },
@@ -133,7 +155,9 @@
           },
           "product_a_ingredients": {
             "type": "array",
-            "items": { "type": "object" },
+            "items": {
+              "type": "object"
+            },
             "description": "Ingredients array from the first product's scan result"
           },
           "product_b_name": {
@@ -142,16 +166,29 @@
           },
           "product_b_ingredients": {
             "type": "array",
-            "items": { "type": "object" },
+            "items": {
+              "type": "object"
+            },
             "description": "Ingredients array from the second product's scan result"
           },
           "skin_type": {
             "type": "string",
-            "enum": ["oily", "dry", "sensitive", "combination", "general"],
+            "enum": [
+              "oily",
+              "dry",
+              "sensitive",
+              "combination",
+              "general"
+            ],
             "description": "User's skin type for personalized conflict assessment. Defaults to 'general'."
           }
         },
-        "required": ["product_a_name", "product_a_ingredients", "product_b_name", "product_b_ingredients"]
+        "required": [
+          "product_a_name",
+          "product_a_ingredients",
+          "product_b_name",
+          "product_b_ingredients"
+        ]
       }
     }
   },
@@ -165,35 +202,116 @@
         "properties": {
           "document_type": {
             "type": "string",
-            "enum": ["affidavit_of_loss", "demand_letter", "power_of_attorney", "authorization_letter", "promissory_note", "lease_contract"],
+            "enum": [
+              "affidavit_of_loss",
+              "demand_letter",
+              "power_of_attorney",
+              "authorization_letter",
+              "promissory_note",
+              "lease_contract"
+            ],
             "description": "Type of legal document to generate"
           },
-          "affiant_name": { "type": "string", "description": "For affidavit_of_loss: full name of affiant" },
-          "item_lost": { "type": "string", "description": "For affidavit_of_loss: description of lost item" },
-          "date_lost": { "type": "string", "description": "For affidavit_of_loss: date when item was lost" },
-          "circumstances": { "type": "string", "description": "For affidavit_of_loss: how the item was lost" },
-          "sender_name": { "type": "string", "description": "For demand_letter: sender full name" },
-          "recipient_name": { "type": "string", "description": "For demand_letter: recipient full name" },
-          "amount": { "type": "string", "description": "For demand_letter/promissory_note: amount in PHP" },
-          "reason": { "type": "string", "description": "For demand_letter: reason for demand" },
-          "deadline_days": { "type": "integer", "description": "For demand_letter: days to comply" },
-          "principal_name": { "type": "string", "description": "For power_of_attorney: principal (grantor) name" },
-          "attorney_name": { "type": "string", "description": "For power_of_attorney: attorney-in-fact name" },
-          "powers_granted": { "type": "string", "description": "For power_of_attorney: powers being granted" },
-          "authorizer_name": { "type": "string", "description": "For authorization_letter: authorizer full name" },
-          "authorized_person": { "type": "string", "description": "For authorization_letter: authorized person's name" },
-          "purpose": { "type": "string", "description": "For authorization_letter: purpose of authorization" },
-          "borrower_name": { "type": "string", "description": "For promissory_note: borrower full name" },
-          "lender_name": { "type": "string", "description": "For promissory_note: lender full name" },
-          "principal_amount": { "type": "string", "description": "For promissory_note: loan amount" },
-          "due_date": { "type": "string", "description": "For promissory_note: payment due date" },
-          "lessor_name": { "type": "string", "description": "For lease_contract: landlord full name" },
-          "lessee_name": { "type": "string", "description": "For lease_contract: tenant full name" },
-          "property_address": { "type": "string", "description": "For lease_contract: property address" },
-          "monthly_rent": { "type": "string", "description": "For lease_contract: monthly rent amount" },
-          "lease_term": { "type": "string", "description": "For lease_contract: lease duration (e.g. '1 year')" }
+          "affiant_name": {
+            "type": "string",
+            "description": "For affidavit_of_loss: full name of affiant"
+          },
+          "item_lost": {
+            "type": "string",
+            "description": "For affidavit_of_loss: description of lost item"
+          },
+          "date_lost": {
+            "type": "string",
+            "description": "For affidavit_of_loss: date when item was lost"
+          },
+          "circumstances": {
+            "type": "string",
+            "description": "For affidavit_of_loss: how the item was lost"
+          },
+          "sender_name": {
+            "type": "string",
+            "description": "For demand_letter: sender full name"
+          },
+          "recipient_name": {
+            "type": "string",
+            "description": "For demand_letter: recipient full name"
+          },
+          "amount": {
+            "type": "string",
+            "description": "For demand_letter/promissory_note: amount in PHP"
+          },
+          "reason": {
+            "type": "string",
+            "description": "For demand_letter: reason for demand"
+          },
+          "deadline_days": {
+            "type": "integer",
+            "description": "For demand_letter: days to comply"
+          },
+          "principal_name": {
+            "type": "string",
+            "description": "For power_of_attorney: principal (grantor) name"
+          },
+          "attorney_name": {
+            "type": "string",
+            "description": "For power_of_attorney: attorney-in-fact name"
+          },
+          "powers_granted": {
+            "type": "string",
+            "description": "For power_of_attorney: powers being granted"
+          },
+          "authorizer_name": {
+            "type": "string",
+            "description": "For authorization_letter: authorizer full name"
+          },
+          "authorized_person": {
+            "type": "string",
+            "description": "For authorization_letter: authorized person's name"
+          },
+          "purpose": {
+            "type": "string",
+            "description": "For authorization_letter: purpose of authorization"
+          },
+          "borrower_name": {
+            "type": "string",
+            "description": "For promissory_note: borrower full name"
+          },
+          "lender_name": {
+            "type": "string",
+            "description": "For promissory_note: lender full name"
+          },
+          "principal_amount": {
+            "type": "string",
+            "description": "For promissory_note: loan amount"
+          },
+          "due_date": {
+            "type": "string",
+            "description": "For promissory_note: payment due date"
+          },
+          "lessor_name": {
+            "type": "string",
+            "description": "For lease_contract: landlord full name"
+          },
+          "lessee_name": {
+            "type": "string",
+            "description": "For lease_contract: tenant full name"
+          },
+          "property_address": {
+            "type": "string",
+            "description": "For lease_contract: property address"
+          },
+          "monthly_rent": {
+            "type": "string",
+            "description": "For lease_contract: monthly rent amount"
+          },
+          "lease_term": {
+            "type": "string",
+            "description": "For lease_contract: lease duration (e.g. '1 year')"
+          }
         },
-        "required": ["document_type"]
+        "required": [
+          "document_type"
+        ]
       }
     }
   },
@@ -208,8 +326,11 @@
         "properties": {
           "gender": {
             "type": "string",
-            "enum": ["MALE", "FEMALE"],
-            "description": "User's gender for filtering garments. Required — ask the user if not stated."
+            "enum": [
+              "MALE",
+              "FEMALE"
+            ],
+            "description": "User's gender for filtering garments. Required \u2014 ask the user if not stated."
           },
           "event_type": {
             "type": "string",
@@ -225,14 +346,38 @@
           },
           "sets": {
             "type": "integer",
-            "description": "Number of distinct outfit sets to recommend. Defaults to 1. Maximum is 3. Each set has a unique vibe tied to local fashion trends. Infer from user prompt — e.g. 'give me 2 outfits' → sets=2."
+            "description": "Number of distinct outfit sets to recommend. Defaults to 1. Maximum is 3. Each set has a unique vibe tied to local fashion trends. Infer from user prompt \u2014 e.g. 'give me 2 outfits' \u2192 sets=2."
           },
           "weather_json": {
             "type": "string",
             "description": "Pre-fetched weather data from the frontend as a JSON string. When the message contains [FRONTEND_WEATHER:{...}], extract that exact JSON string and pass it here verbatim. The function will skip internal weather fetching and use this data directly."
           }
         },
-        "required": ["gender"]
+        "required": [
+          "gender"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "cosmetics",
+    "function": {
+      "name": "recommend_cosmetics",
+      "description": "Recommend a personalised skincare routine from the cosmetics catalogue based on a skin analysis result. Call this when the user asks for product recommendations, skincare advice, or uses the [cosmetics] prefix. Parses skin analysis scores to determine skin type and concerns, then curates routine sets from a live catalogue.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skin_analysis_json": {
+            "type": "string",
+            "description": "Skin analysis result as a JSON string. When the message contains [SKIN_ANALYSIS:{...}], extract that exact JSON string and pass it here verbatim. The function derives skin type and concerns from the scores automatically."
+          },
+          "sets": {
+            "type": "integer",
+            "description": "Number of distinct skincare routines to recommend. Defaults to 1. Maximum is 3. Each routine targets a different vibe or concern. Infer from user prompt \u2014 e.g. \"give me 2 routines\" -> sets=2."
+          }
+        },
+        "required": []
       }
     }
   }

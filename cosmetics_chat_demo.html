@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Skincare AI Advisor</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0c0c10;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 14px 20px;
+      background: #111118;
+      border-bottom: 1px solid #22222e;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      font-weight: 600; letter-spacing: .4px;
+    }
+    .badge-cosmetics { background: #2a0f20; color: #f9a8d4; }
+    .badge-general   { background: #1a2a1a; color: #4ade80; }
+    #status {
+      margin-left: auto; font-size: 12px; color: #64748b;
+      display: flex; align-items: center; gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #ef4444; transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    /* ── Config bar ── */
+    .config-bar {
+      padding: 8px 20px; background: #0e0e14;
+      border-bottom: 1px solid #1a1a24;
+      display: flex; align-items: center; gap: 16px;
+      font-size: 13px; color: #94a3b8; flex-shrink: 0; flex-wrap: wrap;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 6px;
+      padding: 4px 10px; font-size: 13px; width: 220px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #ec4899; }
+    .toggle-switch { position: relative; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; background: #252535;
+      border-radius: 20px; cursor: pointer; transition: background .2s;
+    }
+    .slider::before {
+      content: ""; position: absolute;
+      width: 14px; height: 14px; left: 3px; top: 3px;
+      background: #fff; border-radius: 50%; transition: transform .2s;
+    }
+    .toggle-switch input:checked + .slider { background: #be185d; }
+    .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+    /* ── Main layout ── */
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1; overflow-y: auto;
+      padding: 24px 20px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #252535; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 800px; }
+    .msg.user      { align-self: flex-end;   align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px; font-weight: 600;
+      letter-spacing: .5px; text-transform: uppercase; color: #475569;
+    }
+    .bubble {
+      padding: 12px 16px; border-radius: 12px;
+      line-height: 1.65; font-size: 14px; max-width: 100%;
+    }
+    .msg.user .bubble { background: #2a0f20; color: #fce7f3; border-bottom-right-radius: 4px; }
+    .msg.assistant .bubble {
+      background: #111118; color: #e2e8f0;
+      border-bottom-left-radius: 4px; border: 1px solid #22222e;
+    }
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
+    .bubble p  { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble em { color: #f9a8d4; }
+    .bubble a  { color: #ec4899; }
+
+    /* Typing */
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px; background: #475569;
+      border-radius: 50%; animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40%            { transform: translateY(-7px); }
+    }
+
+    /* ── Skincare panel ── */
+    #skincare-panel {
+      width: 320px; flex-shrink: 0;
+      border-left: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 12px 16px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: .6px; text-transform: uppercase; color: #475569;
+      border-bottom: 1px solid #1a1a24;
+      flex-shrink: 0;
+    }
+
+    /* Routine tabs */
+    #routine-tabs {
+      display: flex; gap: 0;
+      border-bottom: 1px solid #1a1a24;
+      background: #0e0e14;
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    #routine-tabs::-webkit-scrollbar { display: none; }
+    .routine-tab {
+      padding: 9px 16px;
+      font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .routine-tab.active { color: #f9a8d4; border-bottom-color: #be185d; }
+    .routine-tab:hover:not(.active) { color: #94a3b8; }
+
+    /* Panel scroll body */
+    #panel-body { flex: 1; overflow-y: auto; }
+    #panel-body::-webkit-scrollbar { width: 4px; }
+    #panel-body::-webkit-scrollbar-thumb { background: #252535; }
+
+    /* Skin profile block */
+    #skin-profile {
+      margin: 12px 12px 0;
+      padding: 12px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      display: none;
+    }
+    .profile-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 8px; }
+    .profile-chip {
+      font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
+      padding: 3px 10px; border-radius: 99px;
+      background: #2a0f20; color: #f9a8d4;
+    }
+    .profile-scores { display: flex; flex-wrap: wrap; gap: 6px; }
+    .score-item {
+      font-size: 10px; color: #94a3b8;
+      background: #1a1a24; border-radius: 6px;
+      padding: 3px 8px; display: flex; gap: 5px; align-items: center;
+    }
+    .score-bar-wrap { width: 40px; height: 4px; background: #252535; border-radius: 99px; overflow: hidden; }
+    .score-bar { height: 100%; border-radius: 99px; background: #be185d; transition: width .4s; }
+    .profile-note {
+      font-size: 11px; color: #64748b; margin-top: 8px; padding-top: 8px;
+      border-top: 1px solid #22222e; line-height: 1.5;
+    }
+
+    /* Concern note */
+    #concern-note {
+      margin: 10px 12px 0;
+      padding: 8px 12px;
+      background: #1a0d18; border: 1px solid #5b1a3c; border-radius: 8px;
+      font-size: 11px; color: #f9a8d4; line-height: 1.5;
+      display: none;
+    }
+
+    /* Product cards list */
+    #product-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+
+    .product-empty {
+      padding: 32px 16px; color: #475569; font-size: 12px;
+      text-align: center; line-height: 1.7;
+    }
+    .product-empty .empty-icon { font-size: 36px; margin-bottom: 10px; display: block; }
+
+    /* Product card */
+    .product-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color .2s, transform .15s;
+    }
+    .product-card:hover { border-color: #9d174d; transform: translateY(-1px); }
+    .product-card .card-img {
+      width: 100%; height: 150px;
+      object-fit: cover; display: block; background: #1a1a24;
+    }
+    .card-img-placeholder {
+      width: 100%; height: 150px;
+      background: linear-gradient(135deg, #1a1a24, #22222e);
+      display: none; align-items: center; justify-content: center; font-size: 40px;
+    }
+    .card-body { padding: 9px 12px 11px; }
+    .card-type {
+      font-size: 10px; font-weight: 700; letter-spacing: .4px;
+      text-transform: uppercase; color: #be185d; margin-bottom: 2px;
+    }
+    .card-name   { font-size: 12px; font-weight: 600; color: #e2e8f0; line-height: 1.4; margin-bottom: 2px; }
+    .card-brand  { font-size: 11px; color: #64748b; margin-bottom: 4px; }
+    .card-reason { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+    .card-price  {
+      font-size: 11px; font-weight: 600; color: #f9a8d4;
+      margin-top: 5px; padding-top: 5px; border-top: 1px solid #22222e;
+    }
+
+    /* Routine tips */
+    #tips-block {
+      margin: 4px 12px 12px;
+      padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      font-size: 11px; display: none;
+    }
+    .tips-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .5px; color: #be185d; margin-bottom: 6px;
+    }
+    #tips-list { padding-left: 16px; }
+    #tips-list li { margin: 3px 0; color: #94a3b8; line-height: 1.5; }
+
+    /* ── Input area ── */
+    .input-area {
+      padding: 16px 20px; border-top: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 10px; padding: 10px 14px;
+      font-size: 14px; resize: none; min-height: 42px; max-height: 160px;
+      line-height: 1.5; font-family: inherit;
+    }
+    #chat-input:focus { outline: none; border-color: #be185d; }
+    #chat-input::placeholder { color: #475569; }
+    #send-btn {
+      background: #be185d; border: none; color: #fff;
+      border-radius: 10px; padding: 10px 20px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background .15s; white-space: nowrap;
+    }
+    #send-btn:hover { background: #9d174d; }
+    #send-btn:disabled { background: #1a1a24; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>✨ Skincare AI Advisor</h1>
+  <span class="badge badge-cosmetics" id="persona-badge">✦ Skincare Mode</span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>
+    Server: <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <label>
+    <span class="toggle-switch">
+      <input type="checkbox" id="cosmetics-toggle" checked />
+      <span class="slider"></span>
+    </span>
+    Cosmetics persona
+  </label>
+  <label>
+    <span class="toggle-switch">
+      <input type="checkbox" id="analysis-toggle" checked />
+      <span class="slider"></span>
+    </span>
+    Inject sample skin analysis
+  </label>
+</div>
+
+<div class="main">
+
+  <!-- Chat -->
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">Skincare AI</span>
+      <div class="bubble">
+        Hi! I'm your <strong>AI Skincare Advisor</strong>. I'll analyse your skin profile and recommend a personalised routine from our product catalogue.<br><br>
+        <strong>Try:</strong><br>
+        • <em>"Recommend a skincare routine for me."</em><br>
+        • <em>"Give me 2 different routines — one for morning, one for night."</em><br>
+        • <em>"I have acne and oily skin — what should I use?"</em><br>
+        • <em>"Show me 3 routine options."</em><br><br>
+        <em>Enable "Inject sample skin analysis" to automatically attach a demo skin scan result.</em>
+      </div>
+    </div>
+  </div>
+
+  <!-- Skincare panel -->
+  <div id="skincare-panel">
+    <div class="panel-header">Skincare Routines</div>
+    <div id="routine-tabs"></div>
+
+    <div id="panel-body">
+      <div id="skin-profile"></div>
+      <div id="concern-note"></div>
+
+      <div id="product-list">
+        <div class="product-empty">
+          <span class="empty-icon">🧴</span>
+          Ask for a skincare recommendation and your personalised routine will appear here.
+        </div>
+      </div>
+
+      <div id="tips-block">
+        <div class="tips-title">✦ Routine Tips</div>
+        <ul id="tips-list"></ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="input-area">
+  <textarea id="chat-input" rows="1"
+    placeholder='Ask for a recommendation, e.g. "Give me 2 skincare routines for oily skin."'></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  // Sample skin analysis — exact payload shape from the skin analysis service
+  const DEMO_SKIN_ANALYSIS = {
+    timestamp: "2026-05-27T03:59:23.898Z",
+    image: "C:\\Users\\USER\\Downloads\\image5.png",
+    success: true,
+    output: [
+      { type: "oiliness",            raw_score: 91.90164184570312, ui_score: 88, mask_urls: [], url: null },
+      { type: "dark_circle_v2",      raw_score: 90.140300989151,   ui_score: 80, mask_urls: [], url: null },
+      { type: "wrinkle",             raw_score: 98.39234948158264, ui_score: 96, mask_urls: [], url: null },
+      { type: "acne",                raw_score: 94.75687,          ui_score: 92, mask_urls: [], url: null },
+      { type: "age_spot",            raw_score: 96.93904876708984, ui_score: 93, mask_urls: [], url: null },
+      { type: "droopy_lower_eyelid", raw_score: 76.91416144371033, ui_score: 79, mask_urls: [], url: null },
+      { type: "all",      score: 88, url: null },
+      { type: "skin_age", score: 24, url: null },
+    ],
+    overallScore: 88,
+    skinAge: 24,
+  };
+
+  const TYPE_EMOJI = {
+    CLEANSER: "🧴", TONER: "💧", ESSENCE: "✨",
+    MOISTURIZER: "🫧", EXFOLIANT: "🌿", SUNSCREEN: "☀️",
+  };
+
+  const SCORE_LABELS = {
+    oiliness: "Oiliness", dark_circle_v2: "Dark Circles",
+    wrinkle: "Wrinkles", acne: "Acne",
+    age_spot: "Age Spots", droopy_lower_eyelid: "Eye Area",
+  };
+
+  let sessionId = null, ws = null;
+  let currentBubble = null, currentRaw = "", isStreaming = false;
+  let _routines = [];
+
+  // ── Auto-resize textarea ──
+  $("chat-input").addEventListener("input", () => {
+    const el = $("chat-input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  $("server-url").addEventListener("change", connect);
+  $("cosmetics-toggle").addEventListener("change", () => {
+    const on = $("cosmetics-toggle").checked;
+    $("persona-badge").textContent = on ? "✦ Skincare Mode" : "💬 General";
+    $("persona-badge").className   = "badge " + (on ? "badge-cosmetics" : "badge-general");
+  });
+
+  // ── Connect ──
+  async function connect() {
+    setStatus("connecting", "Connecting…");
+    try {
+      sessionId = (await (await fetch(`http://${$("server-url").value}/session-id`)).json()).session_id;
+    } catch { setStatus("error", "Cannot reach server"); return; }
+
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://${$("server-url").value}/chat-stream`);
+    ws.onopen  = () => { setStatus("ok", "Connected"); $("send-btn").disabled = false; };
+    ws.onclose = () => { setStatus("error", "Disconnected"); $("send-btn").disabled = true; };
+    ws.onerror = () => setStatus("error", "WebSocket error");
+    ws.onmessage = ({ data }) => { console.log("[chat-stream]", data); handleChunk(data); };
+  }
+
+  // ── Chunk handler ──
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      if (currentBubble && currentRaw) {
+        currentBubble.innerHTML = marked.parse(currentRaw);
+      }
+      currentBubble = null; currentRaw = "";
+      isStreaming = false; $("send-btn").disabled = false;
+      removeTyping(); return;
+    }
+    if (chunk === "[DONE]") return;
+
+    if (chunk.startsWith("[COSMETICS_DATA]")) {
+      try {
+        const data = JSON.parse(chunk.slice(16));
+        console.log("[COSMETICS_DATA received]", data);
+        renderCosmeticsData(data);
+      } catch(e) { console.error("[COSMETICS_DATA parse error]", e, chunk); }
+      return;
+    }
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false; $("send-btn").disabled = false; removeTyping(); return;
+    }
+    if (chunk.startsWith("[Tool]"))    { appendSystem(escHtml(chunk)); return; }
+    if (chunk.startsWith("[Sources]")) return;
+
+    if (!currentBubble) currentBubble = createAssistantBubble();
+    removeTyping();
+    currentRaw += chunk;
+    currentBubble.textContent = currentRaw;
+    scrollBottom();
+  }
+
+  // ── Render skincare panel from structured COSMETICS_DATA ──
+  function renderCosmeticsData(data) {
+    if (!data.success || !data.sets) {
+      console.warn("[COSMETICS_DATA] unsuccessful or no sets", data);
+      return;
+    }
+
+    renderSkinProfile(data);
+    renderTips(data.routine_tips || []);
+
+    const routines = data.sets.map(s => ({
+      label: `Routine ${s.set_number} — ${s.vibe || ""}`,
+      concernNote: s.concern_note || "",
+      products: s.recommendations || [],
+    }));
+
+    _routines = routines;
+    const bar = $("routine-tabs");
+    bar.innerHTML = "";
+    if (routines.length > 1) {
+      bar.style.display = "flex";
+      routines.forEach((r, i) => {
+        const tab = document.createElement("div");
+        tab.className = "routine-tab" + (i === 0 ? " active" : "");
+        tab.textContent = `Routine ${i + 1}`;
+        tab.addEventListener("click", () => showRoutine(i));
+        bar.appendChild(tab);
+      });
+    } else {
+      bar.style.display = "none";
+    }
+
+    showRoutine(0);
+  }
+
+  function renderSkinProfile(data) {
+    const block = $("skin-profile");
+    const scores = (data._analysis_scores || []).filter(s =>
+      SCORE_LABELS[s.type] && s.ui_score !== undefined
+    );
+
+    const skinType  = data.skin_type  || "";
+    const concerns  = data.concerns   || [];
+    const overall   = data.overall_score;
+    const skinAge   = data.skin_age;
+    const skinNotes = data.skin_notes || "";
+
+    if (!skinType && !concerns.length && overall == null) {
+      block.style.display = "none";
+      return;
+    }
+
+    let html = `<div class="profile-row">`;
+    if (skinType) html += `<span class="profile-chip">${escHtml(skinType)}</span>`;
+    concerns.forEach(c => html += `<span class="profile-chip" style="background:#1a0020;color:#d8b4fe">${escHtml(c)}</span>`);
+    html += `</div>`;
+
+    if (overall != null || skinAge != null) {
+      html += `<div class="profile-row" style="gap:16px;margin-bottom:4px">`;
+      if (overall != null) html += `<div style="font-size:11px;color:#94a3b8">Overall score <strong style="color:#f9a8d4;font-size:13px">${overall}</strong><span style="color:#64748b">/100</span></div>`;
+      if (skinAge  != null) html += `<div style="font-size:11px;color:#94a3b8">Skin age <strong style="color:#f9a8d4;font-size:13px">${skinAge}</strong></div>`;
+      html += `</div>`;
+    }
+
+    if (skinNotes) {
+      html += `<div class="profile-note">${escHtml(skinNotes)}</div>`;
+    }
+
+    block.innerHTML = html;
+    block.style.display = "block";
+  }
+
+  function showRoutine(idx) {
+    document.querySelectorAll(".routine-tab").forEach((t, i) =>
+      t.className = "routine-tab" + (i === idx ? " active" : ""));
+
+    const routine = _routines[idx];
+    if (!routine) return;
+
+    const cn = $("concern-note");
+    if (routine.concernNote) {
+      cn.textContent = `✦ ${routine.concernNote}`;
+      cn.style.display = "block";
+    } else {
+      cn.style.display = "none";
+    }
+
+    const list = $("product-list");
+    list.innerHTML = "";
+    if (!routine.products.length) {
+      list.innerHTML = `<div class="product-empty"><span class="empty-icon">🧴</span>No products in this routine.</div>`;
+      return;
+    }
+
+    routine.products.forEach(p => {
+      const src     = p.imageUrl  || "";
+      const name    = p.name      || "Product";
+      const brand   = p.brand     || "";
+      const type    = p.type      || "";
+      const reason  = p.reason    || "";
+      const price   = p.priceAmount ? `${p.priceUnit || ""} ${p.priceAmount}`.trim() : "";
+      const emoji   = TYPE_EMOJI[type] || "🧴";
+
+      const card = document.createElement("div");
+      card.className = "product-card";
+      card.innerHTML = `
+        <img class="card-img" src="${escAttr(src)}" alt="${escAttr(name)}" loading="lazy"
+          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
+        <div class="card-img-placeholder" style="display:none">${emoji}</div>
+        <div class="card-body">
+          ${type   ? `<div class="card-type">${emoji} ${escHtml(type)}</div>` : ""}
+          <div class="card-name">${escHtml(name)}</div>
+          ${brand  ? `<div class="card-brand">${escHtml(brand)}</div>` : ""}
+          ${reason ? `<div class="card-reason">${escHtml(reason)}</div>` : ""}
+          ${price  ? `<div class="card-price">${escHtml(price)}</div>` : ""}
+        </div>
+      `;
+      list.appendChild(card);
+    });
+  }
+
+  // ── Send ──
+  async function send() {
+    const text = $("chat-input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+    const cosmeticsOn  = $("cosmetics-toggle").checked;
+    const analysisOn   = $("analysis-toggle").checked;
+
+    const userInput = cosmeticsOn
+      ? (text.toLowerCase().startsWith("[cosmetics]") ? text : `[cosmetics] ${text}`)
+      : text;
+
+    appendUserMsg(text);
+    $("chat-input").value = ""; $("chat-input").style.height = "auto";
+    $("send-btn").disabled = true; isStreaming = true;
+    appendTyping(); resetPanel();
+
+    const payload = { type: "chat", session_id: sessionId, user_input: userInput };
+    if (cosmeticsOn && analysisOn) {
+      payload.skin_analysis = DEMO_SKIN_ANALYSIS;
+      console.log("[skin_analysis injected]", DEMO_SKIN_ANALYSIS);
+    }
+    console.log("[sending to backend]", payload);
+    ws.send(JSON.stringify(payload));
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("chat-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  // ── Tips rendering ──
+  function renderTips(tips) {
+    const tb = $("tips-block");
+    if (tips.length) {
+      $("tips-list").innerHTML = tips.map(t => `<li>${escHtml(t)}</li>`).join("");
+      tb.style.display = "block";
+    } else {
+      tb.style.display = "none";
+    }
+  }
+
+  function resetPanel() {
+    _routines = [];
+    $("routine-tabs").innerHTML    = "";
+    $("routine-tabs").style.display = "none";
+    $("skin-profile").style.display = "none";
+    $("concern-note").style.display = "none";
+    $("tips-block").style.display   = "none";
+    $("product-list").innerHTML = `<div class="product-empty">
+      <span class="empty-icon">⏳</span>
+      Analysing your skin profile and browsing the catalogue…
+    </div>`;
+  }
+
+  // ── DOM helpers ──
+  function appendUserMsg(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = `<span class="msg-label">You</span><div class="bubble">${escHtml(text)}</div>`;
+    $("messages").appendChild(div); scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">Skincare AI</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant"; wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">Skincare AI</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:#475569;padding:4px 8px;align-self:center;";
+    div.innerHTML = html; $("messages").appendChild(div); scrollBottom();
+  }
+
+  function scrollBottom() { const el = $("messages"); el.scrollTop = el.scrollHeight; }
+  function escHtml(s)  { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function escAttr(s)  { return String(s).replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+  function setStatus(state, label) {
+    $("status-dot").className    = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  connect();
+</script>
+</body>
+</html>

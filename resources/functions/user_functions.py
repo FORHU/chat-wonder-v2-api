@@ -18,6 +18,11 @@ CACHE_TTL_SECONDS = 30
 _GARMENTS_API_BASE = os.getenv("GARMENTS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/garments")
 _GARMENTS_CACHE_TTL = 300  # 5 minutes
 _garments_cache: dict = {"data": None, "timestamp": 0}
+
+# Cosmetics API
+_COSMETICS_API_BASE = os.getenv("COSMETICS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/cosmetics")
+_COSMETICS_CACHE_TTL = 300  # 5 minutes
+_cosmetics_cache: dict = {}   # keyed by search term
 _DEFAULT_LAT = 14.5995  # Manila
 _DEFAULT_LON = 120.9842
 
@@ -848,6 +853,254 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
                 "If notarization is required, bring valid ID to a notary public",
             ],
         }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Cosmetics helpers
+# ---------------------------------------------------------------------------
+
+_CONCERN_SEARCH_TERMS = {
+    "acne-prone":  "acne",
+    "anti-aging":  "anti-aging",
+    "brightening": "brightening",
+    "dark circles": "dark",
+}
+
+
+def _fetch_cosmetics_by_search(search_term: str) -> list:
+    """Fetch all pages for a single search term, using a per-term cache."""
+    api_key = os.getenv("GARMENTS_API_KEY", "")
+    cached = _cosmetics_cache.get(search_term)
+    if cached and (time.time() - cached["timestamp"]) < _COSMETICS_CACHE_TTL:
+        return cached["data"]
+    try:
+        encoded = urllib.parse.quote(search_term)
+        first = _http_get_json(
+            f"{_COSMETICS_API_BASE}?search={encoded}&page=1&limit=100",
+            {"x-api-key": api_key},
+        )
+        if first.get("status") != "success":
+            return (cached or {}).get("data", [])
+        data = first["data"]
+        items = list(data["items"])
+        for page in range(2, data["totalPages"] + 1):
+            try:
+                pd = _http_get_json(
+                    f"{_COSMETICS_API_BASE}?search={encoded}&page={page}&limit=100",
+                    {"x-api-key": api_key},
+                )
+                if pd.get("status") == "success":
+                    items.extend(pd["data"]["items"])
+            except Exception as e:
+                logging.warning(f"[cosmetics] search={search_term!r} page {page} failed: {e}")
+        _cosmetics_cache[search_term] = {"data": items, "timestamp": time.time()}
+        logging.info(f"[cosmetics] search={search_term!r} fetched {len(items)} items")
+        return items
+    except Exception as e:
+        logging.error(f"[cosmetics] search={search_term!r} fetch failed: {e}")
+        return (cached or {}).get("data", [])
+
+
+def _fetch_cosmetics_for_profile(skin_type: str, concerns: list) -> list:
+    """Fetch and deduplicate products relevant to the user's skin type and concerns."""
+    search_terms = {skin_type} if skin_type != "general" else set()
+    for concern in concerns:
+        term = _CONCERN_SEARCH_TERMS.get(concern)
+        if term:
+            search_terms.add(term)
+    if not search_terms:
+        search_terms = {"general"}
+
+    seen_ids: set = set()
+    combined: list = []
+    for term in sorted(search_terms):
+        for item in _fetch_cosmetics_by_search(term):
+            if item["id"] not in seen_ids:
+                seen_ids.add(item["id"])
+                combined.append(item)
+
+    logging.info(f"[cosmetics] profile fetch: terms={sorted(search_terms)} total_unique={len(combined)}")
+    return combined
+
+
+def _derive_skin_profile(analysis_output: list) -> tuple:
+    """Returns (skin_type, concerns) from skin analysis output array."""
+    scores = {item["type"]: item.get("ui_score", item.get("score", 0)) for item in analysis_output}
+    oiliness = scores.get("oiliness", 50)
+    if oiliness >= 70:
+        skin_type = "oily"
+    elif oiliness <= 35:
+        skin_type = "dry"
+    elif 35 < oiliness < 55:
+        skin_type = "combination"
+    else:
+        skin_type = "general"
+
+    concerns = []
+    if scores.get("acne", 0) >= 60:
+        concerns.append("acne-prone")
+    if scores.get("wrinkle", 0) >= 60:
+        concerns.append("anti-aging")
+    if scores.get("age_spot", 0) >= 60:
+        concerns.append("brightening")
+    if scores.get("dark_circle_v2", 0) >= 60:
+        concerns.append("dark circles")
+    return skin_type, concerns
+
+
+def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
+    """Fetch cosmetics catalogue and return AI-curated skincare routines based on skin analysis scores.
+
+    Each routine covers core slots (CLEANSER, MOISTURIZER) plus optional slots
+    (TONER, ESSENCE, EXFOLIANT, SUNSCREEN). Multiple routines have distinct vibes
+    targeting different concerns derived from the skin analysis scores.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    n_sets = max(1, min(int(sets or 1), 3))
+
+    skin_type = "general"
+    concerns: list = []
+    overall_score = None
+    skin_age = None
+
+    if skin_analysis_json:
+        try:
+            analysis = json.loads(skin_analysis_json)
+            output = analysis.get("output", [])
+            skin_type, concerns = _derive_skin_profile(output)
+            overall_score = analysis.get("overallScore")
+            skin_age = analysis.get("skinAge")
+        except Exception as e:
+            logging.warning(f"[cosmetics] skin_analysis_json parse failed: {e}")
+
+    filtered = _fetch_cosmetics_for_profile(skin_type, concerns)
+    if not filtered:
+        return {"success": False, "error": "Cosmetics catalogue is unavailable. Please try again later."}
+
+    cosmetic_lookup = {c["id"]: c for c in filtered}
+
+    # Strip heavy fields before sending to GPT
+    _SLIM_KEEP = {"id", "name", "brand", "type", "hexColor", "finish",
+                  "oilFree", "hydrating", "spf", "priceAmount", "priceUnit"}
+    slim_all = [{k: v for k, v in c.items() if k in _SLIM_KEEP} for c in filtered]
+
+    # Cap at 80 products; sample proportionally by type so all routine slots are covered
+    _MAX_PRODUCTS = 80
+    if len(slim_all) > _MAX_PRODUCTS:
+        from collections import defaultdict
+        import random
+        by_type: dict = defaultdict(list)
+        for p in slim_all:
+            by_type[p.get("type", "OTHER")].append(p)
+        per_type = max(1, _MAX_PRODUCTS // max(len(by_type), 1))
+        slim = []
+        for bucket in by_type.values():
+            slim.extend(random.sample(bucket, min(per_type, len(bucket))))
+        slim = slim[:_MAX_PRODUCTS]
+    else:
+        slim = slim_all
+
+    concerns_ctx = f"Skin concerns: {', '.join(concerns)}." if concerns else "No specific skin concerns identified."
+    score_ctx = ""
+    if overall_score is not None:
+        score_ctx = f" Overall skin score: {overall_score}/100."
+    if skin_age is not None:
+        score_ctx += f" Skin age: {skin_age}."
+
+    system_prompt = (
+        f"You are a professional dermatologist and skincare specialist. Curate exactly {n_sets} distinct skincare "
+        f"routine(s) from the provided cosmetics catalogue based on the user's skin profile.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Each routine must contain EXACTLY ONE product per type slot. Never include two products of the same type in one routine.\n"
+        "2. Every routine MUST include CLEANSER and MOISTURIZER (core slots).\n"
+        "3. TONER, ESSENCE, EXFOLIANT, SUNSCREEN are optional — include only when beneficial for the concerns.\n"
+        "4. Do NOT reuse the same product id across different routines.\n"
+        f"5. Each routine must have a DISTINCT vibe that targets a different aspect of the user's skin concerns.\n\n"
+        "Return a JSON object with this exact structure:\n"
+        "{\n"
+        '  "sets": [\n'
+        '    {\n'
+        '      "set_number": 1,\n'
+        '      "vibe": "Short vibe name e.g. Acne-Fighting AM Routine",\n'
+        '      "concern_note": "One sentence on how this routine addresses the user\'s skin concerns",\n'
+        '      "recommendations": [\n'
+        '        {\n'
+        '          "id": "...",\n'
+        '          "name": "...",\n'
+        '          "brand": "...",\n'
+        '          "type": "CLEANSER",\n'
+        '          "priceAmount": "...",\n'
+        '          "priceUnit": "...",\n'
+        '          "reason": "Why this product suits the user\'s skin type and concerns"\n'
+        '        }\n'
+        '      ]\n'
+        '    }\n'
+        '  ],\n'
+        '  "skin_notes": "Brief markdown overview of what the analysis reveals about the user\'s skin",\n'
+        '  "routine_tips": ["tip1", "tip2"]\n'
+        "}\n\n"
+        "Additional rules:\n"
+        "- For oily/acne-prone skin: prefer oil-free, non-comedogenic products with salicylic acid or niacinamide\n"
+        "- For dry skin: prefer hydrating, cream-based moisturizers; avoid harsh exfoliants\n"
+        "- For anti-aging concerns: look for retinol, peptides, vitamin C in the details\n"
+        "- For brightening concerns: look for vitamin C, niacinamide, kojic acid\n"
+        "- Only use products from the provided catalogue — do not invent items\n"
+        f"- Return exactly {n_sets} routine(s) in the sets array"
+    )
+    user_prompt = (
+        f"Skin type: {skin_type}\n"
+        f"{concerns_ctx}{score_ctx}\n"
+        f"Routines requested: {n_sets}\n\n"
+        f"Cosmetics catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Curate {n_sets} distinct skincare routine(s) and return the JSON."
+    )
+
+    client = OpenAI(api_key=api_key)
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+
+        for s in result.get("sets", []):
+            seen_types: set = set()
+            deduped = []
+            for rec in s.get("recommendations", []):
+                slot = rec.get("type", "")
+                if slot and slot in seen_types:
+                    continue
+                if slot:
+                    seen_types.add(slot)
+                full = cosmetic_lookup.get(rec.get("id"), {})
+                rec["imageUrl"] = full.get("imageUrl", "")
+                deduped.append(rec)
+            s["recommendations"] = deduped
+
+        return {
+            "success": True,
+            "skin_type": skin_type,
+            "concerns": concerns,
+            "overall_score": overall_score,
+            "skin_age": skin_age,
+            "sets_requested": n_sets,
+            **result,
+        }
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
