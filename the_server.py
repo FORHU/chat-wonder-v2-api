@@ -763,11 +763,12 @@ def execute_function_call(function_call: dict, session_id: str = None):
 # Reason loop (non-streaming, collects full response)
 # ---------------------------------------------------------------------------
 
-def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None):
+def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = ""):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
     full_response = ""
+    last_tool = None
 
     def perform_chat(msgs):
         args = {
@@ -784,8 +785,13 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
 
     for _ in range(max_chains):
         function_call = {"name": None, "arguments": ""}
+        _query_label = f"\"{query[:100]}\"" if query else "the question"
+        if last_tool:
+            _cycle_summary = f"The AI has received results from `{last_tool}` and is deciding whether more steps are needed to answer: {_query_label}"
+        else:
+            _cycle_summary = f"The AI is making its first decision about: {_query_label}"
         broadcast_trace("cognition", f"Cycle {_ + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id,
-            summary=f"Reasoning step {_ + 1}: The AI is reviewing {len(messages)} piece(s) of context to decide what to do next.")
+            summary=_cycle_summary)
         stream_resp = perform_chat(messages)
         last_response = ""
 
@@ -863,8 +869,9 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             messages.append({"role": "system", "content": f"Function `{function_call['name']}` already called with same args. Do not repeat."})
             continue
 
+        _query_label = f"\"{query[:80]}\"" if query else "the question"
         broadcast_trace("control", f"APPROVED: `{function_call['name']}` — no prior identical call found", session_id,
-            summary="Safety check passed. The AI has not made this exact request before and is cleared to proceed.")
+            summary=f"Safety check passed. No prior identical call found. Proceeding to run `{function_call['name']}` to help answer: {_query_label}")
         broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id,
             summary=f"The AI is now running the '{function_call['name']}' tool. Waiting for results...")
 
@@ -873,13 +880,15 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
         if result is None:
             continue
         function_outputs.append((function_call["name"], result))
+        last_tool = function_call["name"]
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
         except Exception:
             _rp = str(result)
+        _ctx = _summarize_tool_result(function_call["name"], result)
         broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id,
-            summary=f"The '{function_call['name']}' tool returned its results. The AI will now use this information in its reasoning.")
+            summary=f"The '{function_call['name']}' tool finished. {_ctx}. The AI will use this to answer: {_query_label}")
         broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id,
             summary=f"The AI has stored the results from '{function_call['name']}' in its working memory and will not need to call this tool again for the same information.")
 
@@ -904,7 +913,34 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
 
     return full_response
 
-def _broadcast_retrieval_context(state, tools, addendum_override, session_id):
+def _interpret_score(score: float) -> str:
+    if score >= 0.7:
+        return "high"
+    if score >= 0.4:
+        return "moderate"
+    return "low"
+
+
+def _summarize_tool_result(tool_name: str, result) -> str:
+    try:
+        if tool_name == "search_legal":
+            results = result.get("results", []) if isinstance(result, dict) else []
+            if results:
+                return f"Search returned {len(results)} result(s). Top result: \"{results[0].get('title', '?')[:80]}\""
+            return "Search returned no results."
+        if tool_name == "summarize_legal_case":
+            title = (result.get("title") or result.get("case_title") or "unknown case") if isinstance(result, dict) else "unknown"
+            return f"Case summary produced for: \"{str(title)[:80]}\""
+        if tool_name == "recommend_garments":
+            recs = result.get("recommendations", []) if isinstance(result, dict) else []
+            return f"Returned {len(recs)} outfit recommendation(s)."
+    except Exception:
+        pass
+    preview = json.dumps(result, ensure_ascii=False)[:120] if result else "empty"
+    return f"Result: {preview}"
+
+
+def _broadcast_retrieval_context(state, tools, addendum_override, session_id, query: str = ""):
     rag_sources = getattr(state, "source_metadata", [])
     if rag_sources:
         lines = [f"RAG retrieved {len(rag_sources)} chunk(s) — injected as evidence:"]
@@ -915,11 +951,23 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id):
             lines.append(f"  [{score}] {title}")
             if excerpt:
                 lines.append(f"         \"{excerpt}{'…' if len(s.get('text_content','')) > 150 else ''}\"")
+        top = rag_sources[0]
+        top_title = (top.get('title') or '')[:80]
+        top_score = top.get('relevance', 0) or 0
+        _query_label = f"\"{query[:100]}\"" if query else "the question"
         broadcast_trace("retrieval", "\n".join(lines), session_id,
-            summary=f"The AI searched its knowledge base and found {len(rag_sources)} relevant source(s) to use as evidence when forming its answer.")
+            summary=(
+                f"The AI searched for {_query_label} and found {len(rag_sources)} relevant source(s). "
+                f"Top result: \"{top_title}\" (relevance: {_interpret_score(top_score)}). "
+                f"These sources will be used as evidence when forming the answer."
+            ))
     else:
+        _query_label = f"\"{query[:100]}\"" if query else "the question"
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
-            summary="The AI did not search any knowledge base for this question. It will rely on its built-in training knowledge and the conversation history.")
+            summary=(
+                f"The AI searched for {_query_label} but found no sources above the relevance threshold. "
+                f"It will rely on its training knowledge and conversation history."
+            ))
     if addendum_override:
         persona = "Legal AI" if "LEGAL" in addendum_override.upper() else "Custom persona active"
     else:
@@ -940,18 +988,19 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id):
 
 def reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
-    _broadcast_retrieval_context(state, tools, addendum_override, session_id)
-    return run_function_chain(state, messages, session_id=session_id, tools=tools)
+    _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query)
+    return run_function_chain(state, messages, session_id=session_id, tools=tools, query=query)
 
 # ---------------------------------------------------------------------------
 # Streaming reason loop (generator)
 # ---------------------------------------------------------------------------
 
-def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None):
+def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = ""):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
     full_response = ""
+    last_tool = None
     _chain_start = time.time()
 
     def perform_chat(msgs):
@@ -969,8 +1018,13 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
 
     for iteration in range(max_chains):
         function_call = {"name": None, "arguments": ""}
+        _query_label = f"\"{query[:100]}\"" if query else "the question"
+        if last_tool:
+            _cycle_summary = f"The AI has received results from `{last_tool}` and is deciding whether more steps are needed to answer: {_query_label}"
+        else:
+            _cycle_summary = f"The AI is making its first decision about: {_query_label}"
         broadcast_trace("cognition", f"Cycle {iteration + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id,
-            summary=f"Reasoning step {iteration + 1}: The AI is reviewing {len(messages)} piece(s) of context to decide what to do next.")
+            summary=_cycle_summary)
         _xai_buffer = ""
         _xai_first_line_done = False
         _xai_reason = None
@@ -1081,8 +1135,9 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
             messages.append({"role": "system", "content": f"Function `{function_call['name']}` already called. Do not repeat."})
             continue
 
+        _query_label = f"\"{query[:80]}\"" if query else "the question"
         broadcast_trace("control", f"APPROVED: `{function_call['name']}` — no prior identical call found", session_id,
-            summary="Safety check passed. The AI has not made this exact request before and is cleared to proceed.")
+            summary=f"Safety check passed. No prior identical call found. Proceeding to run `{function_call['name']}` to help answer: {_query_label}")
         broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id,
             summary=f"The AI is now running the '{function_call['name']}' tool. Waiting for results...")
 
@@ -1097,13 +1152,15 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
         if result is None:
             continue
         function_outputs.append((function_call["name"], result))
+        last_tool = function_call["name"]
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
         except Exception:
             _rp = str(result)
+        _ctx = _summarize_tool_result(function_call["name"], result)
         broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id,
-            summary=f"The '{function_call['name']}' tool returned its results. The AI will now use this information in its reasoning.")
+            summary=f"The '{function_call['name']}' tool finished. {_ctx}. The AI will use this to answer: {_query_label}")
         broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id,
             summary=f"The AI has stored the results from '{function_call['name']}' in its working memory and will not need to call this tool again for the same information.")
 
@@ -1122,8 +1179,8 @@ def streaming_run_function_chain(state, messages: list, max_chains: int = 7, ses
 
 def streaming_reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
-    _broadcast_retrieval_context(state, tools, addendum_override, session_id)
-    yield from streaming_run_function_chain(state, messages, session_id=session_id, tools=tools)
+    _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query)
+    yield from streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query)
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -1264,8 +1321,9 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="API key is required.")
     init_openai_client(state, _context.openai_api_key)
 
+    _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
-        summary=f"A new question was received.\n\nQuestion: \"{user_input[:400]}\"")
+        summary=f"A new question was received. Persona: {persona}. {_tool_count} tool(s) available.\n\nQuestion: \"{user_input[:400]}\"")
 
     # Normal path with optional HITL (legal and garment personas always auto-approve their tools)
     _was_auto = _context.auto_approval
@@ -1385,7 +1443,8 @@ def approve(request: ApproveRequest):
     _context.auto_approval = True
     try:
         available_manifest = [t for t in _context.fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
-        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest)
+        _resume_query = state.prompt[-1] if state.prompt else ""
+        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query)
     finally:
         _context.auto_approval = False
 
@@ -1511,7 +1570,8 @@ async def chat_stream(websocket: WebSocket):
                 _context.auto_approval = True
                 full_response = ""
                 try:
-                    for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest):
+                    _resume_query = state.prompt[-1] if state.prompt else ""
+                    for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query):
                         if chunk.startswith("__HITL__"):
                             hitl_data = json.loads(chunk[8:])
                             new_fc = hitl_data["function_call"]
@@ -1577,8 +1637,9 @@ async def chat_stream(websocket: WebSocket):
                 await websocket.send_text(_context.__END__)
                 continue
 
+            _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
-                summary=f"A new question was received.\n\nQuestion: \"{user_input[:400]}\"")
+                summary=f"A new question was received. Persona: {persona}. {_tool_count} tool(s) available.\n\nQuestion: \"{user_input[:400]}\"")
 
             full_response = ""
             _ws_t_start = time.time()
