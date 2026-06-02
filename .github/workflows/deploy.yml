@@ -48,6 +48,7 @@ jobs:
                   LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
                   GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                   GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
+                  OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                   COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                   FUNCEOF
 
@@ -106,6 +107,7 @@ jobs:
                       COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                       GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                       GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
+                      OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                       LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                       ENVEOF
 
@@ -122,6 +124,7 @@ jobs:
                       LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
                       GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                       GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
+                      OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                       COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                       FUNCEOF
 

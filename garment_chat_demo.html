@@ -199,6 +199,30 @@
       display: none;
     }
 
+    /* Outfit hero */
+    #outfit-hero-block {
+      margin: 10px 12px 0;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px; overflow: hidden;
+      display: none;
+    }
+    #outfit-hero-block .hero-img {
+      width: 100%; max-height: 280px;
+      object-fit: contain; display: block; background: #1a1a24;
+    }
+    #outfit-hero-block .hero-body { padding: 10px 12px 12px; }
+    #outfit-hero-block .hero-name {
+      font-size: 13px; font-weight: 700; color: #e2e8f0; line-height: 1.4; margin-bottom: 4px;
+    }
+    #outfit-hero-block .hero-desc { font-size: 11px; color: #94a3b8; line-height: 1.5; margin-bottom: 6px; }
+    #outfit-hero-block .hero-reason {
+      font-size: 11px; color: #c084fc; line-height: 1.5;
+      padding-top: 6px; border-top: 1px solid #22222e;
+    }
+    .garments-label {
+      margin: 10px 12px 0; font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px; color: #475569;
+    }
+
     /* Garment cards list */
     #outfit-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 
@@ -245,6 +269,23 @@
     }
     #tips-list { padding-left: 16px; }
     #tips-list li { margin: 3px 0; color: #94a3b8; line-height: 1.5; }
+
+    /* ── Sample prompt chips ── */
+    .prompt-chips {
+      display: flex; flex-direction: column; gap: 6px; margin-top: 12px;
+    }
+    .prompt-chip {
+      display: block; width: 100%;
+      background: #1a1028; border: 1px solid #3b1f5a;
+      color: #c084fc; border-radius: 8px;
+      padding: 8px 12px; font-size: 12px; line-height: 1.4;
+      text-align: left; cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+      font-family: inherit;
+    }
+    .prompt-chip:hover {
+      background: #2a1a40; border-color: #7e22ce; color: #e9d5ff;
+    }
 
     /* ── Input area ── */
     .input-area {
@@ -301,13 +342,15 @@
     <div class="msg assistant">
       <span class="msg-label">Stylist AI</span>
       <div class="bubble">
-        Hi! I'm your <strong>AI Personal Stylist</strong>. Tell me what you're dressing for and I'll put together complete outfits — checking live weather at your location automatically.<br><br>
-        <strong>Try:</strong><br>
-        • <em>"Give me 3 outfit sets for a beach day in Cebu. I'm a woman."</em><br>
-        • <em>"What should I wear to a job interview in BGC today? Male, 2 sets."</em><br>
-        • <em>"Casual weekend brunch near me — female, show me 2 vibes."</em><br>
-        • <em>"Formal wedding guest outfit in Davao next Saturday. I'm a guy."</em><br>
-        • <em>"What should I wear today? I'm a woman."</em> (uses your current location)
+        Hi! I'm your <strong>AI Personal Stylist</strong>. Tell me what you're dressing for and I'll put together 4 complete outfits — checking live weather at your location automatically.<br><br>
+        <strong>Try one of these:</strong>
+        <div class="prompt-chips">
+          <button class="prompt-chip" onclick="fillPrompt(this)">Beach day in Cebu. I'm a woman.</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Job interview in BGC today. I'm a male.</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Casual weekend brunch near me. I'm a female.</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Formal wedding guest outfit in Davao next Saturday. I'm a guy.</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">What should I wear today? I'm a woman.</button>
+        </div>
       </div>
     </div>
   </div>
@@ -328,6 +371,17 @@
       </div>
 
       <div id="vibe-note"></div>
+
+      <div id="outfit-hero-block">
+        <img class="hero-img" id="hero-img" src="" alt="" loading="lazy" onerror="this.style.display='none'" />
+        <div class="hero-body">
+          <div class="hero-name" id="hero-name"></div>
+          <div class="hero-desc" id="hero-desc"></div>
+          <div class="hero-reason" id="hero-reason"></div>
+        </div>
+      </div>
+
+      <div class="garments-label" id="garments-label" style="display:none">Pieces</div>
 
       <div id="outfit-list">
         <div class="outfit-empty">
@@ -485,6 +539,10 @@
     const sets = data.sets.map(s => ({
       label: `Set ${s.set_number} — ${s.vibe || ""}`,
       vibeNote: s.trend_note || "",
+      reason: s.reason || "",
+      outfitName: s.outfit_name || "",
+      outfitDescription: s.outfit_description || "",
+      outfitImageUrl: s.outfit_imageUrl || "",
       garments: s.recommendations || [],
     }));
 
@@ -514,17 +572,36 @@
     const set = _sets[idx];
     if (!set) return;
 
+    // Vibe note
     const vn = $("vibe-note");
     if (set.vibeNote) { vn.textContent = `✦ ${set.vibeNote}`; vn.style.display = "block"; }
     else { vn.style.display = "none"; }
 
+    // Outfit hero — composite image + name + description + stylist reason
+    const heroBlock = $("outfit-hero-block");
+    if (set.outfitImageUrl || set.outfitName) {
+      const img = $("hero-img");
+      img.src = set.outfitImageUrl || "";
+      img.alt = set.outfitName || "";
+      img.style.display = set.outfitImageUrl ? "block" : "none";
+      $("hero-name").textContent = set.outfitName || "";
+      $("hero-desc").textContent = set.outfitDescription || "";
+      const reasonEl = $("hero-reason");
+      if (set.reason) { reasonEl.textContent = `✦ ${set.reason}`; reasonEl.style.display = "block"; }
+      else { reasonEl.style.display = "none"; }
+      heroBlock.style.display = "block";
+    } else {
+      heroBlock.style.display = "none";
+    }
+
+    // Garment pieces label
+    const garments = set.garments || [];
+    const glabel = $("garments-label");
+    glabel.style.display = garments.length ? "block" : "none";
+
     const list = $("outfit-list");
     list.innerHTML = "";
-    const garments = set.garments || set.images || [];
-    if (!garments.length) {
-      list.innerHTML = `<div class="outfit-empty"><span class="empty-icon">🧥</span>No garments in this set.</div>`;
-      return;
-    }
+    if (!garments.length) return;
 
     const slotEmoji = {
       UpperGarment:"👔", LowerGarment:"👖", FootGarment:"👟",
@@ -533,12 +610,14 @@
     };
 
     garments.forEach(g => {
-      const src = g.imageUrl || g.src || "";
-      const name = g.name || g.alt || "Garment";
-      const slot = g.fittingSlot || g.slot || "";
-      const reason = g.reason || "";
+      const src = g.imageUrl || "";
+      const name = g.name || "Garment";
+      // fittingSlot and garmentType are arrays in the new API
+      const slot = Array.isArray(g.fittingSlot) ? g.fittingSlot[0] : (g.fittingSlot || "");
+      const garmentType = Array.isArray(g.garmentType) ? g.garmentType[0] : (g.garmentType || "");
+      const label = garmentType || slot.replace(/([A-Z])/g, " $1").trim();
+      const desc = g.description || "";
       const emoji = slotEmoji[slot] || "🧥";
-      const slotLabel = slot.replace(/([A-Z])/g, " $1").trim();
 
       const card = document.createElement("div");
       card.className = "garment-card";
@@ -547,9 +626,9 @@
           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
         <div class="card-img-placeholder" style="display:none">${emoji}</div>
         <div class="card-body">
-          ${slotLabel ? `<div class="card-slot">${escHtml(slotLabel)}</div>` : ""}
+          ${label ? `<div class="card-slot">${escHtml(label)}</div>` : ""}
           <div class="card-name">${escHtml(name)}</div>
-          ${reason ? `<div class="card-reason">${escHtml(reason)}</div>` : ""}
+          ${desc ? `<div class="card-reason">${escHtml(desc)}</div>` : ""}
         </div>
       `;
       list.appendChild(card);
@@ -588,6 +667,18 @@
     if (_weatherData) payload.weather = _weatherData;
     console.log("[sending to backend]", payload);
     ws.send(JSON.stringify(payload));
+  }
+
+  function fillPrompt(btn) {
+    const input = $("chat-input");
+    input.value = btn.textContent.trim();
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    input.focus();
+    // Ensure garment toggle is on
+    $("garment-toggle").checked = true;
+    $("persona-badge").textContent = "✦ Stylist Mode";
+    $("persona-badge").className = "badge badge-garment";
   }
 
   $("send-btn").addEventListener("click", send);
@@ -820,6 +911,8 @@
     $("set-tabs").style.display = "none";
     $("weather-block").style.display = "none";
     $("vibe-note").style.display = "none";
+    $("outfit-hero-block").style.display = "none";
+    $("garments-label").style.display = "none";
     $("tips-block").style.display = "none";
     $("outfit-list").innerHTML = `<div class="outfit-empty">
       <span class="empty-icon">⏳</span>

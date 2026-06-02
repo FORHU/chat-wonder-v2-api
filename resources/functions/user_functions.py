@@ -19,6 +19,11 @@ _GARMENTS_API_BASE = os.getenv("GARMENTS_API_BASE", "http://ec2-52-77-250-122.ap
 _GARMENTS_CACHE_TTL = 300  # 5 minutes
 _garments_cache: dict = {"data": None, "timestamp": 0}
 
+# Outfits API (pre-composed outfits)
+_OUTFITS_API_BASE = os.getenv("OUTFITS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/outfits")
+_OUTFITS_CACHE_TTL = 300  # 5 minutes
+_outfits_cache: dict = {"data": None, "timestamp": 0}
+
 # Cosmetics API
 _COSMETICS_API_BASE = os.getenv("COSMETICS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/cosmetics")
 _COSMETICS_CACHE_TTL = 300  # 5 minutes
@@ -1140,6 +1145,41 @@ def _fetch_all_garments() -> list:
         return _garments_cache["data"] or []
 
 
+def _fetch_all_outfits() -> list:
+    api_key = os.getenv("GARMENTS_API_KEY", "")
+    if _outfits_cache["data"] and (time.time() - _outfits_cache["timestamp"]) < _OUTFITS_CACHE_TTL:
+        return _outfits_cache["data"]
+    try:
+        first = _http_get_json(f"{_OUTFITS_API_BASE}?page=1&limit=100", {"x-api-key": api_key})
+        if first.get("status") != "success":
+            return _outfits_cache["data"] or []
+        data = first["data"]
+        items = list(data["items"])
+        for page in range(2, data["totalPages"] + 1):
+            try:
+                pd = _http_get_json(f"{_OUTFITS_API_BASE}?page={page}&limit=100", {"x-api-key": api_key})
+                if pd.get("status") == "success":
+                    items.extend(pd["data"]["items"])
+            except Exception as e:
+                logging.warning(f"[outfits] page {page} fetch failed: {e}")
+        _outfits_cache["data"] = items
+        _outfits_cache["timestamp"] = time.time()
+        return items
+    except Exception as e:
+        logging.error(f"[outfits] catalogue fetch failed: {e}")
+        return _outfits_cache["data"] or []
+
+
+def _outfit_gender(outfit: dict) -> str:
+    """Derive outfit gender from its garments. Returns MALE, FEMALE, or UNISEX."""
+    genders = {g["garment"]["gender"] for g in outfit.get("items", []) if g.get("garment")}
+    if genders == {"MALE"}:
+        return "MALE"
+    if genders == {"FEMALE"}:
+        return "FEMALE"
+    return "UNISEX"
+
+
 def _geocode_location(location: str) -> tuple:
     if not location:
         return (_DEFAULT_LAT, _DEFAULT_LON)
@@ -1212,23 +1252,19 @@ def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
 # Garment recommendation function
 # ---------------------------------------------------------------------------
 
-_CORE_SLOTS = {"UpperGarment", "LowerGarment", "FootGarment"}
-_ACCESSORY_SLOTS = {"HeadGarment", "Earrings", "Glasses", "NeckAccessory", "LeftHandAccessory", "RightHandAccessory"}
-
-
 def recommend_garments(
     gender: str,
     event_type: str = None,
     event_date: str = None,
     location: str = None,
-    sets: int = 1,
+    sets: int = 4,
     weather_json: str = None,
 ) -> dict:
-    """Fetch live weather and garment catalogue, then return AI-curated outfit sets as JSON.
+    """Fetch live weather and pre-composed outfit catalogue, then return AI-selected outfit sets as JSON.
 
-    Each set contains exactly one garment per fittingSlot (no duplicates).
-    Core slots (UpperGarment, LowerGarment, FootGarment) are required per set.
-    Accessories are optional. Multiple sets have distinct vibes tied to local fashion trends.
+    AI selects the best pre-composed outfits from the external catalogue based on weather,
+    event type, gender, and local fashion trends. Each set maps to one complete outfit with
+    an outfit-level hero image and individual garment breakdown.
     """
     from openai import OpenAI
 
@@ -1240,7 +1276,7 @@ def recommend_garments(
     if gender_upper not in ("MALE", "FEMALE"):
         return {"success": False, "error": "gender must be 'MALE' or 'FEMALE'."}
 
-    n_sets = max(1, min(int(sets or 1), 3))
+    n_sets = max(1, min(int(sets or 1), 4))
 
     resolved_date = date.today().isoformat()
     if event_date:
@@ -1259,35 +1295,52 @@ def recommend_garments(
             frontend_lat = frontend_weather.pop("lat", None)
             frontend_lon = frontend_weather.pop("lon", None)
         except Exception as e:
-            logging.warning(f"[garments] weather_json parse failed: {e}")
+            logging.warning(f"[outfits] weather_json parse failed: {e}")
 
     if location:
-        # User named a specific place — geocode it and fetch that place's weather
-        # (ignore frontend GPS which reflects the user's physical location, not the destination)
         location_label = location
         lat, lon = _geocode_location(location)
         weather = _fetch_weather(lat, lon, resolved_date)
     elif frontend_lat is not None and frontend_lon is not None:
-        # No location in prompt — use frontend GPS as current area
         location_label = "your current location"
         lat, lon = float(frontend_lat), float(frontend_lon)
         weather = frontend_weather or _fetch_weather(lat, lon, resolved_date)
     else:
-        # Final fallback
         location_label = "Manila, Philippines"
         lat, lon = _DEFAULT_LAT, _DEFAULT_LON
         weather = _fetch_weather(lat, lon, resolved_date)
 
-    all_garments = _fetch_all_garments()
-    if not all_garments:
-        return {"success": False, "error": "Garment catalogue is unavailable. Please try again later."}
+    all_outfits = _fetch_all_outfits()
+    if not all_outfits:
+        return {"success": False, "error": "Outfit catalogue is unavailable. Please try again later."}
 
-    filtered = [g for g in all_garments if g.get("gender") in (gender_upper, "UNISEX")]
+    filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
     if not filtered:
-        filtered = all_garments
+        filtered = all_outfits
 
-    garment_lookup = {g["id"]: g for g in filtered}
-    slim = [{k: v for k, v in g.items() if k != "imageUrl"} for g in filtered]
+    outfit_lookup = {o["id"]: o for o in filtered}
+
+    # Slim catalogue for GPT — no imageUrls to save tokens
+    slim = [
+        {
+            "id": o["id"],
+            "name": o["name"],
+            "description": o["description"],
+            "garments": [
+                {
+                    "name": g["garment"]["name"],
+                    "garmentType": g["garment"]["garmentType"],
+                    "fittingSlot": g["garment"]["fittingSlot"],
+                    "category": g["garment"]["category"],
+                    "layerLevel": g["garment"]["layerLevel"],
+                    "silhouette": g["garment"].get("silhouette", ""),
+                }
+                for g in o.get("items", [])
+                if g.get("garment")
+            ],
+        }
+        for o in filtered
+    ]
 
     if weather.get("estimated"):
         month_label = weather.get("month_name", "this time of year")
@@ -1300,62 +1353,51 @@ def recommend_garments(
         temp_str = f"{temp:.1f}°C" if temp is not None else "unknown temperature"
         weather_ctx = f"Weather on {resolved_date} at {location_label}: {weather['description']}, {temp_str}, precipitation {weather['precipitation_mm']}mm."
         if weather.get("is_rainy"):
-            weather_ctx += " Rain expected — favor water-resistant or quick-dry garments."
+            weather_ctx += " Rain expected — favor water-resistant or quick-dry outfits."
         elif weather.get("is_hot"):
-            weather_ctx += " Hot — favor breathable, lightweight fabrics and lighter colors."
+            weather_ctx += " Hot — favor breathable, lightweight outfits in lighter colors."
         elif weather.get("is_cold"):
-            weather_ctx += " Cool — consider layering options."
+            weather_ctx += " Cool — favor layered or warmer outfits."
 
-    event_ctx = f"Event/occasion: {event_type}." if event_type else "No specific event — recommend versatile everyday wear."
+    event_ctx = f"Event/occasion: {event_type}." if event_type else "No specific event — recommend versatile everyday outfits."
 
     system_prompt = (
-        f"You are a personal stylist. Curate exactly {n_sets} distinct outfit set(s) from the provided garment catalogue "
+        f"You are a personal stylist. Select exactly {n_sets} distinct pre-composed outfits from the provided catalogue "
         f"based on weather, event, gender, and local fashion trends at the user's location.\n\n"
-        "CRITICAL RULES — follow these exactly:\n"
-        "1. Each set must contain EXACTLY ONE garment per fittingSlot. Never include two items with the same fittingSlot in one set.\n"
-        "2. Every set MUST include all three core fittingSlots: UpperGarment, LowerGarment, FootGarment.\n"
-        "3. Accessories (HeadGarment, Earrings, Glasses, NeckAccessory, LeftHandAccessory, RightHandAccessory) are optional — include only when they genuinely enhance the outfit.\n"
-        "4. Do NOT reuse the same garment id across different sets.\n"
-        f"5. Each set must have a DISTINCT vibe that reflects different local fashion trends or sub-cultures at {location_label}.\n\n"
+        "CRITICAL RULES:\n"
+        f"1. Select EXACTLY {n_sets} distinct outfits. Do NOT select the same outfit twice.\n"
+        "2. Each selected outfit must have a distinct vibe reflecting different local fashion trends.\n"
+        "3. Only select outfit IDs from the provided catalogue — do not invent IDs.\n"
+        f"4. Each set must reflect a different sub-culture or style direction at {location_label}.\n\n"
         "Return a JSON object with this exact structure:\n"
         "{\n"
         '  "sets": [\n'
         '    {\n'
         '      "set_number": 1,\n'
+        '      "outfit_id": "exact id from catalogue",\n'
         '      "vibe": "Short vibe name e.g. BGC Smart Casual",\n'
         '      "trend_note": "One sentence on how this vibe reflects local fashion culture at the location",\n'
-        '      "recommendations": [\n'
-        '        {\n'
-        '          "id": "...",\n'
-        '          "name": "...",\n'
-        '          "description": "...",\n'
-        '          "fittingSlot": "UpperGarment",\n'
-        '          "garmentType": [...],\n'
-        '          "category": [...],\n'
-        '          "reason": "Why this piece suits the weather and event"\n'
-        '        }\n'
-        '      ]\n'
+        '      "reason": "Why this outfit suits the weather and event"\n'
         '    }\n'
         '  ],\n'
         '  "weather_note": "How weather conditions shaped these picks",\n'
         '  "styling_tips": ["tip1", "tip2"]\n'
         "}\n\n"
         "Additional rules:\n"
-        "- Rain: prefer darker colors, avoid suede-tagged items\n"
-        "- Heat: prefer lighter colors and breathable tags\n"
-        "- Cold: recommend layering\n"
-        "- Formal events: Formal/Business category items\n"
-        "- Casual events: Casual/SmartCasual category items\n"
-        "- Only use garments from the provided catalogue — do not invent items\n"
+        "- Rain: prefer outfits with darker colors, avoid suede items\n"
+        "- Heat: prefer outfits with breathable fabrics and lighter colors\n"
+        "- Cold: prefer layered outfits\n"
+        "- Formal events: prefer outfits with Formal/Business category garments\n"
+        "- Casual events: prefer outfits with Casual/SmartCasual category garments\n"
         f"- Return exactly {n_sets} set(s) in the sets array"
     )
     user_prompt = (
         f"Gender: {gender_upper}\n"
-        f"Requested sets: {n_sets}\n"
+        f"Requested outfits: {n_sets}\n"
         f"{weather_ctx}\n"
         f"{event_ctx}\n\n"
-        f"Garment catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
-        f"Curate {n_sets} distinct outfit set(s) and return the JSON."
+        f"Outfit catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct outfits and return the JSON."
     )
 
     client = OpenAI(api_key=api_key)
@@ -1372,20 +1414,27 @@ def recommend_garments(
         )
         result = json.loads(resp.choices[0].message.content.strip())
 
-        # Hydrate imageUrl + enforce fittingSlot uniqueness per set
+        # Hydrate each set with full outfit data and garment breakdown
         for s in result.get("sets", []):
-            seen_slots: set = set()
-            deduped = []
-            for rec in s.get("recommendations", []):
-                slot = rec.get("fittingSlot", "")
-                if slot and slot in seen_slots:
-                    continue
-                if slot:
-                    seen_slots.add(slot)
-                full = garment_lookup.get(rec.get("id"), {})
-                rec["imageUrl"] = full.get("imageUrl", "")
-                deduped.append(rec)
-            s["recommendations"] = deduped
+            outfit = outfit_lookup.get(s.get("outfit_id"), {})
+            s["outfit_name"] = outfit.get("name", "")
+            s["outfit_description"] = outfit.get("description", "")
+            s["outfit_imageUrl"] = outfit.get("imageUrl", "")
+            s["recommendations"] = [
+                {
+                    "id": g["garment"]["id"],
+                    "name": g["garment"]["name"],
+                    "description": g["garment"]["description"],
+                    "imageUrl": g["garment"]["imageUrl"],
+                    "fittingSlot": g["garment"]["fittingSlot"],
+                    "garmentType": g["garment"]["garmentType"],
+                    "category": g["garment"]["category"],
+                    "layerLevel": g["garment"]["layerLevel"],
+                    "silhouette": g["garment"].get("silhouette", ""),
+                }
+                for g in outfit.get("items", [])
+                if g.get("garment")
+            ]
 
         return {
             "success": True,
