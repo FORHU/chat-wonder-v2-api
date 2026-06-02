@@ -18,6 +18,7 @@ env:
 jobs:
     deploy:
         runs-on: ubuntu-latest
+        environment: staging
 
         steps:
             - name: Checkout code
@@ -33,6 +34,22 @@ jobs:
             - name: Login to Amazon ECR
               id: login-ecr
               uses: aws-actions/amazon-ecr-login@v2
+
+            - name: Write user_functions.env into build context
+              run: |
+                  cat > resources/functions/user_functions.env << 'FUNCEOF'
+                  LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
+                  LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
+                  LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
+                  AWS_REGION=${{ vars.AWS_REGION }}
+                  AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
+                  LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
+                  GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
+                  GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
+                  COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
+                  FUNCEOF
 
             - name: Build and push Docker image
               run: |
@@ -86,6 +103,9 @@ jobs:
                       COSMETICS_MODEL=${{ secrets.COSMETICS_MODEL }}
                       COSMETICS_S3_BUCKET_NAME=${{ secrets.COSMETICS_S3_BUCKET_NAME }}
                       COSMETICS_AWS_REGION=${{ secrets.COSMETICS_AWS_REGION }}
+                      COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
+                      GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
+                      GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                       LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                       ENVEOF
 
@@ -100,6 +120,9 @@ jobs:
                       AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
                       LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
                       LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
+                      GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
+                      GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
+                      COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                       FUNCEOF
 
                       # ── Authenticate EC2 to ECR ───────────────────────────────────
