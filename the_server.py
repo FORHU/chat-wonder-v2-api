@@ -398,7 +398,9 @@ def process_persona(user_input: str):
             "**[Outfit Name]** — [reason why this outfit suits the weather and event]\n\n"
             "Do NOT include image tags or image URLs in your text response — images are handled separately by the frontend.\n\n"
             "Repeat the ## Set N — [Vibe] header for each additional set. "
-            "Keep the tone friendly and conversational. Mention the weather context briefly at the start."
+            "Keep the tone friendly and conversational. Mention the weather context briefly at the start.\n\n"
+            "RESPONSE LENGTH — Your chat message must be 2-3 sentences maximum: short, specific, and informative. "
+            "Do not pad with filler phrases, greetings, or summaries. Every sentence must carry detail."
         )
 
     elif user_input.lower().startswith("[cosmetics]"):
