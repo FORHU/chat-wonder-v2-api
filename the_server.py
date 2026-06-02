@@ -814,12 +814,10 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
 
     for _ in range(max_chains):
         function_call = {"name": None, "arguments": ""}
-        _clean_q = _display_query(query)
-        _query_label = f"\"{_clean_q[:100]}\"" if _clean_q else "the question"
         if last_tool:
-            _cycle_summary = f"The AI has received results from `{last_tool}` and is deciding whether more steps are needed to answer: {_query_label}"
+            _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
         else:
-            _cycle_summary = f"The AI is making its first decision about: {_query_label}"
+            _cycle_summary = "The AI is working through the question, deciding whether it needs to use a tool or can answer directly."
         broadcast_trace("cognition", f"Cycle {_ + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id,
             summary=_cycle_summary)
         stream_resp = perform_chat(messages)
@@ -845,7 +843,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
         if not function_call["name"] and last_response:
             preview = last_response[:200].replace('\n', ' ')
             broadcast_trace("cognition", f"LLM produced final text ({len(last_response)} chars): \"{preview}{'…' if len(last_response) > 200 else ''}\"", session_id,
-                summary=f"The AI has finished reasoning and produced its final answer ({len(last_response)} characters).")
+                summary="The AI has finished reasoning and is ready to deliver its response.")
 
         _xai_reason = None
         if last_response:
@@ -871,7 +869,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             except Exception:
                 _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
             broadcast_trace("cognition", "\n".join(_why_lines), session_id,
-                summary=f"The AI decided to use the '{function_call['name']}' tool. {_tool_desc[:200]}")
+                summary=f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}")
 
         if last_response.strip():
             full_response = last_response.strip()
@@ -895,16 +893,14 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
         )
         if is_dup:
             broadcast_trace("control", f"BLOCKED duplicate call: `{function_call['name']}` — injecting memory reminder", session_id,
-                summary=f"Safety check: The AI tried to use the '{function_call['name']}' tool with the same inputs again. This was blocked to prevent redundant work.")
+                summary=f"Safety check: The AI proposed to use '{function_call['name']}' again with the same inputs. This was blocked to prevent a redundant loop.")
             messages.append({"role": "system", "content": f"Function `{function_call['name']}` already called with same args. Do not repeat."})
             continue
 
-        _clean_q = _display_query(query)
-        _query_label = f"\"{_clean_q[:80]}\"" if _clean_q else "the question"
         broadcast_trace("control", f"APPROVED: `{function_call['name']}` — no prior identical call found", session_id,
-            summary=f"Safety check passed. No prior identical call found. Proceeding to run `{function_call['name']}` to help answer: {_query_label}")
+            summary=f"Safety check passed. The AI's proposed action is new — it has not taken this exact step before. Proceeding to execute '{function_call['name']}'.")
         broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id,
-            summary=f"The AI is now running the '{function_call['name']}' tool. Waiting for results...")
+            summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.")
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
         result = execute_function_call(function_call, session_id=session_id)
@@ -919,9 +915,9 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             _rp = str(result)
         _ctx = _summarize_tool_result(function_call["name"], result)
         broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id,
-            summary=f"The '{function_call['name']}' tool finished. {_ctx}. The AI will use this to answer: {_query_label}")
+            summary=f"'{function_call['name']}' completed. {_ctx}")
         broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id,
-            summary=f"The AI has stored the results from '{function_call['name']}' in its working memory and will not need to call this tool again for the same information.")
+            summary=f"The AI stored the result from '{function_call['name']}'. This confirmed knowledge will be used when composing the final response.")
 
         try:
             content = json.dumps(result, ensure_ascii=False)
@@ -951,6 +947,19 @@ def _display_query(user_input: str) -> str:
     return user_input
 
 
+def _describe_input(text: str) -> str:
+    bullet_count = sum(1 for line in text.splitlines() if line.strip().startswith("- "))
+    is_structured = bullet_count >= 3 and (
+        "rules:" in text.lower()
+        or "intent decision" in text.lower()
+        or text.strip().startswith("You are")
+    )
+    if is_structured:
+        first_line = text.splitlines()[0].strip()
+        return f"[Structured configuration]\n{first_line}\n{bullet_count} behavioral rule(s) defined."
+    return text
+
+
 def _interpret_score(score: float) -> str:
     if score >= 0.7:
         return "high"
@@ -964,18 +973,17 @@ def _summarize_tool_result(tool_name: str, result) -> str:
         if tool_name == "search_legal":
             results = result.get("results", []) if isinstance(result, dict) else []
             if results:
-                return f"Search returned {len(results)} result(s). Top result: \"{results[0].get('title', '?')[:80]}\""
-            return "Search returned no results."
+                return f"The search returned {len(results)} result(s). The top match was: \"{results[0].get('title', 'unknown')[:80]}\""
+            return "The search returned no results."
         if tool_name == "summarize_legal_case":
             title = (result.get("title") or result.get("case_title") or "unknown case") if isinstance(result, dict) else "unknown"
-            return f"Case summary produced for: \"{str(title)[:80]}\""
+            return f"A case summary was produced for: \"{str(title)[:80]}\""
         if tool_name == "recommend_garments":
             recs = result.get("recommendations", []) if isinstance(result, dict) else []
-            return f"Returned {len(recs)} outfit recommendation(s)."
+            return f"{len(recs)} outfit recommendation(s) were returned."
     except Exception:
         pass
-    preview = json.dumps(result, ensure_ascii=False)[:120] if result else "empty"
-    return f"Result: {preview}"
+    return "The tool completed and returned a result."
 
 
 def _broadcast_retrieval_context(state, tools, addendum_override, session_id, query: str = "", persona: str = "auto"):
@@ -992,40 +1000,42 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
         top = rag_sources[0]
         top_title = (top.get('title') or '')[:80]
         top_score = top.get('relevance', 0) or 0
-        _clean_query = _display_query(query)
-        _query_label = f"\"{_clean_query[:100]}\"" if _clean_query else "the question"
         broadcast_trace("retrieval", "\n".join(lines), session_id,
             summary=(
-                f"The AI searched for {_query_label} and found {len(rag_sources)} relevant source(s). "
-                f"Top result: \"{top_title}\" (relevance: {_interpret_score(top_score)}). "
-                f"These sources will be used as evidence when forming the answer."
+                f"The AI checked its knowledge base and found {len(rag_sources)} relevant source(s). "
+                f"The top match, \"{top_title}\", had {_interpret_score(top_score)} relevance. "
+                f"These documents will be used to ground the response in verified material."
             ))
     else:
         if persona == "garment":
             _no_rag_summary = "No knowledge base search was performed — garment recommendations use live weather data and the AI's training knowledge directly."
         else:
-            _clean_query = _display_query(query)
-            _query_label = f"\"{_clean_query[:100]}\"" if _clean_query else "the question"
             _no_rag_summary = (
-                f"The AI searched for {_query_label} but found no sources above the relevance threshold. "
-                f"It will rely on its training knowledge and conversation history."
+                "The AI checked its knowledge base but found no documents above the relevance threshold. "
+                "It will answer using its training knowledge and the conversation history."
             )
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
             summary=_no_rag_summary)
     _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "auto": "General Assistant"}.get(persona, persona.title())
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
+    _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
     if available_tools:
         tool_lines = [f"Mode: {_persona_label} | History turns: {history_turns} | LLM was given {len(available_tools)} tool(s):"]
         for t in available_tools:
             fn = t['function']
             tool_lines.append(f"  • {fn['name']}: {fn.get('description', '')[:120]}")
-        _tool_names = ", ".join(t['function']['name'] for t in available_tools)
         broadcast_trace("cognition", "\n".join(tool_lines), session_id,
-            summary=f"The AI is running in {_persona_label} mode. It has access to {len(available_tools)} tool(s): {_tool_names}. It is reviewing {history_turns} prior message(s) for context.")
+            summary=(
+                f"The AI is preparing to reason in {_persona_label} mode. "
+                f"It is reviewing {_history_desc} and has {len(available_tools)} tool(s) available to assist."
+            ))
     else:
         broadcast_trace("cognition", f"Mode: {_persona_label} | History turns: {history_turns} | No tools available", session_id,
-            summary=f"The AI is running in {_persona_label} mode with no tools. It will answer using only its training knowledge and the conversation so far.")
+            summary=(
+                f"The AI is preparing to reason in {_persona_label} mode with no tools. "
+                f"It will answer directly from its training knowledge, reviewing {_history_desc}."
+            ))
 
 def reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
@@ -1083,12 +1093,10 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
 
     for iteration in range(max_chains):
         function_call = {"name": None, "arguments": ""}
-        _clean_q = _display_query(query)
-        _query_label = f"\"{_clean_q[:100]}\"" if _clean_q else "the question"
         if last_tool:
-            _cycle_summary = f"The AI has received results from `{last_tool}` and is deciding whether more steps are needed to answer: {_query_label}"
+            _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
         else:
-            _cycle_summary = f"The AI is making its first decision about: {_query_label}"
+            _cycle_summary = "The AI is working through the question, deciding whether it needs to use a tool or can answer directly."
         broadcast_trace("cognition", f"Cycle {iteration + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id,
             summary=_cycle_summary)
         await asyncio.sleep(0)
@@ -1160,7 +1168,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         if not function_call["name"] and last_response:
             preview = last_response[:200].replace('\n', ' ')
             broadcast_trace("cognition", f"LLM produced final text ({len(last_response)} chars): \"{preview}{'…' if len(last_response) > 200 else ''}\"", session_id,
-                summary=f"The AI has finished reasoning and produced its final answer ({len(last_response)} characters).")
+                summary="The AI has finished reasoning and is ready to deliver its response.")
             await asyncio.sleep(0)
 
         if _xai_reason and function_call["name"]:
@@ -1178,7 +1186,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             except Exception:
                 _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
             broadcast_trace("cognition", "\n".join(_why_lines), session_id,
-                summary=f"The AI decided to use the '{function_call['name']}' tool. {_tool_desc[:200]}")
+                summary=f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}")
             await asyncio.sleep(0)
 
         if last_response.strip():
@@ -1200,18 +1208,16 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         is_dup = any(fc["name"] == function_call["name"] and fc["args"] == cur_args for fc in funcall_chains)
         if is_dup:
             broadcast_trace("control", f"BLOCKED duplicate call: `{function_call['name']}` — injecting memory reminder", session_id,
-                summary=f"Safety check: The AI tried to use the '{function_call['name']}' tool with the same inputs again. This was blocked to prevent redundant work.")
+                summary=f"Safety check: The AI proposed to use '{function_call['name']}' again with the same inputs. This was blocked to prevent a redundant loop.")
             await asyncio.sleep(0)
             messages.append({"role": "system", "content": f"Function `{function_call['name']}` already called. Do not repeat."})
             continue
 
-        _clean_q = _display_query(query)
-        _query_label = f"\"{_clean_q[:80]}\"" if _clean_q else "the question"
         broadcast_trace("control", f"APPROVED: `{function_call['name']}` — no prior identical call found", session_id,
-            summary=f"Safety check passed. No prior identical call found. Proceeding to run `{function_call['name']}` to help answer: {_query_label}")
+            summary=f"Safety check passed. The AI's proposed action is new — it has not taken this exact step before. Proceeding to execute '{function_call['name']}'.")
         await asyncio.sleep(0)
         broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id,
-            summary=f"The AI is now running the '{function_call['name']}' tool. Waiting for results...")
+            summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.")
         await asyncio.sleep(0)
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
@@ -1233,10 +1239,10 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             _rp = str(result)
         _ctx = _summarize_tool_result(function_call["name"], result)
         broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id,
-            summary=f"The '{function_call['name']}' tool finished. {_ctx}. The AI will use this to answer: {_query_label}")
+            summary=f"'{function_call['name']}' completed. {_ctx}")
         await asyncio.sleep(0)
         broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id,
-            summary=f"The AI has stored the results from '{function_call['name']}' in its working memory and will not need to call this tool again for the same information.")
+            summary=f"The AI stored the result from '{function_call['name']}'. This confirmed knowledge will be used when composing the final response.")
         await asyncio.sleep(0)
 
         try:
@@ -1407,7 +1413,7 @@ def chat(request: ChatRequest):
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
     _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
-        summary=f"A new question was received. Persona: {_persona_label}. {_tool_count} tool(s) available.\n\nQuestion: \"{_display_query(user_input)[:400]}\"")
+        summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
     # Normal path with optional HITL (legal, garment, and cosmetics personas always auto-approve their tools)
     _was_auto = _context.auto_approval
@@ -1473,8 +1479,10 @@ def approve(request: ApproveRequest):
         raise HTTPException(status_code=400, detail="No pending function call for this session.")
 
     fc = state.pending_function_call
+    _hitl_outcome = "approved" if decision == "approve" else "rejected"
+    _hitl_next = "The AI will proceed." if decision == "approve" else "The AI will respond without taking this action."
     broadcast_trace("control", f"HITL decision: {decision} — tool: `{fc['name']}`", session_id,
-        summary=f"A human reviewer made a decision on the AI's proposed action '{fc['name']}': {decision.upper()}.")
+        summary=f"A human reviewer {_hitl_outcome} the AI's proposed action. {_hitl_next}")
     messages = state.pending_messages
     tools = state.pending_tools
     addendum_override = state.pending_addendum
@@ -1732,7 +1740,7 @@ async def chat_stream(websocket: WebSocket):
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
             _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
-                summary=f"A new question was received. Persona: {_persona_label}. {_tool_count} tool(s) available.\n\nQuestion: \"{_display_query(user_input)[:400]}\"")
+                summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
             full_response = ""
             _ws_t_start = time.time()
