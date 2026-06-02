@@ -5,3 +5,9 @@ resources/functions/user_functions.env
 /__pycache__
 /__pycache__
 /.claude
+/legal_rag/__pycache__
+/__pycache__
+/resources/functions/__pycache__
+/__pycache__
+*.pyc
+/resources/functions/__pycache__
