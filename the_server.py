@@ -396,15 +396,9 @@ def process_persona(user_input: str):
             "you MUST extract that JSON string exactly as-is and pass it as the weather_json parameter "
             "when calling recommend_garments. Do not modify, summarize, or omit it. "
             "Never show, repeat, or mention the [FRONTEND_WEATHER] annotation in your response to the user — it is internal data only.\n\n"
-            "When presenting results, format each set exactly like this:\n"
-            "## Set 1 — [Vibe Name]\n"
-            "*[trend_note]*\n\n"
-            "**[Outfit Name]** — [reason why this outfit suits the weather and event]\n\n"
-            "Do NOT include image tags or image URLs in your text response — images are handled separately by the frontend.\n\n"
-            "Repeat the ## Set N — [Vibe] header for each additional set. "
-            "Keep the tone friendly and conversational. Mention the weather context briefly at the start.\n\n"
-            "RESPONSE LENGTH — Your chat message must be 2-3 sentences maximum: short, specific, and informative. "
-            "Do not pad with filler phrases, greetings, or summaries. Every sentence must carry detail."
+            "RESPONSE LENGTH — Your chat message must be exactly 1 sentence. "
+            "Just hand off to the cards — e.g. 'Here are your outfit picks.' "
+            "No weather context, no vibe names, no summaries, no greetings."
         )
 
     elif user_input.lower().startswith("[maps]"):
