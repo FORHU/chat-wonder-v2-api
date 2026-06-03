@@ -50,6 +50,7 @@ jobs:
                   GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                   OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                   COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
+                  GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
                   FUNCEOF
 
             - name: Build and push Docker image
@@ -109,6 +110,7 @@ jobs:
                       GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                       OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                       LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
+                      GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
                       ENVEOF
 
                       # ── Write user_functions.env (legal RAG credentials) ─────────
@@ -126,6 +128,7 @@ jobs:
                       GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                       OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                       COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
+                      GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
                       FUNCEOF
 
                       # ── Authenticate EC2 to ECR ───────────────────────────────────

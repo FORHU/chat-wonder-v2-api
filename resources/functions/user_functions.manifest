@@ -361,6 +361,36 @@
   },
   {
     "type": "function",
+    "persona": "maps",
+    "function": {
+      "name": "search_nearby_places",
+      "description": "Search for nearby places (restaurants, cafes, hospitals, ATMs, etc.) using Google Places API. Use when the user asks about places near their location or uses the [maps] prefix. Automatically routes between Nearby Search and Text Search based on query intent.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lat": {
+            "type": "number",
+            "description": "User's latitude coordinate. Extract from [USER_LOCATION:{...}] in the message."
+          },
+          "lng": {
+            "type": "number",
+            "description": "User's longitude coordinate. Extract from [USER_LOCATION:{...}] in the message."
+          },
+          "query": {
+            "type": "string",
+            "description": "What to search for, e.g. 'restaurant', 'coffee shop', 'ATM', 'hospital'. Infer from the user's message."
+          },
+          "radius": {
+            "type": "integer",
+            "description": "Search radius in meters. Default is 1500. Override if user specifies distance e.g. 'within 2km' -> 2000."
+          }
+        },
+        "required": ["lat", "lng", "query"]
+      }
+    }
+  },
+  {
+    "type": "function",
     "persona": "cosmetics",
     "function": {
       "name": "recommend_cosmetics",

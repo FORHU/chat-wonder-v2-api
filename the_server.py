@@ -106,6 +106,7 @@ class ChatState:
         self.last_search_legal_results: list = []
         self.last_garment_result: dict = {}
         self.last_cosmetics_result: dict = {}
+        self.last_maps_result: dict = {}
         self.openai_client = None
         self.last_used: float = time.time()
         # HITL pending state
@@ -248,6 +249,7 @@ class ChatRequest(BaseModel):
     document_context: Optional[str] = None
     weather: Optional[dict] = None
     skin_analysis: Optional[dict] = None
+    location: Optional[dict] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -401,6 +403,23 @@ def process_persona(user_input: str):
             "Keep the tone friendly and conversational. Mention the weather context briefly at the start.\n\n"
             "RESPONSE LENGTH — Your chat message must be 2-3 sentences maximum: short, specific, and informative. "
             "Do not pad with filler phrases, greetings, or summaries. Every sentence must carry detail."
+        )
+
+    elif user_input.lower().startswith("[maps]"):
+        persona = "maps"
+        user_input = user_input[6:].strip()
+        maps_whitelist = ["search_nearby_places"]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in maps_whitelist]
+        addendum_override = (
+            "MAPS ASSISTANT MODE\n\n"
+            "You are a helpful local guide and places discovery assistant. "
+            "Use the search_nearby_places function to find places near the user's current location.\n\n"
+            "IMPORTANT — location handling: If the message contains [USER_LOCATION:{...}], "
+            "you MUST extract the 'lat' and 'lng' values from that JSON and pass them to search_nearby_places. "
+            "Never show, repeat, or mention the [USER_LOCATION] annotation in your response — it is internal data only.\n\n"
+            "When presenting results, write 1-2 sentences summarising what was found (e.g. count, top highlights). "
+            "Do NOT list all places in text — the frontend renders place cards from the structured data.\n\n"
+            "RESPONSE LENGTH — 1-2 sentences maximum. Every sentence must carry useful detail."
         )
 
     elif user_input.lower().startswith("[cosmetics]"):
@@ -784,6 +803,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_cosmetics_result = result
+        if func_name == "search_nearby_places" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                state.last_maps_result = result
         logging.info(f"Function {func_name} executed successfully.")
         return result
     except Exception as e:
@@ -983,6 +1006,10 @@ def _summarize_tool_result(tool_name: str, result) -> str:
         if tool_name == "recommend_garments":
             recs = result.get("recommendations", []) if isinstance(result, dict) else []
             return f"{len(recs)} outfit recommendation(s) were returned."
+        if tool_name == "search_nearby_places":
+            places = result.get("places", []) if isinstance(result, dict) else []
+            query = result.get("query", "") if isinstance(result, dict) else ""
+            return f"{len(places)} place(s) found for '{query}'."
     except Exception:
         pass
     return "The tool completed and returned a result."
@@ -1009,8 +1036,8 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
                 f"These documents will be used to ground the response in verified material."
             ))
     else:
-        if persona == "garment":
-            _no_rag_summary = "No knowledge base search was performed — garment recommendations use live weather data and the AI's training knowledge directly."
+        if persona in ("garment", "maps"):
+            _no_rag_summary = "No knowledge base search was performed — this persona uses live external API data directly."
         else:
             _no_rag_summary = (
                 "The AI checked its knowledge base but found no documents above the relevance threshold. "
@@ -1018,7 +1045,7 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
             )
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
             summary=_no_rag_summary)
-    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
     _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
@@ -1396,6 +1423,12 @@ def chat(request: ChatRequest):
         except Exception:
             pass
 
+    if persona == "maps" and request.location:
+        try:
+            user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
+        except Exception:
+            pass
+
     if getattr(request, "document_context", None):
         doc_injection = f"\n\n[CONTEXT: The user is viewing the following document:]\n{request.document_context}"
         addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
@@ -1413,13 +1446,13 @@ def chat(request: ChatRequest):
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
-    # Normal path with optional HITL (legal, garment, and cosmetics personas always auto-approve their tools)
+    # Normal path with optional HITL (legal, garment, cosmetics, and maps personas always auto-approve their tools)
     _was_auto = _context.auto_approval
-    if persona in ("legal", "garment", "cosmetics"):
+    if persona in ("legal", "garment", "cosmetics", "maps"):
         _context.auto_approval = True
     try:
         result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona)
@@ -1464,6 +1497,7 @@ def chat(request: ChatRequest):
         "source_metadata": state.source_metadata,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
         "cosmetics_sets": state.last_cosmetics_result if persona == "cosmetics" and state.last_cosmetics_result else None,
+        "places_results": state.last_maps_result.get("places", []) if persona == "maps" and state.last_maps_result else None,
     }
 
 
@@ -1730,6 +1764,13 @@ async def chat_stream(websocket: WebSocket):
                 except Exception:
                     pass
 
+            # Inject frontend-provided location for maps persona
+            if persona == "maps" and data.get("location"):
+                try:
+                    user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
+                except Exception:
+                    pass
+
             if getattr(request, "document_context", None):
                 doc_injection = f"\n\n[CONTEXT: User is viewing:]\n{request.document_context}"
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
@@ -1740,7 +1781,7 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -1749,7 +1790,7 @@ async def chat_stream(websocket: WebSocket):
             _ws_t_first_chunk = None
             _was_auto = _context.auto_approval
             end_sent = False
-            if persona in ("legal", "garment", "cosmetics"):
+            if persona in ("legal", "garment", "cosmetics", "maps"):
                 _context.auto_approval = True
             try:
                 async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
@@ -1789,6 +1830,8 @@ async def chat_stream(websocket: WebSocket):
                         await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
                     if persona == "cosmetics" and state.last_cosmetics_result:
                         await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
+                    if persona == "maps" and state.last_maps_result:
+                        await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
                 _ws_t_end = time.time()

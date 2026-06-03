@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Maps AI Guide</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0c0c10;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 14px 20px;
+      background: #111118;
+      border-bottom: 1px solid #22222e;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      font-weight: 600; letter-spacing: .4px;
+    }
+    .badge-maps    { background: #0f2a1a; color: #4ade80; }
+    .badge-general { background: #1a1a2a; color: #94a3b8; }
+    #status {
+      margin-left: auto; font-size: 12px; color: #64748b;
+      display: flex; align-items: center; gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #ef4444; transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    /* ── Config bar ── */
+    .config-bar {
+      padding: 8px 20px; background: #0e0e14;
+      border-bottom: 1px solid #1a1a24;
+      display: flex; align-items: center; gap: 16px;
+      font-size: 13px; color: #94a3b8; flex-shrink: 0;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 6px;
+      padding: 4px 10px; font-size: 13px; width: 220px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #22c55e; }
+    #loc-display {
+      margin-left: auto; font-size: 11px; color: #475569;
+      display: flex; align-items: center; gap: 5px;
+    }
+    .toggle-switch { position: relative; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; background: #252535;
+      border-radius: 20px; cursor: pointer; transition: background .2s;
+    }
+    .slider::before {
+      content: ""; position: absolute;
+      width: 14px; height: 14px; left: 3px; top: 3px;
+      background: #fff; border-radius: 50%; transition: transform .2s;
+    }
+    .toggle-switch input:checked + .slider { background: #16a34a; }
+    .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+    /* ── Main layout ── */
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1; overflow-y: auto;
+      padding: 24px 20px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #252535; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 800px; }
+    .msg.user      { align-self: flex-end;   align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px; font-weight: 600;
+      letter-spacing: .5px; text-transform: uppercase; color: #475569;
+    }
+    .bubble {
+      padding: 12px 16px; border-radius: 12px;
+      line-height: 1.65; font-size: 14px; max-width: 100%;
+    }
+    .msg.user .bubble      { background: #0f2a1a; color: #bbf7d0; border-bottom-right-radius: 4px; }
+    .msg.assistant .bubble {
+      background: #111118; color: #e2e8f0;
+      border-bottom-left-radius: 4px; border: 1px solid #22222e;
+    }
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble p  { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble em { color: #4ade80; }
+    .bubble a  { color: #22c55e; }
+
+    /* Typing */
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px; background: #475569;
+      border-radius: 50%; animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40%           { transform: translateY(-7px); }
+    }
+
+    /* ── Places panel ── */
+    #places-panel {
+      width: 320px; flex-shrink: 0;
+      border-left: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 12px 16px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: .6px; text-transform: uppercase; color: #475569;
+      border-bottom: 1px solid #1a1a24;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    #places-count {
+      font-size: 11px; font-weight: 600;
+      color: #22c55e; display: none;
+    }
+
+    /* Location + search info block */
+    #search-info {
+      margin: 12px 12px 0;
+      padding: 10px 14px;
+      background: #111118; border: 1px solid #1a2e1a; border-radius: 10px;
+      font-size: 12px; display: none;
+    }
+    .si-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+    .si-icon { font-size: 14px; flex-shrink: 0; }
+    .si-label { color: #94a3b8; }
+    .si-value { color: #e2e8f0; font-weight: 600; }
+    .si-query { color: #4ade80; font-weight: 600; }
+    .si-mode  {
+      display: inline-block; margin-top: 4px; padding: 1px 7px;
+      border-radius: 99px; font-size: 10px; font-weight: 700;
+      background: #0f2a1a; color: #4ade80; letter-spacing: .3px;
+    }
+
+    /* Panel body */
+    #panel-body { flex: 1; overflow-y: auto; }
+    #panel-body::-webkit-scrollbar { width: 4px; }
+    #panel-body::-webkit-scrollbar-thumb { background: #252535; }
+
+    /* Places list */
+    #places-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+
+    .places-empty {
+      padding: 32px 16px; color: #475569; font-size: 12px;
+      text-align: center; line-height: 1.7;
+    }
+    .places-empty .empty-icon { font-size: 36px; margin-bottom: 10px; display: block; }
+
+    /* Place card */
+    .place-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color .2s, transform .15s;
+      cursor: default;
+    }
+    .place-card:hover { border-color: #16a34a; transform: translateY(-1px); }
+    .place-photo {
+      width: 100%; height: 140px;
+      object-fit: cover; display: block; background: #1a1a24;
+    }
+    .place-icon-row {
+      background: linear-gradient(135deg, #0f2a1a, #1a2e1a);
+      height: 56px; display: flex; align-items: center; justify-content: center;
+      font-size: 28px;
+    }
+    .card-body { padding: 10px 12px 12px; }
+    .card-name {
+      font-size: 13px; font-weight: 700; color: #f1f5f9;
+      line-height: 1.4; margin-bottom: 4px;
+    }
+    .card-address { font-size: 11px; color: #64748b; margin-bottom: 6px; line-height: 1.4; }
+
+    .card-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+    .rating-stars { font-size: 11px; color: #fbbf24; letter-spacing: 1px; }
+    .rating-value { font-size: 12px; font-weight: 700; color: #fbbf24; }
+    .rating-count { font-size: 10px; color: #475569; }
+
+    .open-badge {
+      font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 99px;
+      letter-spacing: .3px;
+    }
+    .open-badge.open   { background: #0f2a1a; color: #4ade80; }
+    .open-badge.closed { background: #2a0f0f; color: #f87171; }
+    .open-badge.unknown { background: #1a1a24; color: #475569; }
+
+    .price-level { font-size: 12px; color: #94a3b8; }
+
+    .card-types { display: flex; flex-wrap: wrap; gap: 4px; }
+    .type-chip {
+      font-size: 10px; padding: 1px 6px; border-radius: 99px;
+      background: #1a1a24; color: #475569;
+    }
+
+    /* ── Sample prompt chips ── */
+    .prompt-chips { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+    .prompt-chip {
+      display: block; width: 100%;
+      background: #0f2a1a; border: 1px solid #166534;
+      color: #4ade80; border-radius: 8px;
+      padding: 8px 12px; font-size: 12px; line-height: 1.4;
+      text-align: left; cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+      font-family: inherit;
+    }
+    .prompt-chip:hover { background: #14532d; border-color: #16a34a; color: #bbf7d0; }
+
+    /* ── Input area ── */
+    .input-area {
+      padding: 16px 20px; border-top: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 10px; padding: 10px 14px;
+      font-size: 14px; resize: none; min-height: 42px; max-height: 160px;
+      line-height: 1.5; font-family: inherit;
+    }
+    #chat-input:focus { outline: none; border-color: #16a34a; }
+    #chat-input::placeholder { color: #475569; }
+    #send-btn {
+      background: #16a34a; border: none; color: #fff;
+      border-radius: 10px; padding: 10px 20px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background .15s; white-space: nowrap;
+    }
+    #send-btn:hover    { background: #15803d; }
+    #send-btn:disabled { background: #1a1a24; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🗺 Maps AI Guide</h1>
+  <span class="badge badge-maps" id="persona-badge">📍 Maps Mode</span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>
+    Server: <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <label>
+    <span class="toggle-switch">
+      <input type="checkbox" id="maps-toggle" checked />
+      <span class="slider"></span>
+    </span>
+    Maps persona
+  </label>
+  <div id="loc-display">📍 <span id="loc-text">Locating…</span></div>
+</div>
+
+<div class="main">
+
+  <!-- Chat -->
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">Maps AI</span>
+      <div class="bubble">
+        Hi! I'm your <strong>AI Local Guide</strong>. I use your current location to find places nearby — restaurants, cafes, hospitals, ATMs, and more.<br><br>
+        <strong>Try one of these:</strong>
+        <div class="prompt-chips">
+          <button class="prompt-chip" onclick="fillPrompt(this)">Show me nearby restaurants</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Find coffee shops within 500m</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Where's the nearest hospital?</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">ATMs near me</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Convenience stores close by</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Places panel -->
+  <div id="places-panel">
+    <div class="panel-header">
+      <span>Nearby Places</span>
+      <span id="places-count"></span>
+    </div>
+
+    <div id="panel-body">
+      <div id="search-info"></div>
+
+      <div id="places-list">
+        <div class="places-empty">
+          <span class="empty-icon">🗺</span>
+          Ask me to find a place and results will appear here.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="input-area">
+  <textarea id="chat-input" rows="1"
+    placeholder='e.g. "Show me nearby restaurants" or "Coffee shops within 1km"'></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  let sessionId = null, ws = null;
+  let currentBubble = null, currentRaw = "", isStreaming = false;
+  let _userLocation = null;
+
+  // ── Geolocation ──
+  function acquireLocation() {
+    if (!navigator.geolocation) {
+      $("loc-text").textContent = "Geolocation not supported";
+      return;
+    }
+    $("loc-text").textContent = "Locating…";
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        _userLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        $("loc-text").textContent =
+          `${_userLocation.lat.toFixed(4)}, ${_userLocation.lng.toFixed(4)}`;
+        console.log("[location acquired]", _userLocation);
+      },
+      err => {
+        // Fall back to Manila
+        _userLocation = { lat: 14.5995, lng: 120.9842 };
+        $("loc-text").textContent = "Manila (default)";
+        console.warn("[geolocation denied, using Manila]", err);
+      },
+      { timeout: 8000 }
+    );
+  }
+
+  // ── Auto-resize textarea ──
+  $("chat-input").addEventListener("input", () => {
+    const el = $("chat-input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  $("server-url").addEventListener("change", connect);
+  $("maps-toggle").addEventListener("change", () => {
+    const on = $("maps-toggle").checked;
+    $("persona-badge").textContent = on ? "📍 Maps Mode" : "💬 General";
+    $("persona-badge").className = "badge " + (on ? "badge-maps" : "badge-general");
+  });
+
+  // ── Connect ──
+  async function connect() {
+    setStatus("connecting", "Connecting…");
+    try {
+      sessionId = (await (await fetch(`http://${$("server-url").value}/session-id`)).json()).session_id;
+    } catch { setStatus("error", "Cannot reach server"); return; }
+
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://${$("server-url").value}/chat-stream`);
+    ws.onopen  = () => { setStatus("ok", "Connected"); $("send-btn").disabled = false; };
+    ws.onclose = () => { setStatus("error", "Disconnected"); $("send-btn").disabled = true; };
+    ws.onerror = () => setStatus("error", "WebSocket error");
+    ws.onmessage = ({ data }) => { console.log("[chat-stream]", data); handleChunk(data); };
+  }
+
+  // ── Chunk handler ──
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      if (currentBubble && currentRaw) {
+        currentBubble.innerHTML = marked.parse(currentRaw);
+      }
+      currentBubble = null; currentRaw = "";
+      isStreaming = false; $("send-btn").disabled = false;
+      removeTyping(); return;
+    }
+    if (chunk === "[DONE]") return;
+
+    if (chunk.startsWith("[MAPS_DATA]")) {
+      try {
+        const data = JSON.parse(chunk.slice(11));
+        console.log("[MAPS_DATA received]", data);
+        renderPlacesData(data);
+      } catch(e) { console.error("[MAPS_DATA parse error]", e, chunk); }
+      return;
+    }
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false; $("send-btn").disabled = false; removeTyping(); return;
+    }
+    if (chunk.startsWith("[Sources]") || chunk.startsWith("[GARMENT_DATA]") ||
+        chunk.startsWith("[COSMETICS_DATA]") || chunk.startsWith("[STRUCTURED_DATA]")) return;
+
+    if (!currentBubble) currentBubble = createAssistantBubble();
+    removeTyping();
+    currentRaw += chunk;
+    currentBubble.textContent = currentRaw;
+    scrollBottom();
+  }
+
+  // ── Render places panel ──
+  function renderPlacesData(data) {
+    if (!data.success) {
+      console.warn("[MAPS_DATA] error:", data.error);
+      return;
+    }
+
+    const places = data.places || [];
+
+    // Count badge
+    const cnt = $("places-count");
+    cnt.textContent = `${places.length} found`;
+    cnt.style.display = "block";
+
+    // Search info block
+    const si = $("search-info");
+    si.style.display = "block";
+    si.innerHTML = `
+      <div class="si-row">
+        <span class="si-icon">🔍</span>
+        <span class="si-label">Query:</span>
+        <span class="si-query">${escHtml(data.query || "")}</span>
+      </div>
+      <div class="si-row">
+        <span class="si-icon">📍</span>
+        <span class="si-label">Radius:</span>
+        <span class="si-value">${data.radius || 1500}m</span>
+      </div>
+      <span class="si-mode">${data.search_mode === "nearby" ? "Nearby Search" : "Text Search"}</span>
+    `;
+
+    const list = $("places-list");
+    list.innerHTML = "";
+
+    if (!places.length) {
+      list.innerHTML = `<div class="places-empty">
+        <span class="empty-icon">😕</span>
+        No places found for "${escHtml(data.query || "")}" within ${data.radius || 1500}m.
+      </div>`;
+      return;
+    }
+
+    places.forEach((p, idx) => {
+      const card = document.createElement("div");
+      card.className = "place-card";
+
+      const icon = placeIcon(p.types || []);
+      const stars = ratingStars(p.rating);
+      const openHtml = openBadge(p.open_now);
+      const priceHtml = p.price_level != null ? priceLevel(p.price_level) : "";
+
+      // Show top 3 non-generic types as chips
+      const displayTypes = (p.types || [])
+        .filter(t => !["point_of_interest", "establishment", "food"].includes(t))
+        .slice(0, 3)
+        .map(t => `<span class="type-chip">${escHtml(t.replace(/_/g, " "))}</span>`)
+        .join("");
+
+      card.innerHTML = `
+        ${p.photo_url
+          ? `<img class="place-photo" src="${escAttr(p.photo_url)}" alt="${escAttr(p.name || '')}" loading="lazy"
+               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" />`
+          : ""}
+        <div class="place-icon-row" style="${p.photo_url ? 'display:none' : ''}">${icon}</div>
+        <div class="card-body">
+          <div class="card-name">${escHtml(p.name || "Unknown")}</div>
+          <div class="card-address">${escHtml(p.address || "")}</div>
+          <div class="card-meta">
+            ${p.rating != null ? `
+              <span class="rating-stars">${stars}</span>
+              <span class="rating-value">${p.rating}</span>
+              ${p.user_ratings_total != null
+                ? `<span class="rating-count">(${p.user_ratings_total.toLocaleString()})</span>` : ""}
+            ` : ""}
+            ${openHtml}
+            ${priceHtml}
+          </div>
+          ${displayTypes ? `<div class="card-types">${displayTypes}</div>` : ""}
+        </div>
+      `;
+      list.appendChild(card);
+    });
+
+    scrollBottom();
+  }
+
+  // ── Place helpers ──
+  function placeIcon(types) {
+    const t = types.join(" ");
+    if (/restaurant|food|meal/.test(t))        return "🍽";
+    if (/cafe|coffee|bakery/.test(t))           return "☕";
+    if (/bar|night_club/.test(t))               return "🍺";
+    if (/hospital|health|doctor|pharmacy/.test(t)) return "🏥";
+    if (/atm|bank|finance/.test(t))             return "🏧";
+    if (/hotel|lodging/.test(t))                return "🏨";
+    if (/store|supermarket|grocery|convenience/.test(t)) return "🛒";
+    if (/mall|shopping/.test(t))                return "🛍";
+    if (/gym|fitness/.test(t))                  return "🏋";
+    if (/school|university|education/.test(t))  return "🎓";
+    if (/gas_station|fuel/.test(t))             return "⛽";
+    if (/park|tourist_attraction/.test(t))      return "🌳";
+    if (/church|mosque|temple|place_of_worship/.test(t)) return "⛪";
+    return "📍";
+  }
+
+  function ratingStars(rating) {
+    if (rating == null) return "";
+    const full  = Math.floor(rating);
+    const half  = rating - full >= 0.5 ? 1 : 0;
+    const empty = 5 - full - half;
+    return "★".repeat(full) + (half ? "½" : "") + "☆".repeat(empty);
+  }
+
+  function openBadge(openNow) {
+    if (openNow === true)  return `<span class="open-badge open">Open</span>`;
+    if (openNow === false) return `<span class="open-badge closed">Closed</span>`;
+    return `<span class="open-badge unknown">Hours unknown</span>`;
+  }
+
+  function priceLevel(level) {
+    const signs = ["Free", "₱", "₱₱", "₱₱₱", "₱₱₱₱"];
+    return `<span class="price-level">${signs[level] || ""}</span>`;
+  }
+
+  // ── Send ──
+  async function send() {
+    const text = $("chat-input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+    const mapsOn = $("maps-toggle").checked;
+    const userInput = mapsOn
+      ? (text.toLowerCase().startsWith("[maps]") ? text : `[maps] ${text}`)
+      : text;
+
+    appendUserMsg(text);
+    $("chat-input").value = ""; $("chat-input").style.height = "auto";
+    $("send-btn").disabled = true; isStreaming = true;
+    appendTyping(); resetPanel();
+
+    const payload = { type: "chat", session_id: sessionId, user_input: userInput };
+    if (mapsOn && _userLocation) {
+      payload.location = _userLocation;
+      console.log("[sending location]", _userLocation);
+    }
+    console.log("[sending to backend]", payload);
+    ws.send(JSON.stringify(payload));
+  }
+
+  function fillPrompt(btn) {
+    const input = $("chat-input");
+    input.value = btn.textContent.trim();
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    input.focus();
+    $("maps-toggle").checked = true;
+    $("persona-badge").textContent = "📍 Maps Mode";
+    $("persona-badge").className = "badge badge-maps";
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("chat-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  // ── DOM helpers ──
+  function appendUserMsg(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = `<span class="msg-label">You</span><div class="bubble">${escHtml(text)}</div>`;
+    $("messages").appendChild(div); scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">Maps AI</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant"; wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">Maps AI</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:#475569;padding:4px 8px;align-self:center;";
+    div.innerHTML = html;
+    $("messages").appendChild(div); scrollBottom();
+  }
+
+  function resetPanel() {
+    $("places-count").style.display = "none";
+    $("search-info").style.display = "none";
+    $("places-list").innerHTML = `<div class="places-empty">
+      <span class="empty-icon">⏳</span>Searching nearby places…
+    </div>`;
+  }
+
+  function scrollBottom() { const el = $("messages"); el.scrollTop = el.scrollHeight; }
+  function escHtml(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function escAttr(s) { return String(s).replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+  function setStatus(state, label) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  acquireLocation();
+  connect();
+</script>
+</body>
+</html>

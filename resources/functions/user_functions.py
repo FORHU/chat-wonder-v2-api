@@ -1111,6 +1111,93 @@ def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Google Places helpers
+# ---------------------------------------------------------------------------
+
+_GOOGLE_PLACES_API_BASE = "https://maps.googleapis.com/maps/api/place"
+_NEARBY_INTENT_KEYWORDS = {"near", "nearby", "around", "close", "closest", "nearest"}
+
+
+def search_nearby_places(
+    lat: float,
+    lng: float,
+    query: str,
+    radius: int = 1500,
+) -> dict:
+    """Search for nearby places using Google Places API (Nearby Search or Text Search)."""
+    api_key = os.getenv("GOOGLE_PLACES_API_KEY", "")
+    if not api_key:
+        return {"success": False, "error": "GOOGLE_PLACES_API_KEY not configured."}
+
+    try:
+        query_lower = query.lower()
+        use_nearby = any(kw in query_lower for kw in _NEARBY_INTENT_KEYWORDS) or len(query.split()) <= 4
+
+        if use_nearby:
+            url = (
+                f"{_GOOGLE_PLACES_API_BASE}/nearbysearch/json"
+                f"?location={lat},{lng}"
+                f"&radius={radius}"
+                f"&keyword={urllib.parse.quote(query)}"
+                f"&key={api_key}"
+            )
+        else:
+            url = (
+                f"{_GOOGLE_PLACES_API_BASE}/textsearch/json"
+                f"?query={urllib.parse.quote(query)}"
+                f"&location={lat},{lng}"
+                f"&radius={radius}"
+                f"&key={api_key}"
+            )
+
+        data = _http_get_json(url)
+        status = data.get("status")
+        if status not in ("OK", "ZERO_RESULTS"):
+            return {"success": False, "error": f"Google Places API error: {status}"}
+
+        places = []
+        for p in data.get("results", [])[:20]:
+            loc = p.get("geometry", {}).get("location", {})
+            photos = p.get("photos", [])
+            opening = p.get("opening_hours", {})
+            photo_ref = photos[0].get("photo_reference", "") if photos else ""
+            photo_url = (
+                f"{_GOOGLE_PLACES_API_BASE}/photo?maxwidth=400"
+                f"&photo_reference={photo_ref}&key={api_key}"
+            ) if photo_ref else ""
+            places.append({
+                "name": p.get("name", ""),
+                "address": p.get("vicinity") or p.get("formatted_address", ""),
+                "rating": p.get("rating"),
+                "user_ratings_total": p.get("user_ratings_total"),
+                "place_id": p.get("place_id", ""),
+                "types": p.get("types", []),
+                "lat": loc.get("lat"),
+                "lng": loc.get("lng"),
+                "open_now": opening.get("open_now"),
+                "photo_url": photo_url,
+                "price_level": p.get("price_level"),
+                "phone_number": None,
+                "website": None,
+            })
+
+        return {
+            "success": True,
+            "query": query,
+            "lat": lat,
+            "lng": lng,
+            "radius": radius,
+            "search_mode": "nearby" if use_nearby else "text",
+            "total_results": len(places),
+            "places": places,
+        }
+
+    except Exception as e:
+        logging.error(f"[search_nearby_places] failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Garments helpers
 # ---------------------------------------------------------------------------
 
