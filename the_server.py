@@ -107,6 +107,7 @@ class ChatState:
         self.last_garment_result: dict = {}
         self.last_cosmetics_result: dict = {}
         self.last_maps_result: list = []
+        self.last_nav_result: dict = {}
         self.openai_client = None
         self.last_used: float = time.time()
         # HITL pending state
@@ -250,6 +251,7 @@ class ChatRequest(BaseModel):
     weather: Optional[dict] = None
     skin_analysis: Optional[dict] = None
     location: Optional[dict] = None
+    sitemap_context: Optional[list] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -424,6 +426,37 @@ def process_persona(user_input: str):
             "When presenting results, write 1-2 sentences summarising what was found across all locations. "
             "Do NOT list all places in text — the frontend renders place cards from the structured data.\n\n"
             "RESPONSE LENGTH — 1-2 sentences maximum. Every sentence must carry useful detail."
+        )
+
+    elif user_input.lower().startswith("[nav]"):
+        persona = "nav"
+        user_input = user_input[5:].strip()
+        filtered_tools = []
+        addendum_override = (
+            "WAYFINDER MODE\n\n"
+            "You are Wayfinder, a concise navigation assistant. Your only job is to map the user's query to a URL path.\n\n"
+            "SITEMAP: The message contains [SITEMAP_CONTEXT:[...]] — a JSON array of valid URL paths. "
+            "Extract it. These are the ONLY valid destinations. Never invent paths not in this list.\n\n"
+            "OUTPUT: Respond with a single raw JSON object and nothing else. "
+            "No markdown, no code fences, no explanation before or after the JSON.\n\n"
+            "SCHEMA:\n"
+            "{\n"
+            '  "target_url": string | null,\n'
+            '  "confidence": number,\n'
+            '  "extracted_entities": {"name": string, "category": string} | null,\n'
+            '  "system_message": string\n'
+            "}\n\n"
+            "RULES:\n"
+            "- target_url: the best matching path from the sitemap, or null if no match exists.\n"
+            "- confidence: 0.0 to 1.0. How certain you are this path satisfies the query.\n"
+            "- extracted_entities: if the query names a specific person (name) or product/content type (category), extract it. Otherwise null.\n"
+            "- system_message: one short sentence in Wayfinder's voice confirming the action or declining politely. No filler.\n\n"
+            "USE CASES:\n"
+            "1. Exact/semantic match — 'Take me to shoes' → target_url: /products/shoes, confidence: ~0.95\n"
+            "2. Vague intent — 'Help with my order' → best semantic match like /orders or /support/faq, confidence: ~0.7\n"
+            "3. Out of scope — 'What's the weather?' → target_url: null, confidence: 0.0, polite decline in system_message\n"
+            "4. Dynamic param — 'Go to John's profile' → target_url: /profile or /profile/:id, extracted_entities: {\"name\": \"John\"}, confidence: ~0.9\n\n"
+            "Never show, repeat, or mention the [SITEMAP_CONTEXT] annotation in your system_message — it is internal data only."
         )
 
     elif user_input.lower().startswith("[cosmetics]"):
@@ -1439,6 +1472,12 @@ def chat(request: ChatRequest):
         if session_id and session_id in _context.sessions:
             _context.sessions[session_id].last_maps_result = []
 
+    if persona == "nav" and request.sitemap_context:
+        try:
+            user_input = f"[SITEMAP_CONTEXT:{json.dumps(request.sitemap_context, ensure_ascii=False)}]\n\n{user_input}"
+        except Exception:
+            pass
+
     if getattr(request, "document_context", None):
         doc_injection = f"\n\n[CONTEXT: The user is viewing the following document:]\n{request.document_context}"
         addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
@@ -1456,13 +1495,13 @@ def chat(request: ChatRequest):
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
-    # Normal path with optional HITL (legal, garment, cosmetics, and maps personas always auto-approve their tools)
+    # Normal path with optional HITL (legal, garment, cosmetics, maps, and nav personas always auto-approve)
     _was_auto = _context.auto_approval
-    if persona in ("legal", "garment", "cosmetics", "maps"):
+    if persona in ("legal", "garment", "cosmetics", "maps", "nav"):
         _context.auto_approval = True
     try:
         result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona)
@@ -1497,6 +1536,15 @@ def chat(request: ChatRequest):
         final_text = format_legal_citation_links(final_text)
     if persona == "legal" and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
+    if persona == "nav":
+        try:
+            nav_json = json.loads(final_text)
+            if nav_json.get("confidence", 0) < 0.5:
+                nav_json["target_url"] = None
+            state.last_nav_result = nav_json
+            final_text = nav_json.get("system_message", "")
+        except Exception:
+            state.last_nav_result = {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": final_text}
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -1508,6 +1556,7 @@ def chat(request: ChatRequest):
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
         "cosmetics_sets": state.last_cosmetics_result if persona == "cosmetics" and state.last_cosmetics_result else None,
         "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
+        "nav_result": state.last_nav_result if persona == "nav" and state.last_nav_result else None,
     }
 
 
@@ -1783,6 +1832,13 @@ async def chat_stream(websocket: WebSocket):
                         pass
                 state.last_maps_result = []
 
+            # Inject sitemap for nav persona (B2: runs sync, no streaming)
+            if persona == "nav" and data.get("sitemap_context"):
+                try:
+                    user_input = f"[SITEMAP_CONTEXT:{json.dumps(data['sitemap_context'], ensure_ascii=False)}]\n\n{user_input}"
+                except Exception:
+                    pass
+
             if getattr(request, "document_context", None):
                 doc_injection = f"\n\n[CONTEXT: User is viewing:]\n{request.document_context}"
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
@@ -1793,7 +1849,7 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -1802,8 +1858,40 @@ async def chat_stream(websocket: WebSocket):
             _ws_t_first_chunk = None
             _was_auto = _context.auto_approval
             end_sent = False
-            if persona in ("legal", "garment", "cosmetics", "maps"):
+            if persona in ("legal", "garment", "cosmetics", "maps", "nav"):
                 _context.auto_approval = True
+
+            # B2: nav runs sync even over WebSocket — no streaming of raw JSON
+            if persona == "nav":
+                try:
+                    nav_result_raw = reason_loop(state, user_input, session_id=session_id, tools=[], addendum_override=addendum_override, persona=persona)
+                    nav_text = (nav_result_raw or "").strip()
+                    try:
+                        nav_json = json.loads(nav_text)
+                        if nav_json.get("confidence", 0) < 0.5:
+                            nav_json["target_url"] = None
+                        state.last_nav_result = nav_json
+                        system_message = nav_json.get("system_message", "")
+                    except Exception:
+                        nav_json = {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": nav_text}
+                        state.last_nav_result = nav_json
+                        system_message = nav_text
+                    state.prompt.append(user_input)
+                    state.generated.append(system_message)
+                    _context.sessions[session_id] = state
+                    await websocket.send_text(system_message)
+                    await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
+                    await websocket.send_text(_context.__END__)
+                    await websocket.send_text("[DONE]")
+                except Exception as e:
+                    logging.warning("/chat-stream [nav] ERROR session=%s: %s", session_id, e)
+                    await websocket.send_text("[Error] Navigation failed.")
+                    await websocket.send_text(_context.__END__)
+                    await websocket.send_text("[DONE]")
+                finally:
+                    _context.auto_approval = _was_auto
+                continue
+
             try:
                 async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
                     if chunk.startswith("__HITL__"):

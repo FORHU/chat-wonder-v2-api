@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wayfinder — Nav AI</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0c0c10;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 14px 20px;
+      background: #111118;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      font-weight: 600; letter-spacing: .4px;
+    }
+    .badge-nav     { background: #0f1a3a; color: #818cf8; }
+    .badge-general { background: #1a1a2a; color: #94a3b8; }
+    #status {
+      margin-left: auto; font-size: 12px; color: #64748b;
+      display: flex; align-items: center; gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #ef4444; transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    /* ── Config bar ── */
+    .config-bar {
+      padding: 8px 20px; background: #0e0e14;
+      border-bottom: 1px solid #1a1a24;
+      display: flex; align-items: center; gap: 16px;
+      font-size: 13px; color: #94a3b8; flex-shrink: 0;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 6px;
+      padding: 4px 10px; font-size: 13px; width: 220px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #4f46e5; }
+    .toggle-switch { position: relative; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; background: #252535;
+      border-radius: 20px; cursor: pointer; transition: background .2s;
+    }
+    .slider::before {
+      content: ""; position: absolute;
+      width: 14px; height: 14px; left: 3px; top: 3px;
+      background: #fff; border-radius: 50%; transition: transform .2s;
+    }
+    .toggle-switch input:checked + .slider { background: #4f46e5; }
+    .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+    /* ── Main layout ── */
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1; overflow-y: auto;
+      padding: 24px 20px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #252535; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 800px; }
+    .msg.user      { align-self: flex-end;   align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px; font-weight: 600;
+      letter-spacing: .5px; text-transform: uppercase; color: #475569;
+    }
+    .bubble {
+      padding: 12px 16px; border-radius: 12px;
+      line-height: 1.65; font-size: 14px; max-width: 100%;
+    }
+    .msg.user .bubble      { background: #0f1a3a; color: #c7d2fe; border-bottom-right-radius: 4px; }
+    .msg.assistant .bubble {
+      background: #111118; color: #e2e8f0;
+      border-bottom-left-radius: 4px; border: 1px solid #22222e;
+    }
+    .bubble strong { color: #f1f5f9; }
+
+    /* Typing */
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px; background: #475569;
+      border-radius: 50%; animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40%           { transform: translateY(-7px); }
+    }
+
+    /* ── Nav result panel ── */
+    #nav-panel {
+      width: 300px; flex-shrink: 0;
+      border-left: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 12px 16px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: .6px; text-transform: uppercase; color: #475569;
+      border-bottom: 1px solid #1a1a24;
+      flex-shrink: 0;
+    }
+    #panel-body { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    #panel-body::-webkit-scrollbar { width: 4px; }
+    #panel-body::-webkit-scrollbar-thumb { background: #252535; }
+
+    /* Nav result card */
+    .nav-empty {
+      padding: 32px 0; color: #475569; font-size: 12px;
+      text-align: center; line-height: 1.7;
+    }
+    .nav-empty .empty-icon { font-size: 36px; margin-bottom: 10px; display: block; }
+
+    .result-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+    }
+    .result-card.matched  { border-color: #312e81; }
+    .result-card.no-match { border-color: #3b1f1f; }
+
+    .result-card-header {
+      padding: 10px 14px;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid #1a1a24;
+    }
+    .result-status {
+      font-size: 11px; font-weight: 700; letter-spacing: .4px;
+      padding: 2px 8px; border-radius: 99px;
+    }
+    .status-matched  { background: #1e1b4b; color: #818cf8; }
+    .status-no-match { background: #2a0f0f; color: #f87171; }
+
+    .confidence-bar-wrap { display: flex; align-items: center; gap: 8px; }
+    .confidence-label { font-size: 11px; color: #64748b; }
+    .confidence-bar {
+      width: 60px; height: 5px; background: #1a1a24;
+      border-radius: 99px; overflow: hidden;
+    }
+    .confidence-fill {
+      height: 100%; border-radius: 99px;
+      background: #4f46e5; transition: width .4s ease;
+    }
+    .confidence-fill.low  { background: #ef4444; }
+    .confidence-fill.mid  { background: #f59e0b; }
+    .confidence-fill.high { background: #818cf8; }
+
+    .result-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+
+    .result-row { display: flex; flex-direction: column; gap: 3px; }
+    .result-key {
+      font-size: 10px; font-weight: 700; letter-spacing: .5px;
+      text-transform: uppercase; color: #475569;
+    }
+    .result-val {
+      font-size: 13px; color: #e2e8f0; font-weight: 500;
+      word-break: break-all;
+    }
+    .result-val.url  { color: #818cf8; font-family: monospace; font-size: 12px; }
+    .result-val.null { color: #475569; font-style: italic; }
+    .result-val.msg  { color: #94a3b8; font-size: 12px; line-height: 1.5; }
+
+    .entity-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+    .entity-chip {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      background: #1e1b4b; color: #a5b4fc; font-weight: 600;
+    }
+
+    /* ── Sitemap editor ── */
+    .sitemap-section {
+      border-top: 1px solid #1a1a24;
+      padding: 12px 16px;
+      flex-shrink: 0;
+    }
+    .sitemap-label {
+      font-size: 10px; font-weight: 700; letter-spacing: .5px;
+      text-transform: uppercase; color: #475569; margin-bottom: 6px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .sitemap-hint { font-weight: 400; font-size: 10px; color: #334155; }
+    #sitemap-input {
+      width: 100%; background: #1a1a24; border: 1px solid #252535;
+      color: #94a3b8; border-radius: 8px; padding: 8px 10px;
+      font-size: 11px; font-family: monospace;
+      resize: none; height: 110px; line-height: 1.6;
+    }
+    #sitemap-input:focus { outline: none; border-color: #4f46e5; }
+
+    /* ── Sample prompt chips ── */
+    .prompt-chips { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+    .prompt-chip {
+      display: block; width: 100%;
+      background: #0f1a3a; border: 1px solid #1e274d;
+      color: #818cf8; border-radius: 8px;
+      padding: 8px 12px; font-size: 12px; line-height: 1.4;
+      text-align: left; cursor: pointer;
+      transition: background .15s, border-color .15s;
+      font-family: inherit;
+    }
+    .prompt-chip:hover { background: #1e1b4b; border-color: #4f46e5; color: #c7d2fe; }
+
+    /* ── Input area ── */
+    .input-area {
+      padding: 16px 20px; border-top: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 10px; padding: 10px 14px;
+      font-size: 14px; resize: none; min-height: 42px; max-height: 160px;
+      line-height: 1.5; font-family: inherit;
+    }
+    #chat-input:focus { outline: none; border-color: #4f46e5; }
+    #chat-input::placeholder { color: #475569; }
+    #send-btn {
+      background: #4f46e5; border: none; color: #fff;
+      border-radius: 10px; padding: 10px 20px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background .15s; white-space: nowrap;
+    }
+    #send-btn:hover    { background: #4338ca; }
+    #send-btn:disabled { background: #1a1a24; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🧭 Wayfinder</h1>
+  <span class="badge badge-nav" id="persona-badge">🧭 Nav Mode</span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>
+    Server: <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <label>
+    <span class="toggle-switch">
+      <input type="checkbox" id="nav-toggle" checked />
+      <span class="slider"></span>
+    </span>
+    Wayfinder persona
+  </label>
+</div>
+
+<div class="main">
+
+  <!-- Chat -->
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">Wayfinder</span>
+      <div class="bubble">
+        Hi! I'm <strong>Wayfinder</strong>. Tell me where you want to go and I'll find the right page — or let you know if I can't.<br><br>
+        <strong>Try one of these:</strong>
+        <div class="prompt-chips">
+          <button class="prompt-chip" onclick="fillPrompt(this)">Take me to the shoes page</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">I need help with an order I placed last week</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Go to John's profile</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Show me the summer collection</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">What is the weather like today?</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nav result panel -->
+  <div id="nav-panel">
+    <div class="panel-header">Navigation Result</div>
+
+    <div id="panel-body">
+      <div class="nav-empty" id="nav-empty">
+        <span class="empty-icon">🧭</span>
+        Ask Wayfinder where to go.<br>The routing result will appear here.
+      </div>
+    </div>
+
+    <div class="sitemap-section">
+      <div class="sitemap-label">
+        Sitemap Context
+        <span class="sitemap-hint">one path per line</span>
+      </div>
+      <textarea id="sitemap-input" spellcheck="false">/home
+/products
+/products/shoes
+/products/clothing
+/products/accessories
+/orders
+/orders/:id
+/profile
+/profile/:id
+/support/faq
+/support/contact
+/cart
+/checkout
+/account/settings</textarea>
+    </div>
+  </div>
+
+</div>
+
+<div class="input-area">
+  <textarea id="chat-input" rows="1"
+    placeholder='e.g. "Take me to the shoes page" or "Go to John's profile"'></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  let sessionId = null, ws = null;
+  let currentBubble = null, isStreaming = false;
+
+  // ── Auto-resize textarea ──
+  $("chat-input").addEventListener("input", () => {
+    const el = $("chat-input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  $("server-url").addEventListener("change", connect);
+  $("nav-toggle").addEventListener("change", () => {
+    const on = $("nav-toggle").checked;
+    $("persona-badge").textContent = on ? "🧭 Nav Mode" : "💬 General";
+    $("persona-badge").className = "badge " + (on ? "badge-nav" : "badge-general");
+  });
+
+  // ── Connect ──
+  async function connect() {
+    setStatus("connecting", "Connecting…");
+    try {
+      sessionId = (await (await fetch(`http://${$("server-url").value}/session-id`)).json()).session_id;
+    } catch { setStatus("error", "Cannot reach server"); return; }
+
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://${$("server-url").value}/chat-stream`);
+    ws.onopen  = () => { setStatus("ok", "Connected"); $("send-btn").disabled = false; };
+    ws.onclose = () => { setStatus("error", "Disconnected"); $("send-btn").disabled = true; };
+    ws.onerror = () => setStatus("error", "WebSocket error");
+    ws.onmessage = ({ data }) => { console.log("[chat-stream]", data); handleChunk(data); };
+  }
+
+  // ── Chunk handler ──
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      currentBubble = null;
+      isStreaming = false;
+      $("send-btn").disabled = false;
+      removeTyping();
+      return;
+    }
+    if (chunk === "[DONE]") return;
+
+    if (chunk.startsWith("[NAV_DATA]")) {
+      try {
+        const data = JSON.parse(chunk.slice(10));
+        console.log("[NAV_DATA received]", data);
+        renderNavResult(data);
+      } catch(e) { console.error("[NAV_DATA parse error]", e, chunk); }
+      return;
+    }
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false; $("send-btn").disabled = false; removeTyping();
+      return;
+    }
+    // Ignore side-channel frames from other personas
+    if (chunk.startsWith("[Sources]") || chunk.startsWith("[GARMENT_DATA]") ||
+        chunk.startsWith("[COSMETICS_DATA]") || chunk.startsWith("[MAPS_DATA]") ||
+        chunk.startsWith("[STRUCTURED_DATA]")) return;
+
+    if (!currentBubble) currentBubble = createAssistantBubble();
+    removeTyping();
+    currentBubble.textContent += chunk;
+    scrollBottom();
+  }
+
+  // ── Render nav result panel ──
+  function renderNavResult(data) {
+    const { target_url, confidence, extracted_entities, system_message } = data;
+    const matched = target_url !== null && target_url !== undefined;
+    const conf = typeof confidence === "number" ? confidence : 0;
+
+    const confClass = conf >= 0.75 ? "high" : conf >= 0.5 ? "mid" : "low";
+    const confPct = Math.round(conf * 100);
+
+    let entitiesHtml = "";
+    if (extracted_entities && Object.keys(extracted_entities).length > 0) {
+      const chips = Object.entries(extracted_entities)
+        .filter(([, v]) => v)
+        .map(([k, v]) => `<span class="entity-chip">${escHtml(k)}: ${escHtml(v)}</span>`)
+        .join("");
+      entitiesHtml = `
+        <div class="result-row">
+          <span class="result-key">Extracted Entities</span>
+          <div class="entity-chips">${chips}</div>
+        </div>`;
+    }
+
+    const card = document.createElement("div");
+    card.className = `result-card ${matched ? "matched" : "no-match"}`;
+    card.innerHTML = `
+      <div class="result-card-header">
+        <span class="result-status ${matched ? "status-matched" : "status-no-match"}">
+          ${matched ? "✓ Match" : "✗ No Match"}
+        </span>
+        <div class="confidence-bar-wrap">
+          <span class="confidence-label">${confPct}%</span>
+          <div class="confidence-bar">
+            <div class="confidence-fill ${confClass}" style="width:${confPct}%"></div>
+          </div>
+        </div>
+      </div>
+      <div class="result-body">
+        <div class="result-row">
+          <span class="result-key">Target URL</span>
+          <span class="result-val ${target_url ? "url" : "null"}">
+            ${target_url ? escHtml(target_url) : "null"}
+          </span>
+        </div>
+        ${entitiesHtml}
+        <div class="result-row">
+          <span class="result-key">Wayfinder Says</span>
+          <span class="result-val msg">${escHtml(system_message || "")}</span>
+        </div>
+      </div>`;
+
+    const body = $("panel-body");
+    const empty = $("nav-empty");
+    if (empty) empty.remove();
+    body.insertBefore(card, body.firstChild);
+  }
+
+  // ── Send message ──
+  function send() {
+    const input = $("chat-input");
+    const text = input.value.trim();
+    if (!text || !ws || ws.readyState !== 1 || isStreaming) return;
+
+    const useNav = $("nav-toggle").checked;
+    const prefix = useNav ? "[nav] " : "";
+    const sitemap = parseSitemap();
+
+    appendUserMsg(text);
+    appendTyping();
+    $("send-btn").disabled = true;
+    isStreaming = true;
+
+    input.value = "";
+    input.style.height = "auto";
+
+    const payload = {
+      user_input: prefix + text,
+      session_id: sessionId,
+    };
+    if (useNav && sitemap.length) payload.sitemap_context = sitemap;
+
+    console.log("[chat-stream send]", payload);
+    ws.send(JSON.stringify(payload));
+  }
+
+  function parseSitemap() {
+    return $("sitemap-input").value
+      .split("\n")
+      .map(s => s.trim())
+      .filter(s => s.startsWith("/"));
+  }
+
+  // ── UI helpers ──
+  function setStatus(state, text) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = text;
+    if (state !== "ok") $("send-btn").disabled = true;
+  }
+
+  function appendUserMsg(text) {
+    const el = document.createElement("div");
+    el.className = "msg user";
+    el.innerHTML = `<span class="msg-label">You</span><div class="bubble">${escHtml(text)}</div>`;
+    $("messages").appendChild(el);
+    scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const el = document.createElement("div");
+    el.className = "msg assistant";
+    el.innerHTML = `<span class="msg-label">Wayfinder</span><div class="bubble"></div>`;
+    $("messages").appendChild(el);
+    scrollBottom();
+    return el.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    const el = document.createElement("div");
+    el.className = "msg assistant";
+    el.id = "typing-indicator";
+    el.innerHTML = `<span class="msg-label">Wayfinder</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(el);
+    scrollBottom();
+  }
+
+  function removeTyping() {
+    const el = $("typing-indicator");
+    if (el) el.remove();
+  }
+
+  function appendSystem(html) {
+    const el = document.createElement("div");
+    el.className = "msg assistant";
+    el.innerHTML = `<div class="bubble">${html}</div>`;
+    $("messages").appendChild(el);
+    scrollBottom();
+  }
+
+  function fillPrompt(btn) {
+    $("chat-input").value = btn.textContent;
+    $("chat-input").dispatchEvent(new Event("input"));
+    $("chat-input").focus();
+  }
+
+  function scrollBottom() {
+    const m = $("messages");
+    m.scrollTop = m.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  // ── Keyboard ──
+  $("chat-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  $("send-btn").addEventListener("click", send);
+
+  // ── Boot ──
+  connect();
+</script>
+
+</body>
+</html>
