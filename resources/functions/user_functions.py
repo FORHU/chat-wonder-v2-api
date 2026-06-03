@@ -1115,7 +1115,91 @@ def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
 # ---------------------------------------------------------------------------
 
 _GOOGLE_PLACES_API_BASE = "https://maps.googleapis.com/maps/api/place"
+_GOOGLE_GEOCODING_API_BASE = "https://maps.googleapis.com/maps/api/geocode"
 _NEARBY_INTENT_KEYWORDS = {"near", "nearby", "around", "close", "closest", "nearest"}
+
+
+def _google_geocode(location: str, api_key: str) -> tuple:
+    """Geocode a place name using Google Geocoding API. Returns (lat, lng)."""
+    try:
+        url = (
+            f"{_GOOGLE_GEOCODING_API_BASE}/json"
+            f"?address={urllib.parse.quote(location)}&key={api_key}"
+        )
+        data = _http_get_json(url)
+        results = data.get("results", [])
+        if results:
+            loc = results[0]["geometry"]["location"]
+            return (loc["lat"], loc["lng"])
+    except Exception as e:
+        logging.warning(f"[google_geocode] failed for '{location}': {e}")
+    return (_DEFAULT_LAT, _DEFAULT_LON)
+
+
+def _search_single_location(api_key: str, lat: float, lng: float, query: str, radius: int, location_label: str) -> dict:
+    """Execute one Google Places search for a single lat/lng and return a result dict."""
+    query_lower = query.lower()
+    use_nearby = any(kw in query_lower for kw in _NEARBY_INTENT_KEYWORDS) or len(query.split()) <= 4
+
+    if use_nearby:
+        url = (
+            f"{_GOOGLE_PLACES_API_BASE}/nearbysearch/json"
+            f"?location={lat},{lng}"
+            f"&radius={radius}"
+            f"&keyword={urllib.parse.quote(query)}"
+            f"&key={api_key}"
+        )
+    else:
+        url = (
+            f"{_GOOGLE_PLACES_API_BASE}/textsearch/json"
+            f"?query={urllib.parse.quote(query)}"
+            f"&location={lat},{lng}"
+            f"&radius={radius}"
+            f"&key={api_key}"
+        )
+
+    data = _http_get_json(url)
+    status = data.get("status")
+    if status not in ("OK", "ZERO_RESULTS"):
+        return {"success": False, "location_label": location_label, "error": f"Google Places API error: {status}"}
+
+    places = []
+    for p in data.get("results", [])[:20]:
+        loc = p.get("geometry", {}).get("location", {})
+        photos = p.get("photos", [])
+        opening = p.get("opening_hours", {})
+        photo_ref = photos[0].get("photo_reference", "") if photos else ""
+        photo_url = (
+            f"{_GOOGLE_PLACES_API_BASE}/photo?maxwidth=400"
+            f"&photo_reference={photo_ref}&key={api_key}"
+        ) if photo_ref else ""
+        places.append({
+            "name": p.get("name", ""),
+            "address": p.get("vicinity") or p.get("formatted_address", ""),
+            "rating": p.get("rating"),
+            "user_ratings_total": p.get("user_ratings_total"),
+            "place_id": p.get("place_id", ""),
+            "types": p.get("types", []),
+            "lat": loc.get("lat"),
+            "lng": loc.get("lng"),
+            "open_now": opening.get("open_now"),
+            "photo_url": photo_url,
+            "price_level": p.get("price_level"),
+            "phone_number": None,
+            "website": None,
+        })
+
+    return {
+        "success": True,
+        "query": query,
+        "location_label": location_label,
+        "lat": lat,
+        "lng": lng,
+        "radius": radius,
+        "search_mode": "nearby" if use_nearby else "text",
+        "total_results": len(places),
+        "places": places,
+    }
 
 
 def search_nearby_places(
@@ -1123,74 +1207,48 @@ def search_nearby_places(
     lng: float,
     query: str,
     radius: int = 1500,
+    location_name: str = None,
 ) -> dict:
-    """Search for nearby places using Google Places API (Nearby Search or Text Search)."""
+    """Search for nearby places using Google Places API (Nearby Search or Text Search).
+
+    location_name can be a single place name (e.g. "SM Baguio") or a comma-separated
+    list of names (e.g. "SM Baguio, La Union, Vigan City") for multi-location queries.
+    When provided, GPS lat/lng is ignored and each name is geocoded automatically.
+    """
     api_key = os.getenv("GOOGLE_PLACES_API_KEY", "")
     if not api_key:
         return {"success": False, "error": "GOOGLE_PLACES_API_KEY not configured."}
 
     try:
-        query_lower = query.lower()
-        use_nearby = any(kw in query_lower for kw in _NEARBY_INTENT_KEYWORDS) or len(query.split()) <= 4
+        # Multi-location: comma-separated names → search each and return array
+        if location_name and "," in location_name:
+            names = [n.strip() for n in location_name.split(",") if n.strip()]
+            results = []
+            for name in names:
+                try:
+                    glat, glng = _google_geocode(name, api_key)
+                    logging.info(f"[search_nearby_places] geocoded '{name}' -> ({glat}, {glng})")
+                    result = _search_single_location(api_key, glat, glng, query, radius, name)
+                except Exception as e:
+                    result = {"success": False, "location_label": name, "error": str(e)}
+                results.append(result)
+            total = sum(r.get("total_results", 0) for r in results if r.get("success"))
+            return {
+                "success": True,
+                "query": query,
+                "multi_location": True,
+                "total_results": total,
+                "results": results,
+            }
 
-        if use_nearby:
-            url = (
-                f"{_GOOGLE_PLACES_API_BASE}/nearbysearch/json"
-                f"?location={lat},{lng}"
-                f"&radius={radius}"
-                f"&keyword={urllib.parse.quote(query)}"
-                f"&key={api_key}"
-            )
-        else:
-            url = (
-                f"{_GOOGLE_PLACES_API_BASE}/textsearch/json"
-                f"?query={urllib.parse.quote(query)}"
-                f"&location={lat},{lng}"
-                f"&radius={radius}"
-                f"&key={api_key}"
-            )
+        # Single location
+        if location_name:
+            glat, glng = _google_geocode(location_name, api_key)
+            logging.info(f"[search_nearby_places] geocoded '{location_name}' -> ({glat}, {glng})")
+            lat, lng = glat, glng
 
-        data = _http_get_json(url)
-        status = data.get("status")
-        if status not in ("OK", "ZERO_RESULTS"):
-            return {"success": False, "error": f"Google Places API error: {status}"}
-
-        places = []
-        for p in data.get("results", [])[:20]:
-            loc = p.get("geometry", {}).get("location", {})
-            photos = p.get("photos", [])
-            opening = p.get("opening_hours", {})
-            photo_ref = photos[0].get("photo_reference", "") if photos else ""
-            photo_url = (
-                f"{_GOOGLE_PLACES_API_BASE}/photo?maxwidth=400"
-                f"&photo_reference={photo_ref}&key={api_key}"
-            ) if photo_ref else ""
-            places.append({
-                "name": p.get("name", ""),
-                "address": p.get("vicinity") or p.get("formatted_address", ""),
-                "rating": p.get("rating"),
-                "user_ratings_total": p.get("user_ratings_total"),
-                "place_id": p.get("place_id", ""),
-                "types": p.get("types", []),
-                "lat": loc.get("lat"),
-                "lng": loc.get("lng"),
-                "open_now": opening.get("open_now"),
-                "photo_url": photo_url,
-                "price_level": p.get("price_level"),
-                "phone_number": None,
-                "website": None,
-            })
-
-        return {
-            "success": True,
-            "query": query,
-            "lat": lat,
-            "lng": lng,
-            "radius": radius,
-            "search_mode": "nearby" if use_nearby else "text",
-            "total_results": len(places),
-            "places": places,
-        }
+        location_label = location_name if location_name else f"{lat:.4f},{lng:.4f}"
+        return _search_single_location(api_key, lat, lng, query, radius, location_label)
 
     except Exception as e:
         logging.error(f"[search_nearby_places] failed: {e}")

@@ -106,7 +106,7 @@ class ChatState:
         self.last_search_legal_results: list = []
         self.last_garment_result: dict = {}
         self.last_cosmetics_result: dict = {}
-        self.last_maps_result: dict = {}
+        self.last_maps_result: list = []
         self.openai_client = None
         self.last_used: float = time.time()
         # HITL pending state
@@ -417,7 +417,11 @@ def process_persona(user_input: str):
             "IMPORTANT — location handling: If the message contains [USER_LOCATION:{...}], "
             "you MUST extract the 'lat' and 'lng' values from that JSON and pass them to search_nearby_places. "
             "Never show, repeat, or mention the [USER_LOCATION] annotation in your response — it is internal data only.\n\n"
-            "When presenting results, write 1-2 sentences summarising what was found (e.g. count, top highlights). "
+            "IMPORTANT — multi-location queries: If the user mentions multiple named places "
+            "(e.g. 'SM Baguio, La Union, Vigan City'), pass ALL of them as a SINGLE comma-separated "
+            "location_name value in ONE function call: location_name='SM Baguio, La Union, Vigan City'. "
+            "Do NOT make separate calls per location.\n\n"
+            "When presenting results, write 1-2 sentences summarising what was found across all locations. "
             "Do NOT list all places in text — the frontend renders place cards from the structured data.\n\n"
             "RESPONSE LENGTH — 1-2 sentences maximum. Every sentence must carry useful detail."
         )
@@ -806,7 +810,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
         if func_name == "search_nearby_places" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
-                state.last_maps_result = result
+                if result.get("multi_location"):
+                    state.last_maps_result.extend(result.get("results", []))
+                else:
+                    state.last_maps_result.append(result)
         logging.info(f"Function {func_name} executed successfully.")
         return result
     except Exception as e:
@@ -952,7 +959,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             "role": "system",
             "content": (
                 f"[Memory Fact]\nFunction `{function_call['name']}` returned:\n{content}\n\n"
-                "Use this fact in all future reasoning. Do NOT re-call the same function."
+                "Use this fact in all future reasoning. Do NOT re-call with the exact same arguments."
             ),
         })
         messages.append({
@@ -1280,7 +1287,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             content = str(result)
         messages.append({
             "role": "system",
-            "content": f"[Memory Fact]\nFunction `{function_call['name']}` returned:\n{content}\n\nUse this fact. Do NOT re-call the same function.",
+            "content": f"[Memory Fact]\nFunction `{function_call['name']}` returned:\n{content}\n\nUse this fact. Do NOT re-call with the exact same arguments.",
         })
         messages.append({
             "role": "system",
@@ -1423,11 +1430,14 @@ def chat(request: ChatRequest):
         except Exception:
             pass
 
-    if persona == "maps" and request.location:
-        try:
-            user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
-        except Exception:
-            pass
+    if persona == "maps":
+        if request.location:
+            try:
+                user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        if session_id and session_id in _context.sessions:
+            _context.sessions[session_id].last_maps_result = []
 
     if getattr(request, "document_context", None):
         doc_injection = f"\n\n[CONTEXT: The user is viewing the following document:]\n{request.document_context}"
@@ -1497,7 +1507,7 @@ def chat(request: ChatRequest):
         "source_metadata": state.source_metadata,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
         "cosmetics_sets": state.last_cosmetics_result if persona == "cosmetics" and state.last_cosmetics_result else None,
-        "places_results": state.last_maps_result.get("places", []) if persona == "maps" and state.last_maps_result else None,
+        "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
     }
 
 
@@ -1765,11 +1775,13 @@ async def chat_stream(websocket: WebSocket):
                     pass
 
             # Inject frontend-provided location for maps persona
-            if persona == "maps" and data.get("location"):
-                try:
-                    user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
-                except Exception:
-                    pass
+            if persona == "maps":
+                if data.get("location"):
+                    try:
+                        user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
+                    except Exception:
+                        pass
+                state.last_maps_result = []
 
             if getattr(request, "document_context", None):
                 doc_injection = f"\n\n[CONTEXT: User is viewing:]\n{request.document_context}"

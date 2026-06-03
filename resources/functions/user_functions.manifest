@@ -383,6 +383,10 @@
           "radius": {
             "type": "integer",
             "description": "Search radius in meters. Default is 1500. Override if user specifies distance e.g. 'within 2km' -> 2000."
+          },
+          "location_name": {
+            "type": "string",
+            "description": "Named location(s) to search at. Single: 'SM Baguio'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. When provided, GPS lat/lng is overridden by geocoding each name. Use when the user mentions specific places they will be at rather than their current position."
           }
         },
         "required": ["lat", "lng", "query"]

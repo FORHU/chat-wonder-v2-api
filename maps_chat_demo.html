@@ -148,16 +148,32 @@
       color: #22c55e; display: none;
     }
 
-    /* Location + search info block */
-    #search-info {
-      margin: 12px 12px 0;
-      padding: 10px 14px;
-      background: #111118; border: 1px solid #1a2e1a; border-radius: 10px;
-      font-size: 12px; display: none;
+    /* Location tabs */
+    #loc-tabs {
+      display: flex; gap: 0; flex-shrink: 0;
+      border-bottom: 1px solid #1a1a24;
+      background: #0e0e14; overflow-x: auto;
     }
-    .si-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
-    .si-icon { font-size: 14px; flex-shrink: 0; }
-    .si-label { color: #94a3b8; }
+    #loc-tabs::-webkit-scrollbar { display: none; }
+    .loc-tab {
+      padding: 9px 14px; font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+    .loc-tab.active { color: #4ade80; border-bottom-color: #16a34a; }
+    .loc-tab:hover:not(.active) { color: #94a3b8; }
+
+    /* Search info block */
+    #search-info {
+      margin: 10px 12px 0;
+      padding: 8px 12px;
+      background: #111118; border: 1px solid #1a2e1a; border-radius: 8px;
+      font-size: 11px; display: none;
+    }
+    .si-row { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+    .si-icon { font-size: 13px; flex-shrink: 0; }
+    .si-label { color: #64748b; }
     .si-value { color: #e2e8f0; font-weight: 600; }
     .si-query { color: #4ade80; font-weight: 600; }
     .si-mode  {
@@ -302,6 +318,7 @@
           <button class="prompt-chip" onclick="fillPrompt(this)">Where's the nearest hospital?</button>
           <button class="prompt-chip" onclick="fillPrompt(this)">ATMs near me</button>
           <button class="prompt-chip" onclick="fillPrompt(this)">Convenience stores close by</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">I have meetings at SM Baguio for breakfast, La Union for lunch, and Vigan City for dinner — find me restaurants at each place</button>
         </div>
       </div>
     </div>
@@ -313,6 +330,7 @@
       <span>Nearby Places</span>
       <span id="places-count"></span>
     </div>
+    <div id="loc-tabs"></div>
 
     <div id="panel-body">
       <div id="search-info"></div>
@@ -429,89 +447,112 @@
   }
 
   // ── Render places panel ──
-  function renderPlacesData(data) {
-    if (!data.success) {
-      console.warn("[MAPS_DATA] error:", data.error);
-      return;
-    }
+  // ── Render places panel (handles single result dict OR array of results) ──
+  let _locResults = [];
 
-    const places = data.places || [];
+  function renderPlacesData(payload) {
+    const results = Array.isArray(payload) ? payload : [payload];
+    _locResults = results.filter(r => r.success);
+    if (!_locResults.length) { console.warn("[MAPS_DATA] all results failed"); return; }
 
-    // Count badge
+    const total = _locResults.reduce((s, r) => s + (r.places || []).length, 0);
     const cnt = $("places-count");
-    cnt.textContent = `${places.length} found`;
+    cnt.textContent = `${total} found`;
     cnt.style.display = "block";
 
-    // Search info block
+    // Location tabs — only shown when >1 location
+    const tabBar = $("loc-tabs");
+    tabBar.innerHTML = "";
+    if (_locResults.length > 1) {
+      tabBar.style.display = "flex";
+      _locResults.forEach((r, i) => {
+        const tab = document.createElement("div");
+        tab.className = "loc-tab" + (i === 0 ? " active" : "");
+        tab.textContent = r.location_label || `Location ${i + 1}`;
+        tab.addEventListener("click", () => showLocTab(i));
+        tabBar.appendChild(tab);
+      });
+    } else {
+      tabBar.style.display = "none";
+    }
+
+    showLocTab(0);
+    scrollBottom();
+  }
+
+  function showLocTab(idx) {
+    document.querySelectorAll(".loc-tab").forEach((t, i) =>
+      t.className = "loc-tab" + (i === idx ? " active" : ""));
+
+    const r = _locResults[idx];
+    if (!r) return;
+
     const si = $("search-info");
     si.style.display = "block";
     si.innerHTML = `
       <div class="si-row">
         <span class="si-icon">🔍</span>
         <span class="si-label">Query:</span>
-        <span class="si-query">${escHtml(data.query || "")}</span>
+        <span class="si-query">${escHtml(r.query || "")}</span>
       </div>
       <div class="si-row">
         <span class="si-icon">📍</span>
         <span class="si-label">Radius:</span>
-        <span class="si-value">${data.radius || 1500}m</span>
+        <span class="si-value">${r.radius || 1500}m</span>
       </div>
-      <span class="si-mode">${data.search_mode === "nearby" ? "Nearby Search" : "Text Search"}</span>
+      <span class="si-mode">${r.search_mode === "nearby" ? "Nearby Search" : "Text Search"}</span>
     `;
 
     const list = $("places-list");
     list.innerHTML = "";
+    const places = r.places || [];
 
     if (!places.length) {
       list.innerHTML = `<div class="places-empty">
         <span class="empty-icon">😕</span>
-        No places found for "${escHtml(data.query || "")}" within ${data.radius || 1500}m.
+        No places found for "${escHtml(r.query || "")}" within ${r.radius || 1500}m.
       </div>`;
       return;
     }
 
-    places.forEach((p, idx) => {
-      const card = document.createElement("div");
-      card.className = "place-card";
+    places.forEach(p => list.appendChild(buildPlaceCard(p)));
+  }
 
-      const icon = placeIcon(p.types || []);
-      const stars = ratingStars(p.rating);
-      const openHtml = openBadge(p.open_now);
-      const priceHtml = p.price_level != null ? priceLevel(p.price_level) : "";
-
-      // Show top 3 non-generic types as chips
-      const displayTypes = (p.types || [])
-        .filter(t => !["point_of_interest", "establishment", "food"].includes(t))
-        .slice(0, 3)
-        .map(t => `<span class="type-chip">${escHtml(t.replace(/_/g, " "))}</span>`)
-        .join("");
-
-      card.innerHTML = `
-        ${p.photo_url
-          ? `<img class="place-photo" src="${escAttr(p.photo_url)}" alt="${escAttr(p.name || '')}" loading="lazy"
-               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" />`
-          : ""}
-        <div class="place-icon-row" style="${p.photo_url ? 'display:none' : ''}">${icon}</div>
-        <div class="card-body">
-          <div class="card-name">${escHtml(p.name || "Unknown")}</div>
-          <div class="card-address">${escHtml(p.address || "")}</div>
-          <div class="card-meta">
-            ${p.rating != null ? `
-              <span class="rating-stars">${stars}</span>
-              <span class="rating-value">${p.rating}</span>
-              ${p.user_ratings_total != null
-                ? `<span class="rating-count">(${p.user_ratings_total.toLocaleString()})</span>` : ""}
-            ` : ""}
-            ${openHtml}
-            ${priceHtml}
-          </div>
-          ${displayTypes ? `<div class="card-types">${displayTypes}</div>` : ""}
+  function buildPlaceCard(p) {
+    const card = document.createElement("div");
+    card.className = "place-card";
+    const icon = placeIcon(p.types || []);
+    const stars = ratingStars(p.rating);
+    const openHtml = openBadge(p.open_now);
+    const priceHtml = p.price_level != null ? priceLevel(p.price_level) : "";
+    const displayTypes = (p.types || [])
+      .filter(t => !["point_of_interest", "establishment", "food"].includes(t))
+      .slice(0, 3)
+      .map(t => `<span class="type-chip">${escHtml(t.replace(/_/g, " "))}</span>`)
+      .join("");
+    card.innerHTML = `
+      ${p.photo_url
+        ? `<img class="place-photo" src="${escAttr(p.photo_url)}" alt="${escAttr(p.name || '')}" loading="lazy"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" />`
+        : ""}
+      <div class="place-icon-row" style="${p.photo_url ? "display:none" : ""}">${icon}</div>
+      <div class="card-body">
+        <div class="card-name">${escHtml(p.name || "Unknown")}</div>
+        <div class="card-address">${escHtml(p.address || "")}</div>
+        <div class="card-meta">
+          ${p.rating != null ? `
+            <span class="rating-stars">${stars}</span>
+            <span class="rating-value">${p.rating}</span>
+            ${p.user_ratings_total != null
+              ? `<span class="rating-count">(${p.user_ratings_total.toLocaleString()})</span>` : ""}
+          ` : ""}
+          ${openHtml}
+          ${priceHtml}
         </div>
-      `;
-      list.appendChild(card);
-    });
-
-    scrollBottom();
+        ${displayTypes ? `<div class="card-types">${displayTypes}</div>` : ""}
+      </div>
+    `;
+    return card;
   }
 
   // ── Place helpers ──
@@ -630,7 +671,10 @@
   }
 
   function resetPanel() {
+    _locResults = [];
     $("places-count").style.display = "none";
+    $("loc-tabs").innerHTML = "";
+    $("loc-tabs").style.display = "none";
     $("search-info").style.display = "none";
     $("places-list").innerHTML = `<div class="places-empty">
       <span class="empty-icon">⏳</span>Searching nearby places…
