@@ -964,8 +964,11 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
                 _why_lines.append(f"Arguments passed: {json.dumps(json.loads(function_call['arguments']), ensure_ascii=False)}")
             except Exception:
                 _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
-            broadcast_trace("cognition", "\n".join(_why_lines), session_id,
-                summary=f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}")
+            _args_desc = _describe_tool_args(function_call["name"], function_call["arguments"])
+            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}"
+            if _args_desc:
+                _tool_summary += f" {_args_desc}"
+            broadcast_trace("cognition", "\n".join(_why_lines), session_id, summary=_tool_summary)
 
         if last_response.strip():
             full_response = last_response.strip()
@@ -1004,6 +1007,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             continue
         function_outputs.append((function_call["name"], result))
         last_tool = function_call["name"]
+        state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
@@ -1120,6 +1124,10 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
     _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
+    _rag_context = (
+        f"and was given {len(rag_sources)} document(s) from the knowledge base as context"
+        if rag_sources else "with no documents from the knowledge base"
+    )
     if available_tools:
         tool_lines = [f"Mode: {_persona_label} | History turns: {history_turns} | LLM was given {len(available_tools)} tool(s):"]
         for t in available_tools:
@@ -1128,19 +1136,36 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
         broadcast_trace("cognition", "\n".join(tool_lines), session_id,
             summary=(
                 f"The AI is preparing to reason in {_persona_label} mode. "
-                f"It is reviewing {_history_desc} and has {len(available_tools)} tool(s) available to assist."
+                f"It is reviewing {_history_desc}, has {len(available_tools)} tool(s) available, {_rag_context}."
             ))
     else:
         broadcast_trace("cognition", f"Mode: {_persona_label} | History turns: {history_turns} | No tools available", session_id,
             summary=(
                 f"The AI is preparing to reason in {_persona_label} mode with no tools. "
-                f"It will answer directly from its training knowledge, reviewing {_history_desc}."
+                f"It will answer directly from its training knowledge, reviewing {_history_desc}. {_rag_context.capitalize()}."
             ))
+
+def _broadcast_turn_confidence(state, session_id):
+    rag_count = len(getattr(state, "source_metadata", []))
+    tool_count = getattr(state, "turn_tool_calls", 0)
+    if rag_count > 0 and tool_count > 0:
+        summary = f"This response is grounded in {rag_count} verified document(s) and used {tool_count} tool call(s)."
+    elif rag_count > 0:
+        summary = f"This response is grounded in {rag_count} verified document(s) from the knowledge base."
+    elif tool_count > 0:
+        summary = f"This response used {tool_count} tool call(s). No knowledge base documents were consulted."
+    else:
+        summary = "This response was generated entirely from the AI's training knowledge — no external sources were consulted."
+    broadcast_trace("cognition", f"Turn complete — RAG: {rag_count} source(s), tools: {tool_count} call(s)", session_id, summary=summary)
+
 
 def reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
-    return run_function_chain(state, messages, session_id=session_id, tools=tools, query=query)
+    state.turn_tool_calls = 0
+    result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query)
+    _broadcast_turn_confidence(state, session_id)
+    return result
 
 # ---------------------------------------------------------------------------
 # Streaming reason loop (generator)
@@ -1285,8 +1310,11 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
                 _why_lines.append(f"Arguments passed: {json.dumps(json.loads(function_call['arguments']), ensure_ascii=False)}")
             except Exception:
                 _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
-            broadcast_trace("cognition", "\n".join(_why_lines), session_id,
-                summary=f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}")
+            _args_desc = _describe_tool_args(function_call["name"], function_call["arguments"])
+            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}"
+            if _args_desc:
+                _tool_summary += f" {_args_desc}"
+            broadcast_trace("cognition", "\n".join(_why_lines), session_id, summary=_tool_summary)
             await asyncio.sleep(0)
 
         if last_response.strip():
@@ -1332,6 +1360,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             continue
         function_outputs.append((function_call["name"], result))
         last_tool = function_call["name"]
+        state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
@@ -1362,8 +1391,11 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     await asyncio.sleep(0)
+    state.turn_tool_calls = 0
     async for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query):
         yield chunk
+    _broadcast_turn_confidence(state, session_id)
+    await asyncio.sleep(0)
 
 # ---------------------------------------------------------------------------
 # Endpoints
