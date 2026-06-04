@@ -1060,6 +1060,37 @@ def _describe_input(text: str) -> str:
     return text
 
 
+def _describe_tool_args(tool_name: str, arguments_json: str) -> str:
+    try:
+        args = json.loads(arguments_json)
+    except Exception:
+        return ""
+    if tool_name == "search_legal":
+        q = args.get("query", "")
+        return f'It will search for: "{q}"' if q else ""
+    if tool_name == "summarize_legal_case":
+        item_id = args.get("item_id", "")
+        return f"It will retrieve document #{item_id}." if item_id else ""
+    if tool_name == "recommend_garments":
+        gender = args.get("gender", "")
+        event_type = args.get("event_type", "")
+        location = args.get("location", "")
+        sets = args.get("sets", "")
+        event_date = args.get("event_date", "")
+        parts = []
+        if gender:
+            parts.append(gender)
+        if event_type:
+            parts.append(f"attending {event_type}")
+        if location:
+            parts.append(f"in {location}")
+        if event_date:
+            parts.append(f"on {event_date}")
+        base = f"It will recommend {sets} outfit set(s)" if sets else "It will recommend outfit sets"
+        return f"{base} for a {', '.join(parts)}." if parts else f"{base}."
+    return ""
+
+
 def _interpret_score(score: float) -> str:
     if score >= 0.7:
         return "high"
