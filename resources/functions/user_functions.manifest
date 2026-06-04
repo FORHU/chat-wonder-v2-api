@@ -370,11 +370,11 @@
         "properties": {
           "lat": {
             "type": "number",
-            "description": "User's latitude coordinate. Extract from [USER_LOCATION:{...}] in the message."
+            "description": "User's latitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided — it will be ignored."
           },
           "lng": {
             "type": "number",
-            "description": "User's longitude coordinate. Extract from [USER_LOCATION:{...}] in the message."
+            "description": "User's longitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided — it will be ignored."
           },
           "query": {
             "type": "string",
@@ -386,10 +386,10 @@
           },
           "location_name": {
             "type": "string",
-            "description": "Named location(s) to search at. Single: 'SM Baguio'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. When provided, GPS lat/lng is overridden by geocoding each name. Use when the user mentions specific places they will be at rather than their current position."
+            "description": "Named location(s) to search AT instead of the user's GPS. Single: 'La Union'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. REQUIRED when the user names a destination (e.g. 'meeting in La Union', 'going to Baguio'). When set, GPS lat/lng is ignored — the place is geocoded automatically."
           }
         },
-        "required": ["lat", "lng", "query"]
+        "required": ["query"]
       }
     }
   },
