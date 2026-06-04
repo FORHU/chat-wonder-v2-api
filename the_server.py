@@ -466,6 +466,14 @@ def process_persona(user_input: str):
             "you MUST extract that JSON string exactly as-is and pass it as the skin_analysis_json parameter "
             "when calling recommend_cosmetics. Do not modify, summarize, or omit it. "
             "Never show, repeat, or mention the [SKIN_ANALYSIS] annotation in your response to the user — it is internal data only.\n\n"
+            "IMPORTANT — weather handling: If the message contains [FRONTEND_WEATHER:{...}], "
+            "you MUST extract that JSON string exactly as-is and pass it as the weather_json parameter "
+            "when calling recommend_cosmetics. Do not modify, summarize, or omit it. "
+            "Never show, repeat, or mention the [FRONTEND_WEATHER] annotation in your response to the user — it is internal data only.\n\n"
+            "IMPORTANT — location handling: If the message contains [USER_LOCATION:{...}], "
+            "you MUST extract that JSON string exactly as-is and pass it as the location_json parameter "
+            "when calling recommend_cosmetics. Do not modify, summarize, or omit it. "
+            "Never show, repeat, or mention the [USER_LOCATION] annotation in your response to the user — it is internal data only.\n\n"
             "When presenting results, format each routine exactly like this:\n"
             "## Routine 1 — [Vibe Name]\n"
             "*[concern_note]*\n\n"
@@ -474,7 +482,7 @@ def process_persona(user_input: str):
             "Do NOT include image tags or image URLs in your text response — images are handled separately by the frontend.\n\n"
             "Repeat the ## Routine N — [Vibe] header for each additional routine.\n\n"
             "RESPONSE LENGTH — Your opening chat message before the routines must be 3–4 sentences. "
-            "Briefly summarise what the skin analysis reveals, why these routines suit their skin profile, and invite them to explore the results. "
+            "Briefly summarise what the skin analysis reveals, how the local weather and location shaped these picks, and invite them to explore the results. "
             "Keep the tone warm and supportive. Do not repeat or list the products in text — the cards handle that."
         )
 
@@ -1512,11 +1520,22 @@ def chat(request: ChatRequest):
         except Exception:
             pass
 
-    if persona == "cosmetics" and request.skin_analysis:
-        try:
-            user_input = f"[SKIN_ANALYSIS:{json.dumps(request.skin_analysis, ensure_ascii=False)}]\n\n{user_input}"
-        except Exception:
-            pass
+    if persona == "cosmetics":
+        if request.skin_analysis:
+            try:
+                user_input = f"[SKIN_ANALYSIS:{json.dumps(request.skin_analysis, ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        if request.weather:
+            try:
+                user_input = f"[FRONTEND_WEATHER:{json.dumps(request.weather, ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        if request.location:
+            try:
+                user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
 
     if persona == "maps":
         if request.location:
@@ -1902,12 +1921,23 @@ async def chat_stream(websocket: WebSocket):
                 except Exception:
                     pass
 
-            # Inject frontend-provided skin analysis for cosmetics persona
-            if persona == "cosmetics" and data.get("skin_analysis"):
-                try:
-                    user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
-                except Exception:
-                    pass
+            # Inject frontend-provided skin analysis, weather, and location for cosmetics persona
+            if persona == "cosmetics":
+                if data.get("skin_analysis"):
+                    try:
+                        user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
+                    except Exception:
+                        pass
+                if data.get("weather"):
+                    try:
+                        user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
+                    except Exception:
+                        pass
+                if data.get("location"):
+                    try:
+                        user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
+                    except Exception:
+                        pass
 
             # Inject frontend-provided location for maps persona
             if persona == "maps":
