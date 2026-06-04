@@ -11,3 +11,16 @@ resources/functions/user_functions.env
 /__pycache__
 *.pyc
 /resources/functions/__pycache__
+__pycache__/run.cpython-310.pyc
+__pycache__/s3_storage.cpython-310.pyc
+__pycache__/the_server.cpython-310.pyc
+legal_rag/__pycache__/__init__.cpython-310.pyc
+legal_rag/__pycache__/chunking.cpython-310.pyc
+legal_rag/__pycache__/config.cpython-310.pyc
+legal_rag/__pycache__/db.cpython-310.pyc
+legal_rag/__pycache__/embeddings.cpython-310.pyc
+legal_rag/__pycache__/ingestion.cpython-310.pyc
+legal_rag/__pycache__/retrieval.cpython-310.pyc
+legal_rag/__pycache__/router.cpython-310.pyc
+legal_rag/__pycache__/s3_client.cpython-310.pyc
+resources/functions/__pycache__/user_functions.cpython-310.pyc
