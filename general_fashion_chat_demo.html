@@ -1,0 +1,1337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>General Fashion AI</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0c0c10;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 14px 20px;
+      background: #111118;
+      border-bottom: 1px solid #22222e;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      font-weight: 600; letter-spacing: .4px; transition: background .2s, color .2s;
+    }
+    .badge-garment   { background: #2a1a40; color: #c084fc; }
+    .badge-maps      { background: #0f2a1a; color: #4ade80; }
+    .badge-cosmetics { background: #2a0a1a; color: #f9a8d4; }
+    .badge-nav       { background: #0f1a3a; color: #a5b4fc; }
+    #status {
+      margin-left: auto; font-size: 12px; color: #64748b;
+      display: flex; align-items: center; gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #ef4444; transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    /* ── Config bar ── */
+    .config-bar {
+      padding: 8px 20px; background: #0e0e14;
+      border-bottom: 1px solid #1a1a24;
+      display: flex; align-items: center; gap: 16px;
+      font-size: 13px; color: #94a3b8; flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 6px;
+      padding: 4px 10px; font-size: 13px; width: 200px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #d97706; }
+
+    /* Mode tabs */
+    #mode-tabs {
+      display: flex; gap: 0;
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 8px; overflow: hidden;
+    }
+    .mode-tab {
+      padding: 5px 14px; font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer; background: none; border: none;
+      border-right: 1px solid #22222e; transition: background .15s, color .15s;
+      font-family: inherit; white-space: nowrap;
+    }
+    .mode-tab:last-child { border-right: none; }
+    .mode-tab:hover:not(.active) { background: #1a1a24; color: #94a3b8; }
+    .mode-tab.active[data-mode="garment"]   { background: #1a1028; color: #c084fc; }
+    .mode-tab.active[data-mode="maps"]      { background: #0a1a10; color: #4ade80; }
+    .mode-tab.active[data-mode="cosmetics"] { background: #1a0a10; color: #f9a8d4; }
+    .mode-tab.active[data-mode="nav"]       { background: #0a0f1a; color: #a5b4fc; }
+
+    /* ── Main layout ── */
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1; overflow-y: auto;
+      padding: 24px 20px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #252535; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 800px; }
+    .msg.user      { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+    .msg-label {
+      font-size: 11px; font-weight: 600;
+      letter-spacing: .5px; text-transform: uppercase; color: #475569;
+    }
+    .bubble {
+      padding: 12px 16px; border-radius: 12px;
+      line-height: 1.65; font-size: 14px; max-width: 100%;
+    }
+    .msg.user .bubble { background: #1a1228; color: #e9d5ff; border-bottom-right-radius: 4px; }
+    .msg.assistant .bubble {
+      background: #111118; color: #e2e8f0;
+      border-bottom-left-radius: 4px; border: 1px solid #22222e;
+    }
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
+    .bubble p { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble em { color: #fbbf24; }
+    .bubble a { color: #fbbf24; }
+    .bubble img {
+      max-width: 110px; max-height: 110px; border-radius: 8px;
+      object-fit: cover; margin: 5px 4px 4px 0; border: 1px solid #22222e;
+      vertical-align: middle;
+    }
+
+    /* Typing */
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px; background: #475569;
+      border-radius: 50%; animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-7px); }
+    }
+
+    /* Prompt chips */
+    .prompt-chips { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+    .prompt-chip {
+      display: block; width: 100%;
+      border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.4;
+      text-align: left; cursor: pointer; font-family: inherit;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+    .chip-garment   { background: #1a1028; border: 1px solid #3b1f5a; color: #c084fc; }
+    .chip-garment:hover { background: #2a1a40; border-color: #7e22ce; color: #e9d5ff; }
+    .chip-maps      { background: #0a1a10; border: 1px solid #1a3a28; color: #4ade80; }
+    .chip-maps:hover { background: #0f2a1a; border-color: #166534; color: #86efac; }
+    .chip-cosmetics { background: #1a0a10; border: 1px solid #3a1a28; color: #f9a8d4; }
+    .chip-cosmetics:hover { background: #2a0f1a; border-color: #9d174d; color: #fce7f3; }
+    .chip-nav       { background: #0a0f1a; border: 1px solid #1a2240; color: #a5b4fc; }
+    .chip-nav:hover { background: #0f1a3a; border-color: #3730a3; color: #c7d2fe; }
+
+    /* ── Side panel ── */
+    #side-panel {
+      width: 310px; flex-shrink: 0;
+      border-left: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 12px 16px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: .6px; text-transform: uppercase; color: #475569;
+      border-bottom: 1px solid #1a1a24;
+      flex-shrink: 0;
+    }
+
+    /* Panel sections — each fills the panel body */
+    #panel-root { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .panel-sec { flex: 1; overflow: hidden; display: none; flex-direction: column; }
+    .panel-sec.active { display: flex; }
+
+    /* ─ Shared scrollable body ─ */
+    .sec-body { flex: 1; overflow-y: auto; }
+    .sec-body::-webkit-scrollbar { width: 4px; }
+    .sec-body::-webkit-scrollbar-thumb { background: #252535; }
+
+    /* ─ Garment ─ */
+    #set-tabs {
+      display: none; flex-shrink: 0;
+      border-bottom: 1px solid #1a1a24;
+      overflow-x: auto;
+    }
+    #set-tabs::-webkit-scrollbar { display: none; }
+    .set-tab {
+      padding: 9px 16px; font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .set-tab.active { color: #c084fc; border-bottom-color: #9333ea; }
+    .set-tab:hover:not(.active) { color: #94a3b8; }
+
+    #weather-block {
+      margin: 12px 12px 0;
+      padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      display: none;
+    }
+    .w-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+    .w-temp { font-size: 22px; font-weight: 700; color: #e2e8f0; }
+    .w-desc { font-size: 13px; color: #7dd3fc; font-weight: 600; text-transform: capitalize; }
+    .w-location { font-size: 11px; color: #475569; margin-top: 2px; }
+    .w-note { font-size: 11px; color: #64748b; margin-top: 6px; padding-top: 6px; border-top: 1px solid #22222e; }
+
+    #vibe-note {
+      margin: 10px 12px 0; padding: 8px 12px;
+      background: #1a1028; border: 1px solid #3b1f5a; border-radius: 8px;
+      font-size: 11px; color: #c084fc; line-height: 1.5; display: none;
+    }
+    #outfit-hero-block {
+      margin: 10px 12px 0;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      overflow: hidden; display: none;
+    }
+    #outfit-hero-block .hero-img {
+      width: 100%; max-height: 220px; object-fit: contain;
+      display: block; background: #1a1a24;
+    }
+    #outfit-hero-block .hero-body { padding: 10px 12px 12px; }
+    #outfit-hero-block .hero-name { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-bottom: 4px; }
+    #outfit-hero-block .hero-desc { font-size: 11px; color: #94a3b8; line-height: 1.5; margin-bottom: 6px; }
+    #outfit-hero-block .hero-reason {
+      font-size: 11px; color: #c084fc; line-height: 1.5;
+      padding-top: 6px; border-top: 1px solid #22222e;
+    }
+    .garments-label {
+      margin: 10px 12px 0; font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px; color: #475569;
+    }
+    #outfit-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .garment-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color .2s, transform .15s;
+    }
+    .garment-card:hover { border-color: #7e22ce; transform: translateY(-1px); }
+    .garment-card .card-img {
+      width: 100%; height: 140px; object-fit: cover; display: block; background: #1a1a24;
+    }
+    .card-img-placeholder {
+      width: 100%; height: 140px;
+      background: linear-gradient(135deg, #1a1a24, #22222e);
+      display: none; align-items: center; justify-content: center; font-size: 36px;
+    }
+    .card-body { padding: 9px 12px 11px; }
+    .card-slot {
+      font-size: 10px; font-weight: 700; letter-spacing: .4px;
+      text-transform: uppercase; color: #9333ea; margin-bottom: 4px;
+    }
+    .card-name { font-size: 12px; font-weight: 600; color: #e2e8f0; line-height: 1.4; margin-bottom: 4px; }
+    .card-reason { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+    #tips-block {
+      margin: 4px 12px 12px; padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      font-size: 11px; display: none;
+    }
+    .tips-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .5px; color: #9333ea; margin-bottom: 6px;
+    }
+    #tips-list { padding-left: 16px; }
+    #tips-list li { margin: 3px 0; color: #94a3b8; line-height: 1.5; }
+
+    /* ─ Maps ─ */
+    #loc-display {
+      padding: 8px 16px; font-size: 11px; color: #475569;
+      border-bottom: 1px solid #1a1a24; flex-shrink: 0; display: none;
+    }
+    #places-count {
+      padding: 6px 12px 0; font-size: 11px; color: #475569; display: none;
+    }
+    #loc-tabs {
+      display: none; flex-shrink: 0;
+      border-bottom: 1px solid #1a1a24; overflow-x: auto;
+    }
+    #loc-tabs::-webkit-scrollbar { display: none; }
+    .loc-tab {
+      padding: 9px 14px; font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s; white-space: nowrap;
+    }
+    .loc-tab.active { color: #4ade80; border-bottom-color: #16a34a; }
+    .loc-tab:hover:not(.active) { color: #94a3b8; }
+    #search-info {
+      margin: 10px 12px 0; padding: 10px 12px;
+      background: #111118; border: 1px solid #22222e; border-radius: 8px;
+      display: none;
+    }
+    .si-row { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
+    .si-icon { font-size: 12px; }
+    .si-label { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #475569; }
+    .si-query { font-size: 12px; color: #e2e8f0; }
+    .si-value { font-size: 12px; color: #94a3b8; }
+    .si-mode {
+      display: inline-block; margin-top: 5px;
+      font-size: 10px; padding: 2px 7px; border-radius: 99px;
+      background: #0f2a1a; color: #4ade80; font-weight: 600;
+    }
+    #places-list { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+    .place-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color .2s;
+    }
+    .place-card:hover { border-color: #166534; }
+    .place-photo {
+      width: 100%; height: 120px; object-fit: cover;
+      display: block; background: #1a1a24;
+    }
+    .place-icon-row {
+      width: 100%; height: 60px; background: #111118;
+      display: flex; align-items: center; justify-content: center; font-size: 28px;
+    }
+    .place-card .card-body { padding: 9px 12px 11px; }
+    .place-card .card-name { font-size: 13px; font-weight: 600; color: #e2e8f0; margin-bottom: 3px; }
+    .card-address { font-size: 11px; color: #64748b; line-height: 1.4; margin-bottom: 5px; }
+    .card-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 5px; }
+    .rating-stars { color: #fbbf24; font-size: 11px; }
+    .rating-value { font-size: 12px; color: #f1f5f9; font-weight: 600; }
+    .rating-count { font-size: 11px; color: #475569; }
+    .open-badge {
+      font-size: 10px; font-weight: 700; padding: 2px 7px;
+      border-radius: 99px; letter-spacing: .3px;
+    }
+    .open-badge.open    { background: #0f2a1a; color: #4ade80; }
+    .open-badge.closed  { background: #2a0f0f; color: #f87171; }
+    .open-badge.unknown { background: #1a1a24; color: #475569; }
+    .price-level { font-size: 11px; color: #fbbf24; font-weight: 600; }
+    .card-types { display: flex; flex-wrap: wrap; gap: 4px; }
+    .type-chip {
+      font-size: 10px; padding: 2px 6px; border-radius: 99px;
+      background: #1a1a24; color: #64748b;
+    }
+
+    /* ─ Cosmetics ─ */
+    #skin-profile {
+      margin: 12px 12px 0; padding: 10px 12px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      display: none;
+    }
+    .profile-row { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
+    .profile-chip {
+      font-size: 10px; padding: 2px 8px; border-radius: 99px; font-weight: 600;
+      background: #1a0f20; color: #d8b4fe;
+    }
+    .profile-note {
+      font-size: 11px; color: #94a3b8; line-height: 1.5;
+      padding-top: 6px; border-top: 1px solid #22222e; margin-top: 4px;
+    }
+    #routine-tabs {
+      display: none; flex-shrink: 0;
+      border-bottom: 1px solid #1a1a24; overflow-x: auto;
+    }
+    #routine-tabs::-webkit-scrollbar { display: none; }
+    .routine-tab {
+      padding: 9px 16px; font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s; white-space: nowrap;
+    }
+    .routine-tab.active { color: #f9a8d4; border-bottom-color: #db2777; }
+    .routine-tab:hover:not(.active) { color: #94a3b8; }
+    #concern-note {
+      margin: 10px 12px 0; padding: 8px 12px;
+      background: #1a0a10; border: 1px solid #3a1a28; border-radius: 8px;
+      font-size: 11px; color: #f9a8d4; line-height: 1.5; display: none;
+    }
+    #product-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .product-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color .2s;
+    }
+    .product-card:hover { border-color: #9d174d; }
+    .product-card .card-img {
+      width: 100%; height: 130px; object-fit: cover; display: block; background: #1a1a24;
+    }
+    .product-card .card-body { padding: 9px 12px 11px; }
+    .card-type {
+      font-size: 10px; font-weight: 700; letter-spacing: .4px;
+      text-transform: uppercase; color: #db2777; margin-bottom: 4px;
+    }
+    .product-card .card-name { font-size: 12px; font-weight: 600; color: #e2e8f0; margin-bottom: 2px; }
+    .card-brand { font-size: 11px; color: #64748b; margin-bottom: 4px; }
+    .product-card .card-reason { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+    .card-price { font-size: 11px; color: #fbbf24; font-weight: 600; margin-top: 4px; }
+    #cosmetics-tips-block {
+      margin: 4px 12px 12px; padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      font-size: 11px; display: none;
+    }
+    .cosmetics-tips-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .5px; color: #db2777; margin-bottom: 6px;
+    }
+    #cosmetics-tips-list { padding-left: 16px; }
+    #cosmetics-tips-list li { margin: 3px 0; color: #94a3b8; line-height: 1.5; }
+
+    /* ─ Nav ─ */
+    #nav-results-body { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+    #nav-results-body::-webkit-scrollbar { width: 4px; }
+    #nav-results-body::-webkit-scrollbar-thumb { background: #252535; }
+    .result-card {
+      background: #111118; border: 1px solid #22222e; border-radius: 10px; overflow: hidden;
+    }
+    .result-card.matched  { border-color: #1e1b4b; }
+    .result-card.no-match { border-color: #3b1f1f; }
+    .result-card-header {
+      padding: 10px 14px; display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid #1a1a24;
+    }
+    .result-status {
+      font-size: 11px; font-weight: 700; letter-spacing: .4px;
+      padding: 2px 8px; border-radius: 99px;
+    }
+    .status-matched  { background: #1e1b4b; color: #818cf8; }
+    .status-no-match { background: #2a0f0f; color: #f87171; }
+    .confidence-bar-wrap { display: flex; align-items: center; gap: 8px; }
+    .confidence-label { font-size: 11px; color: #64748b; }
+    .confidence-bar { width: 60px; height: 5px; background: #1a1a24; border-radius: 99px; overflow: hidden; }
+    .confidence-fill { height: 100%; border-radius: 99px; background: #4f46e5; transition: width .4s ease; }
+    .confidence-fill.low  { background: #ef4444; }
+    .confidence-fill.mid  { background: #f59e0b; }
+    .confidence-fill.high { background: #818cf8; }
+    .result-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+    .result-row { display: flex; flex-direction: column; gap: 3px; }
+    .result-key {
+      font-size: 10px; font-weight: 700; letter-spacing: .5px;
+      text-transform: uppercase; color: #475569;
+    }
+    .result-val { font-size: 13px; color: #e2e8f0; font-weight: 500; word-break: break-all; }
+    .result-val.url  { color: #818cf8; font-family: monospace; font-size: 12px; }
+    .result-val.null { color: #475569; font-style: italic; }
+    .result-val.msg  { color: #94a3b8; font-size: 12px; line-height: 1.5; }
+    .entity-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+    .entity-chip {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      background: #1e1b4b; color: #a5b4fc; font-weight: 600;
+    }
+    .sitemap-section {
+      border-top: 1px solid #1a1a24; padding: 12px 14px; flex-shrink: 0;
+    }
+    .sitemap-label {
+      font-size: 10px; font-weight: 700; letter-spacing: .5px;
+      text-transform: uppercase; color: #475569; margin-bottom: 6px;
+    }
+    #sitemap-input {
+      width: 100%; background: #1a1a24; border: 1px solid #252535;
+      color: #94a3b8; border-radius: 8px; padding: 8px 10px;
+      font-size: 11px; font-family: monospace;
+      resize: none; height: 100px; line-height: 1.6;
+    }
+    #sitemap-input:focus { outline: none; border-color: #4f46e5; }
+
+    /* Shared empty state */
+    .panel-empty {
+      padding: 32px 16px; color: #475569; font-size: 12px;
+      text-align: center; line-height: 1.7;
+    }
+    .panel-empty .empty-icon { font-size: 32px; margin-bottom: 10px; display: block; }
+
+    /* ── Input area ── */
+    .input-area {
+      padding: 16px 20px; border-top: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 10px; padding: 10px 14px;
+      font-size: 14px; resize: none; min-height: 42px; max-height: 160px;
+      line-height: 1.5; font-family: inherit;
+    }
+    #chat-input:focus { outline: none; border-color: #d97706; }
+    #chat-input::placeholder { color: #475569; }
+    #send-btn {
+      background: #d97706; border: none; color: #fff;
+      border-radius: 10px; padding: 10px 20px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background .15s; white-space: nowrap;
+    }
+    #send-btn:hover { background: #b45309; }
+    #send-btn:disabled { background: #1a1a24; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>✦ General Fashion AI</h1>
+  <span class="badge badge-garment" id="persona-badge">🧥 Stylist Mode</span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>
+    Server: <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <div id="mode-tabs">
+    <button class="mode-tab active" data-mode="garment">🧥 Garment</button>
+    <button class="mode-tab" data-mode="maps">📍 Maps</button>
+    <button class="mode-tab" data-mode="cosmetics">🌿 Cosmetics</button>
+    <button class="mode-tab" data-mode="nav">🧭 Nav</button>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- Chat -->
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">General Fashion AI</span>
+      <div class="bubble" id="welcome-bubble">
+        Hi! I'm your <strong>General Fashion AI</strong> — a single assistant that can style your outfits, find nearby places, recommend skincare routines, or navigate the app.<br><br>
+        Pick a mode above and try one of the prompts below.
+        <div class="prompt-chips" id="welcome-chips"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Side panel -->
+  <div id="side-panel">
+    <div class="panel-header" id="panel-title">Outfit Picks</div>
+    <div id="panel-root">
+
+      <!-- Garment section -->
+      <div class="panel-sec active" id="sec-garment">
+        <div id="set-tabs" style="display:none;flex"></div>
+        <div class="sec-body" id="garment-body">
+          <div id="weather-block">
+            <div class="w-row">
+              <span class="w-temp" id="w-temp">—</span>
+              <span class="w-desc" id="w-desc"></span>
+            </div>
+            <div class="w-location" id="w-location"></div>
+            <div class="w-note" id="w-note"></div>
+          </div>
+          <div id="vibe-note"></div>
+          <div id="outfit-hero-block">
+            <img class="hero-img" id="hero-img" src="" alt="" loading="lazy" onerror="this.style.display='none'" />
+            <div class="hero-body">
+              <div class="hero-name" id="hero-name"></div>
+              <div class="hero-desc" id="hero-desc"></div>
+              <div class="hero-reason" id="hero-reason"></div>
+            </div>
+          </div>
+          <div class="garments-label" id="garments-label" style="display:none">Pieces</div>
+          <div id="outfit-list">
+            <div class="panel-empty">
+              <span class="empty-icon">🧥</span>
+              Ask what to wear — outfit picks appear here, set by set.
+            </div>
+          </div>
+          <div id="tips-block">
+            <div class="tips-title">✦ Styling Tips</div>
+            <ul id="tips-list"></ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Maps section -->
+      <div class="panel-sec" id="sec-maps">
+        <div id="loc-display"></div>
+        <div id="places-count" style="display:none"></div>
+        <div id="loc-tabs" style="display:none"></div>
+        <div class="sec-body" id="maps-body">
+          <div id="search-info" style="display:none"></div>
+          <div id="places-list">
+            <div class="panel-empty">
+              <span class="empty-icon">📍</span>
+              Ask about nearby places — results appear here.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cosmetics section -->
+      <div class="panel-sec" id="sec-cosmetics">
+        <div id="skin-profile" style="display:none"></div>
+        <div id="routine-tabs" style="display:none"></div>
+        <div class="sec-body" id="cosmetics-body">
+          <div id="concern-note" style="display:none"></div>
+          <div id="product-list">
+            <div class="panel-empty">
+              <span class="empty-icon">🌿</span>
+              Ask for a skincare routine — products appear here.
+            </div>
+          </div>
+          <div id="cosmetics-tips-block" style="display:none">
+            <div class="cosmetics-tips-title">✦ Routine Tips</div>
+            <ul id="cosmetics-tips-list"></ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nav section -->
+      <div class="panel-sec" id="sec-nav">
+        <div id="nav-results-body">
+          <div class="panel-empty" id="nav-empty">
+            <span class="empty-icon">🧭</span>
+            Ask where to go — routing results appear here.
+          </div>
+        </div>
+        <div class="sitemap-section">
+          <div class="sitemap-label">Sitemap <span style="font-weight:400;color:#334155">(one path per line)</span></div>
+          <textarea id="sitemap-input" spellcheck="false">/home
+/shop
+/shop/garments
+/shop/cosmetics
+/shop/accessories
+/orders
+/orders/:id
+/profile
+/profile/:id
+/support/faq
+/support/contact
+/cart
+/checkout
+/account/settings</textarea>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<div class="input-area">
+  <textarea id="chat-input" rows="1" placeholder='Pick a mode above and type your message…'></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  // ── Constants ──
+  const RAINY_CODES = new Set([51,53,55,61,63,65,80,81,82,95,96,99]);
+  const WMO = {
+    0:"clear sky",1:"mainly clear",2:"partly cloudy",3:"overcast",
+    45:"foggy",48:"icy fog",
+    51:"light drizzle",53:"moderate drizzle",55:"heavy drizzle",
+    61:"light rain",63:"moderate rain",65:"heavy rain",
+    80:"rain showers",81:"moderate showers",82:"heavy showers",
+    95:"thunderstorm",96:"thunderstorm with hail",99:"severe thunderstorm",
+  };
+
+  const DEMO_SKIN_ANALYSIS = {
+    timestamp: new Date().toISOString(),
+    success: true,
+    output: [
+      { type: "oiliness",            raw_score: 91.90, ui_score: 88, mask_urls: [], url: null },
+      { type: "dark_circle_v2",      raw_score: 90.14, ui_score: 80, mask_urls: [], url: null },
+      { type: "wrinkle",             raw_score: 98.39, ui_score: 96, mask_urls: [], url: null },
+      { type: "acne",                raw_score: 94.76, ui_score: 92, mask_urls: [], url: null },
+      { type: "age_spot",            raw_score: 96.94, ui_score: 93, mask_urls: [], url: null },
+      { type: "droopy_lower_eyelid", raw_score: 76.91, ui_score: 79, mask_urls: [], url: null },
+      { type: "all",      score: 88, url: null },
+      { type: "skin_age", score: 24, url: null },
+    ],
+    overallScore: 88,
+    skinAge: 24,
+  };
+
+  const TYPE_EMOJI = {
+    CLEANSER:"🧴", TONER:"💧", ESSENCE:"✨",
+    MOISTURIZER:"🫧", EXFOLIANT:"🌿", SUNSCREEN:"☀️",
+  };
+
+  const MODE_PROMPTS = {
+    garment: [
+      { text: "What should I wear today? I'm a woman.", cls: "chip-garment" },
+      { text: "Job interview outfit in BGC. I'm a male.", cls: "chip-garment" },
+      { text: "Casual weekend brunch. I'm a female.", cls: "chip-garment" },
+    ],
+    maps: [
+      { text: "Find coffee shops near me.", cls: "chip-maps" },
+      { text: "Where are the nearest pharmacies?", cls: "chip-maps" },
+      { text: "What restaurants are within 1km?", cls: "chip-maps" },
+    ],
+    cosmetics: [
+      { text: "What skincare routine should I follow?", cls: "chip-cosmetics" },
+      { text: "Recommend products for my skin.", cls: "chip-cosmetics" },
+      { text: "Give me 2 routines for my skin type.", cls: "chip-cosmetics" },
+    ],
+    nav: [
+      { text: "Take me to the garments section.", cls: "chip-nav" },
+      { text: "Go to my orders.", cls: "chip-nav" },
+      { text: "I want to check out.", cls: "chip-nav" },
+    ],
+  };
+
+  const MODE_META = {
+    garment:   { badge: "🧥 Stylist Mode",   badgeCls: "badge-garment",   panelTitle: "Outfit Picks",       placeholder: 'e.g. "What should I wear today? I\'m a woman."' },
+    maps:      { badge: "📍 Maps Mode",       badgeCls: "badge-maps",      panelTitle: "Nearby Places",      placeholder: 'e.g. "Find coffee shops near me."' },
+    cosmetics: { badge: "🌿 Skincare Mode",   badgeCls: "badge-cosmetics", panelTitle: "Skincare Routines",  placeholder: 'e.g. "What skincare routine should I follow?"' },
+    nav:       { badge: "🧭 Nav Mode",        badgeCls: "badge-nav",       panelTitle: "Navigation Result",  placeholder: 'e.g. "Take me to the garments section."' },
+  };
+
+  // ── State ──
+  let sessionId = null, ws = null;
+  let activeMode = "garment";
+  let currentBubble = null, currentRaw = "", isStreaming = false;
+  let _sets = [], _routines = [], _locResults = [];
+  let _weatherData = null, _userLocation = null;
+
+  // ── Mode switching ──
+  function setMode(mode) {
+    activeMode = mode;
+    document.querySelectorAll(".mode-tab").forEach(t =>
+      t.className = "mode-tab" + (t.dataset.mode === mode ? " active" : ""));
+    document.querySelectorAll(".panel-sec").forEach(s => s.classList.remove("active"));
+    $(`sec-${mode}`).classList.add("active");
+
+    const m = MODE_META[mode];
+    const badge = $("persona-badge");
+    badge.textContent = m.badge;
+    badge.className = "badge " + m.badgeCls;
+    $("panel-title").textContent = m.panelTitle;
+    $("chat-input").placeholder = m.placeholder;
+
+    renderWelcomeChips(mode);
+    if (mode === "maps" && !_userLocation) fetchLocation();
+  }
+
+  function renderWelcomeChips(mode) {
+    const chips = $("welcome-chips");
+    if (!chips) return;
+    chips.innerHTML = "";
+    (MODE_PROMPTS[mode] || []).forEach(({ text, cls }) => {
+      const btn = document.createElement("button");
+      btn.className = "prompt-chip " + cls;
+      btn.textContent = text;
+      btn.addEventListener("click", () => {
+        $("chat-input").value = text;
+        $("chat-input").style.height = "auto";
+        $("chat-input").style.height = Math.min($("chat-input").scrollHeight, 160) + "px";
+        $("chat-input").focus();
+      });
+      chips.appendChild(btn);
+    });
+  }
+
+  document.querySelectorAll(".mode-tab").forEach(tab =>
+    tab.addEventListener("click", () => setMode(tab.dataset.mode)));
+
+  // ── Weather (garment mode) ──
+  async function fetchWeather() {
+    let lat = 14.5995, lon = 120.9842;
+    try {
+      const pos = await new Promise((res, rej) =>
+        navigator.geolocation.getCurrentPosition(res, rej, { timeout: 6000 }));
+      lat = pos.coords.latitude; lon = pos.coords.longitude;
+    } catch { /* use Manila default */ }
+    try {
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        `&current=temperature_2m,weathercode,precipitation,relative_humidity_2m&timezone=auto`;
+      const data = await (await fetch(url)).json();
+      const cur = data.current || {};
+      const wmo = cur.weathercode ?? 0;
+      const temp = cur.temperature_2m ?? null;
+      const precip = cur.precipitation ?? 0;
+      return {
+        date: new Date().toISOString().split("T")[0],
+        temperature_c: temp,
+        weathercode: wmo,
+        description: WMO[wmo] ?? "unknown conditions",
+        precipitation_mm: precip,
+        is_rainy: RAINY_CODES.has(wmo) || precip > 1,
+        is_hot: (temp ?? 0) >= 32,
+        is_cold: (temp ?? 99) <= 20,
+        lat, lon,
+      };
+    } catch { return null; }
+  }
+
+  // ── Location (maps mode) ──
+  async function fetchLocation() {
+    try {
+      const pos = await new Promise((res, rej) =>
+        navigator.geolocation.getCurrentPosition(res, rej, { timeout: 8000 }));
+      _userLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      $("loc-display").textContent = `📍 ${_userLocation.lat.toFixed(4)}, ${_userLocation.lng.toFixed(4)}`;
+      $("loc-display").style.display = "block";
+    } catch {
+      _userLocation = { lat: 14.5995, lng: 120.9842 }; // Manila default
+      $("loc-display").textContent = "📍 Using Manila (location denied)";
+      $("loc-display").style.display = "block";
+    }
+  }
+
+  // ── Connect ──
+  async function connect() {
+    setStatus("connecting", "Connecting…");
+    try {
+      sessionId = (await (await fetch(`http://${$("server-url").value}/session-id`)).json()).session_id;
+    } catch { setStatus("error", "Cannot reach server"); return; }
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://${$("server-url").value}/chat-stream`);
+    ws.onopen  = () => { setStatus("ok", "Connected"); $("send-btn").disabled = false; };
+    ws.onclose = () => { setStatus("error", "Disconnected"); $("send-btn").disabled = true; };
+    ws.onerror = () => setStatus("error", "WebSocket error");
+    ws.onmessage = ({ data }) => { console.log("[chat-stream]", data); handleChunk(data); };
+  }
+
+  $("server-url").addEventListener("change", connect);
+
+  // ── Chunk handler ──
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      if (currentBubble && currentRaw) currentBubble.innerHTML = marked.parse(currentRaw);
+      currentBubble = null; currentRaw = "";
+      isStreaming = false; $("send-btn").disabled = false;
+      removeTyping(); return;
+    }
+    if (chunk === "[DONE]") return;
+
+    if (chunk.startsWith("[GARMENT_DATA]")) {
+      try { renderGarmentData(JSON.parse(chunk.slice(14))); }
+      catch(e) { console.error("[GARMENT_DATA parse error]", e); }
+      return;
+    }
+    if (chunk.startsWith("[MAPS_DATA]")) {
+      try { renderPlacesData(JSON.parse(chunk.slice(11))); }
+      catch(e) { console.error("[MAPS_DATA parse error]", e); }
+      return;
+    }
+    if (chunk.startsWith("[COSMETICS_DATA]")) {
+      try { renderCosmeticsData(JSON.parse(chunk.slice(16))); }
+      catch(e) { console.error("[COSMETICS_DATA parse error]", e); }
+      return;
+    }
+    if (chunk.startsWith("[NAV_DATA]")) {
+      try { renderNavResult(JSON.parse(chunk.slice(10))); }
+      catch(e) { console.error("[NAV_DATA parse error]", e); }
+      return;
+    }
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false; $("send-btn").disabled = false; removeTyping(); return;
+    }
+    if (chunk.startsWith("[Tool]"))    { appendSystem(escHtml(chunk)); return; }
+    if (chunk.startsWith("[Sources]") || chunk.startsWith("[STRUCTURED_DATA]")) return;
+
+    if (!currentBubble) currentBubble = createAssistantBubble();
+    removeTyping();
+    currentRaw += chunk;
+    currentBubble.textContent = currentRaw;
+    scrollBottom();
+  }
+
+  // ── Send ──
+  async function send() {
+    const text = $("chat-input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+    const userInput = `[general fashion] ${text}`;
+    appendUserMsg(text);
+    $("chat-input").value = ""; $("chat-input").style.height = "auto";
+    $("send-btn").disabled = true; isStreaming = true;
+    appendTyping(); resetPanel();
+
+    const payload = { type: "chat", session_id: sessionId, user_input: userInput };
+
+    if (activeMode === "garment") {
+      setStatus("ok", "Fetching weather…");
+      _weatherData = await fetchWeather();
+      if (_weatherData) payload.weather = _weatherData;
+      setStatus("ok", "Connected");
+    }
+
+    if (activeMode === "maps") {
+      if (!_userLocation) await fetchLocation();
+      if (_userLocation) payload.location = _userLocation;
+    }
+
+    if (activeMode === "cosmetics") {
+      payload.skin_analysis = DEMO_SKIN_ANALYSIS;
+    }
+
+    if (activeMode === "nav") {
+      const sitemap = parseSitemap();
+      if (sitemap.length) payload.sitemap_context = sitemap;
+    }
+
+    console.log("[sending to backend]", payload);
+    ws.send(JSON.stringify(payload));
+  }
+
+  function parseSitemap() {
+    return $("sitemap-input").value
+      .split("\n").map(s => s.trim()).filter(s => s.startsWith("/"));
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("chat-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  $("chat-input").addEventListener("input", () => {
+    const el = $("chat-input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  // ── GARMENT rendering ──
+  function renderGarmentData(data) {
+    if (!data.success || !data.sets) return;
+
+    const w = data.weather || {};
+    renderWeather(buildWeatherDisplay({ ...w, weathercode: w.weathercode ?? 0 }), data.location || "");
+    renderTips(data.styling_tips || []);
+
+    const sets = data.sets.map(s => ({
+      label: `Set ${s.set_number} — ${s.vibe || ""}`,
+      vibeNote: s.trend_note || "",
+      reason: s.reason || "",
+      outfitName: s.outfit_name || "",
+      outfitDescription: s.outfit_description || "",
+      outfitImageUrl: s.outfit_imageUrl || "",
+      garments: s.recommendations || [],
+    }));
+    _sets = sets;
+
+    const bar = $("set-tabs");
+    bar.innerHTML = "";
+    if (sets.length > 1) {
+      bar.style.display = "flex";
+      sets.forEach((s, i) => {
+        const tab = document.createElement("div");
+        tab.className = "set-tab" + (i === 0 ? " active" : "");
+        tab.textContent = `Set ${i + 1}`;
+        tab.addEventListener("click", () => showSetTab(i));
+        bar.appendChild(tab);
+      });
+    } else {
+      bar.style.display = "none";
+    }
+    showSetTab(0);
+  }
+
+  function showSetTab(idx) {
+    document.querySelectorAll(".set-tab").forEach((t, i) =>
+      t.className = "set-tab" + (i === idx ? " active" : ""));
+    const set = _sets[idx]; if (!set) return;
+
+    const vn = $("vibe-note");
+    if (set.vibeNote) { vn.textContent = `✦ ${set.vibeNote}`; vn.style.display = "block"; }
+    else vn.style.display = "none";
+
+    const heroBlock = $("outfit-hero-block");
+    if (set.outfitImageUrl || set.outfitName) {
+      const img = $("hero-img");
+      img.src = set.outfitImageUrl || ""; img.alt = set.outfitName || "";
+      img.style.display = set.outfitImageUrl ? "block" : "none";
+      $("hero-name").textContent = set.outfitName || "";
+      $("hero-desc").textContent = set.outfitDescription || "";
+      const reasonEl = $("hero-reason");
+      if (set.reason) { reasonEl.textContent = `✦ ${set.reason}`; reasonEl.style.display = "block"; }
+      else reasonEl.style.display = "none";
+      heroBlock.style.display = "block";
+    } else heroBlock.style.display = "none";
+
+    const garments = set.garments || [];
+    $("garments-label").style.display = garments.length ? "block" : "none";
+    const list = $("outfit-list"); list.innerHTML = "";
+    if (!garments.length) return;
+
+    const slotEmoji = { UpperGarment:"👔",LowerGarment:"👖",FootGarment:"👟",Earrings:"💎",NeckAccessory:"📿",HeadGarment:"🧢",Glasses:"🕶",LeftHandAccessory:"⌚",RightHandAccessory:"💍" };
+    garments.forEach(g => {
+      const src = g.imageUrl || "";
+      const slot = Array.isArray(g.fittingSlot) ? g.fittingSlot[0] : (g.fittingSlot || "");
+      const garmentType = Array.isArray(g.garmentType) ? g.garmentType[0] : (g.garmentType || "");
+      const label = garmentType || slot.replace(/([A-Z])/g, " $1").trim();
+      const emoji = slotEmoji[slot] || "🧥";
+      const card = document.createElement("div");
+      card.className = "garment-card";
+      card.innerHTML = `
+        <img class="card-img" src="${escAttr(src)}" alt="${escAttr(g.name||'')}" loading="lazy"
+          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
+        <div class="card-img-placeholder" style="display:none">${emoji}</div>
+        <div class="card-body">
+          ${label ? `<div class="card-slot">${escHtml(label)}</div>` : ""}
+          <div class="card-name">${escHtml(g.name||"Garment")}</div>
+          ${g.description ? `<div class="card-reason">${escHtml(g.description)}</div>` : ""}
+        </div>`;
+      list.appendChild(card);
+    });
+  }
+
+  function buildWeatherDisplay(w) {
+    const conds = [
+      { test: w => w.weathercode >= 95,             label:"⛈ Stormy", note:"Opt for waterproof layers." },
+      { test: w => RAINY_CODES.has(w.weathercode),  label:"🌧 Rainy",  note:"Carry a compact umbrella." },
+      { test: w => [45,48].includes(w.weathercode), label:"🌫 Foggy",  note:"Layer up — fog feels cooler." },
+      { test: w => w.is_hot,                         label:"☀ Sunny",  note:"Light fabrics recommended." },
+      { test: w => [2,3].includes(w.weathercode),   label:"🌥 Cloudy", note:"Comfortable layering weather." },
+      { test: w => w.is_cold,                        label:"🌬 Cool",   note:"Layering is key." },
+    ];
+    const match = conds.find(c => c.test(w));
+    const temp = w.temperature_c != null ? `${w.temperature_c.toFixed(1)}°C` : null;
+    return { temp, condition: match?.label || "", note: match?.note || "" };
+  }
+
+  function renderWeather(w, location) {
+    const wb = $("weather-block");
+    if (w.temp || w.condition) {
+      $("w-temp").textContent = w.temp || "—";
+      $("w-desc").textContent = w.condition || "";
+      $("w-location").textContent = location || "";
+      $("w-note").textContent = w.note || "";
+      wb.style.display = "block";
+    } else wb.style.display = "none";
+  }
+
+  function renderTips(tips) {
+    const tb = $("tips-block");
+    if (tips.length) {
+      $("tips-list").innerHTML = tips.map(t => `<li>${escHtml(t)}</li>`).join("");
+      tb.style.display = "block";
+    } else tb.style.display = "none";
+  }
+
+  // ── MAPS rendering ──
+  function renderPlacesData(payload) {
+    const results = Array.isArray(payload) ? payload : [payload];
+    _locResults = results.filter(r => r.success);
+    if (!_locResults.length) return;
+
+    const total = _locResults.reduce((s, r) => s + (r.places || []).length, 0);
+    $("places-count").textContent = `${total} place${total !== 1 ? "s" : ""} found`;
+    $("places-count").style.display = "block";
+
+    const tabBar = $("loc-tabs");
+    tabBar.innerHTML = "";
+    if (_locResults.length > 1) {
+      tabBar.style.display = "flex";
+      _locResults.forEach((r, i) => {
+        const tab = document.createElement("div");
+        tab.className = "loc-tab" + (i === 0 ? " active" : "");
+        tab.textContent = r.location_label || `Location ${i + 1}`;
+        tab.addEventListener("click", () => showLocTab(i));
+        tabBar.appendChild(tab);
+      });
+    } else tabBar.style.display = "none";
+
+    showLocTab(0);
+  }
+
+  function showLocTab(idx) {
+    document.querySelectorAll(".loc-tab").forEach((t, i) =>
+      t.className = "loc-tab" + (i === idx ? " active" : ""));
+    const r = _locResults[idx]; if (!r) return;
+
+    const si = $("search-info");
+    si.style.display = "block";
+    si.innerHTML = `
+      <div class="si-row"><span class="si-icon">🔍</span><span class="si-label">Query:</span><span class="si-query">${escHtml(r.query||"")}</span></div>
+      <div class="si-row"><span class="si-icon">📍</span><span class="si-label">Radius:</span><span class="si-value">${r.radius||1500}m</span></div>
+      <span class="si-mode">${r.search_mode === "nearby" ? "Nearby Search" : "Text Search"}</span>`;
+
+    const list = $("places-list"); list.innerHTML = "";
+    const places = r.places || [];
+    if (!places.length) {
+      list.innerHTML = `<div class="panel-empty"><span class="empty-icon">😕</span>No places found for "${escHtml(r.query||"")}".</div>`;
+      return;
+    }
+    places.forEach(p => list.appendChild(buildPlaceCard(p)));
+    scrollBottom();
+  }
+
+  function buildPlaceCard(p) {
+    const card = document.createElement("div");
+    card.className = "place-card";
+    const icon = placeIcon(p.types || []);
+    const stars = ratingStars(p.rating);
+    const openHtml = openBadge(p.open_now);
+    const priceHtml = p.price_level != null ? `<span class="price-level">${["Free","₱","₱₱","₱₱₱","₱₱₱₱"][p.price_level]||""}</span>` : "";
+    const displayTypes = (p.types||[]).filter(t=>!["point_of_interest","establishment","food"].includes(t)).slice(0,3).map(t=>`<span class="type-chip">${escHtml(t.replace(/_/g," "))}</span>`).join("");
+    card.innerHTML = `
+      ${p.photo_url ? `<img class="place-photo" src="${escAttr(p.photo_url)}" alt="${escAttr(p.name||'')}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" />` : ""}
+      <div class="place-icon-row" style="${p.photo_url?"display:none":""}">${icon}</div>
+      <div class="card-body">
+        <div class="card-name">${escHtml(p.name||"Unknown")}</div>
+        <div class="card-address">${escHtml(p.address||"")}</div>
+        <div class="card-meta">
+          ${p.rating!=null?`<span class="rating-stars">${stars}</span><span class="rating-value">${p.rating}</span>${p.user_ratings_total!=null?`<span class="rating-count">(${p.user_ratings_total.toLocaleString()})</span>`:""}`:""}
+          ${openHtml}${priceHtml}
+        </div>
+        ${displayTypes?`<div class="card-types">${displayTypes}</div>`:""}
+      </div>`;
+    return card;
+  }
+
+  function placeIcon(types) {
+    const t = types.join(" ");
+    if (/restaurant|food|meal/.test(t))             return "🍽";
+    if (/cafe|coffee|bakery/.test(t))               return "☕";
+    if (/bar|night_club/.test(t))                   return "🍺";
+    if (/hospital|health|doctor|pharmacy/.test(t))  return "🏥";
+    if (/atm|bank|finance/.test(t))                 return "🏧";
+    if (/hotel|lodging/.test(t))                    return "🏨";
+    if (/store|supermarket|grocery/.test(t))        return "🛒";
+    if (/mall|shopping/.test(t))                    return "🛍";
+    if (/gym|fitness/.test(t))                      return "🏋";
+    if (/park|tourist_attraction/.test(t))          return "🌳";
+    if (/church|mosque|temple/.test(t))             return "⛪";
+    if (/gas_station|fuel/.test(t))                 return "⛽";
+    return "📍";
+  }
+
+  function ratingStars(rating) {
+    if (rating == null) return "";
+    const full = Math.floor(rating), half = rating - full >= 0.5 ? 1 : 0;
+    return "★".repeat(full) + (half?"½":"") + "☆".repeat(5-full-half);
+  }
+
+  function openBadge(openNow) {
+    if (openNow === true)  return `<span class="open-badge open">Open</span>`;
+    if (openNow === false) return `<span class="open-badge closed">Closed</span>`;
+    return `<span class="open-badge unknown">Hours unknown</span>`;
+  }
+
+  // ── COSMETICS rendering ──
+  function renderCosmeticsData(data) {
+    if (!data.success || !data.sets) return;
+
+    renderSkinProfile(data);
+    renderCosmeticsTips(data.routine_tips || []);
+
+    const routines = data.sets.map(s => ({
+      label: `Routine ${s.set_number} — ${s.vibe || ""}`,
+      concernNote: s.concern_note || "",
+      products: s.recommendations || [],
+    }));
+    _routines = routines;
+
+    const bar = $("routine-tabs"); bar.innerHTML = "";
+    if (routines.length > 1) {
+      bar.style.display = "flex";
+      routines.forEach((r, i) => {
+        const tab = document.createElement("div");
+        tab.className = "routine-tab" + (i === 0 ? " active" : "");
+        tab.textContent = `Routine ${i + 1}`;
+        tab.addEventListener("click", () => showRoutine(i));
+        bar.appendChild(tab);
+      });
+    } else bar.style.display = "none";
+    showRoutine(0);
+  }
+
+  function renderSkinProfile(data) {
+    const block = $("skin-profile");
+    const skinType = data.skin_type || "", concerns = data.concerns || [];
+    const overall = data.overall_score, skinAge = data.skin_age, skinNotes = data.skin_notes || "";
+    if (!skinType && !concerns.length && overall == null) { block.style.display = "none"; return; }
+    let html = `<div class="profile-row">`;
+    if (skinType) html += `<span class="profile-chip">${escHtml(skinType)}</span>`;
+    concerns.forEach(c => html += `<span class="profile-chip" style="background:#1a0020;color:#d8b4fe">${escHtml(c)}</span>`);
+    html += `</div>`;
+    if (overall != null || skinAge != null) {
+      html += `<div class="profile-row" style="gap:16px;margin-bottom:4px">`;
+      if (overall != null) html += `<div style="font-size:11px;color:#94a3b8">Overall <strong style="color:#f9a8d4;font-size:13px">${overall}</strong>/100</div>`;
+      if (skinAge  != null) html += `<div style="font-size:11px;color:#94a3b8">Skin age <strong style="color:#f9a8d4;font-size:13px">${skinAge}</strong></div>`;
+      html += `</div>`;
+    }
+    if (skinNotes) html += `<div class="profile-note">${escHtml(skinNotes)}</div>`;
+    block.innerHTML = html; block.style.display = "block";
+  }
+
+  function showRoutine(idx) {
+    document.querySelectorAll(".routine-tab").forEach((t, i) =>
+      t.className = "routine-tab" + (i === idx ? " active" : ""));
+    const routine = _routines[idx]; if (!routine) return;
+    const cn = $("concern-note");
+    if (routine.concernNote) { cn.textContent = `✦ ${routine.concernNote}`; cn.style.display = "block"; }
+    else cn.style.display = "none";
+
+    const list = $("product-list"); list.innerHTML = "";
+    if (!routine.products.length) {
+      list.innerHTML = `<div class="panel-empty"><span class="empty-icon">🧴</span>No products in this routine.</div>`;
+      return;
+    }
+    routine.products.forEach(p => {
+      const card = document.createElement("div"); card.className = "product-card";
+      const emoji = TYPE_EMOJI[p.type] || "🧴";
+      const price = p.priceAmount ? `${p.priceUnit||""} ${p.priceAmount}`.trim() : "";
+      card.innerHTML = `
+        <img class="card-img" src="${escAttr(p.imageUrl||"")}" alt="${escAttr(p.name||"")}" loading="lazy"
+          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
+        <div class="card-img-placeholder" style="display:none">${emoji}</div>
+        <div class="card-body">
+          ${p.type  ? `<div class="card-type">${emoji} ${escHtml(p.type)}</div>` : ""}
+          <div class="card-name">${escHtml(p.name||"Product")}</div>
+          ${p.brand  ? `<div class="card-brand">${escHtml(p.brand)}</div>` : ""}
+          ${p.reason ? `<div class="card-reason">${escHtml(p.reason)}</div>` : ""}
+          ${price    ? `<div class="card-price">${escHtml(price)}</div>` : ""}
+        </div>`;
+      list.appendChild(card);
+    });
+  }
+
+  function renderCosmeticsTips(tips) {
+    const tb = $("cosmetics-tips-block");
+    if (tips.length) {
+      $("cosmetics-tips-list").innerHTML = tips.map(t => `<li>${escHtml(t)}</li>`).join("");
+      tb.style.display = "block";
+    } else tb.style.display = "none";
+  }
+
+  // ── NAV rendering ──
+  function renderNavResult(data) {
+    const { target_url, confidence, extracted_entities, system_message } = data;
+    const matched = target_url !== null && target_url !== undefined;
+    const conf = typeof confidence === "number" ? confidence : 0;
+    const confClass = conf >= 0.75 ? "high" : conf >= 0.5 ? "mid" : "low";
+    const confPct = Math.round(conf * 100);
+
+    let entitiesHtml = "";
+    if (extracted_entities && Object.keys(extracted_entities).length > 0) {
+      const chips = Object.entries(extracted_entities).filter(([,v])=>v)
+        .map(([k,v])=>`<span class="entity-chip">${escHtml(k)}: ${escHtml(v)}</span>`).join("");
+      entitiesHtml = `<div class="result-row"><span class="result-key">Extracted Entities</span><div class="entity-chips">${chips}</div></div>`;
+    }
+
+    const card = document.createElement("div");
+    card.className = `result-card ${matched ? "matched" : "no-match"}`;
+    card.innerHTML = `
+      <div class="result-card-header">
+        <span class="result-status ${matched?"status-matched":"status-no-match"}">${matched?"✓ Match":"✗ No Match"}</span>
+        <div class="confidence-bar-wrap">
+          <span class="confidence-label">${confPct}%</span>
+          <div class="confidence-bar"><div class="confidence-fill ${confClass}" style="width:${confPct}%"></div></div>
+        </div>
+      </div>
+      <div class="result-body">
+        <div class="result-row">
+          <span class="result-key">Target URL</span>
+          <span class="result-val ${target_url?"url":"null"}">${target_url?escHtml(target_url):"null"}</span>
+        </div>
+        ${entitiesHtml}
+        <div class="result-row">
+          <span class="result-key">Wayfinder Says</span>
+          <span class="result-val msg">${escHtml(system_message||"")}</span>
+        </div>
+      </div>`;
+
+    const body = $("nav-results-body");
+    const empty = $("nav-empty");
+    if (empty) empty.remove();
+    body.insertBefore(card, body.firstChild);
+  }
+
+  // ── Reset panel on each send ──
+  function resetPanel() {
+    _sets = []; _routines = []; _locResults = [];
+    // Garment
+    $("set-tabs").innerHTML = ""; $("set-tabs").style.display = "none";
+    $("weather-block").style.display = "none";
+    $("vibe-note").style.display = "none";
+    $("outfit-hero-block").style.display = "none";
+    $("garments-label").style.display = "none";
+    $("tips-block").style.display = "none";
+    $("outfit-list").innerHTML = `<div class="panel-empty"><span class="empty-icon">⏳</span>Fetching…</div>`;
+    // Maps
+    $("places-count").style.display = "none";
+    $("loc-tabs").innerHTML = ""; $("loc-tabs").style.display = "none";
+    $("search-info").style.display = "none";
+    $("places-list").innerHTML = `<div class="panel-empty"><span class="empty-icon">⏳</span>Searching nearby…</div>`;
+    // Cosmetics
+    $("skin-profile").style.display = "none";
+    $("routine-tabs").innerHTML = ""; $("routine-tabs").style.display = "none";
+    $("concern-note").style.display = "none";
+    $("cosmetics-tips-block").style.display = "none";
+    $("product-list").innerHTML = `<div class="panel-empty"><span class="empty-icon">⏳</span>Building routine…</div>`;
+    // Nav — don't clear past results, just ensure empty placeholder is gone
+  }
+
+  // ── DOM helpers ──
+  function appendUserMsg(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = `<span class="msg-label">You</span><div class="bubble">${escHtml(text)}</div>`;
+    $("messages").appendChild(div); scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">General Fashion AI</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant"; wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">General Fashion AI</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:#475569;padding:4px 8px;align-self:center;";
+    div.innerHTML = html; $("messages").appendChild(div); scrollBottom();
+  }
+
+  function scrollBottom() { const el = $("messages"); el.scrollTop = el.scrollHeight; }
+  function escHtml(s)  { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function escAttr(s)  { return String(s).replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+  function setStatus(state, label) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  // ── Init ──
+  renderWelcomeChips("garment");
+  connect();
+</script>
+</body>
+</html>
