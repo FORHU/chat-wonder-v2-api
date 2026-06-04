@@ -955,12 +955,12 @@ def _derive_skin_profile(analysis_output: list) -> tuple:
     return skin_type, concerns
 
 
-def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
+def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1, weather_json: str = None, location_json: str = None) -> dict:
     """Fetch cosmetics catalogue and return AI-curated skincare routines based on skin analysis scores.
 
     Each routine covers core slots (CLEANSER, MOISTURIZER) plus optional slots
     (TONER, ESSENCE, EXFOLIANT, SUNSCREEN). Multiple routines have distinct vibes
-    targeting different concerns derived from the skin analysis scores.
+    targeting different concerns derived from the skin analysis scores, weather, and location.
     """
     from openai import OpenAI
 
@@ -984,6 +984,48 @@ def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
             skin_age = analysis.get("skinAge")
         except Exception as e:
             logging.warning(f"[cosmetics] skin_analysis_json parse failed: {e}")
+
+    # Parse climate signals from weather and location
+    climate_rules: list[str] = []
+    climate_ctx = ""
+    if weather_json:
+        try:
+            weather = json.loads(weather_json)
+            humidity = weather.get("humidity")
+            uvi = weather.get("uvi")
+            temp = weather.get("temp")
+            city = weather.get("city") or weather.get("name", "")
+            climate_parts = []
+            if city:
+                climate_parts.append(f"Location: {city}")
+            if temp is not None:
+                climate_parts.append(f"Temperature: {temp}°C")
+            if humidity is not None:
+                climate_parts.append(f"Humidity: {humidity}%")
+            if uvi is not None:
+                climate_parts.append(f"UV index: {uvi}")
+            if climate_parts:
+                climate_ctx = "; ".join(climate_parts)
+            if humidity is not None and float(humidity) > 70:
+                climate_rules.append("High humidity: prefer lightweight, gel-based, oil-free formulas; avoid heavy creams")
+            if uvi is not None and float(uvi) >= 5:
+                climate_rules.append("High UV: ALWAYS include a SUNSCREEN in every routine")
+            if temp is not None and float(temp) < 10:
+                climate_rules.append("Cold weather: prefer richer cream moisturizers; avoid alcohol-heavy toners")
+        except Exception as e:
+            logging.warning(f"[cosmetics] weather_json parse failed: {e}")
+
+    if location_json:
+        try:
+            loc = json.loads(location_json)
+            loc_label = loc.get("city") or loc.get("name") or loc.get("label", "")
+            is_urban = loc.get("urban", False)
+            if is_urban or (loc_label and any(k in loc_label.lower() for k in ("city", "metro", "manila", "jakarta", "bangkok", "singapore", "kuala"))):
+                climate_rules.append("Urban/high-pollution environment: prioritise antioxidant ingredients (Vitamin C, niacinamide) for environmental protection")
+            if loc_label and not climate_ctx:
+                climate_ctx = f"Location: {loc_label}"
+        except Exception as e:
+            logging.warning(f"[cosmetics] location_json parse failed: {e}")
 
     filtered = _fetch_cosmetics_for_profile(skin_type, concerns)
     if not filtered:
@@ -1019,22 +1061,27 @@ def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
     if skin_age is not None:
         score_ctx += f" Skin age: {skin_age}."
 
+    climate_rules_str = ""
+    if climate_rules:
+        climate_rules_str = "\nCLIMATE RULES (apply on top of skin rules):\n" + "\n".join(f"- {r}" for r in climate_rules) + "\n"
+
     system_prompt = (
         f"You are a professional dermatologist and skincare specialist. Curate exactly {n_sets} distinct skincare "
-        f"routine(s) from the provided cosmetics catalogue based on the user's skin profile.\n\n"
+        f"routine(s) from the provided cosmetics catalogue based on the user's skin profile and local climate.\n\n"
         "CRITICAL RULES:\n"
         "1. Each routine must contain EXACTLY ONE product per type slot. Never include two products of the same type in one routine.\n"
         "2. Every routine MUST include CLEANSER and MOISTURIZER (core slots).\n"
         "3. TONER, ESSENCE, EXFOLIANT, SUNSCREEN are optional — include only when beneficial for the concerns.\n"
         "4. Do NOT reuse the same product id across different routines.\n"
-        f"5. Each routine must have a DISTINCT vibe that targets a different aspect of the user's skin concerns.\n\n"
+        f"5. Each routine must have a DISTINCT vibe that targets a different aspect of the user's skin concerns.\n"
+        f"{climate_rules_str}\n"
         "Return a JSON object with this exact structure:\n"
         "{\n"
         '  "sets": [\n'
         '    {\n'
         '      "set_number": 1,\n'
         '      "vibe": "Short vibe name e.g. Acne-Fighting AM Routine",\n'
-        '      "concern_note": "One sentence on how this routine addresses the user\'s skin concerns",\n'
+        '      "concern_note": "One sentence on how this routine addresses the user\'s skin concerns and local climate",\n'
         '      "recommendations": [\n'
         '        {\n'
         '          "id": "...",\n'
@@ -1043,12 +1090,12 @@ def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
         '          "type": "CLEANSER",\n'
         '          "priceAmount": "...",\n'
         '          "priceUnit": "...",\n'
-        '          "reason": "Why this product suits the user\'s skin type and concerns"\n'
+        '          "reason": "Why this product suits the user\'s skin type, concerns, and climate"\n'
         '        }\n'
         '      ]\n'
         '    }\n'
         '  ],\n'
-        '  "skin_notes": "Brief markdown overview of what the analysis reveals about the user\'s skin",\n'
+        '  "skin_notes": "Brief markdown overview of what the analysis and climate reveal about the user\'s skin needs",\n'
         '  "routine_tips": ["tip1", "tip2"]\n'
         "}\n\n"
         "Additional rules:\n"
@@ -1059,9 +1106,10 @@ def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1) -> dict:
         "- Only use products from the provided catalogue — do not invent items\n"
         f"- Return exactly {n_sets} routine(s) in the sets array"
     )
+    climate_prompt = f"\nClimate context: {climate_ctx}" if climate_ctx else ""
     user_prompt = (
         f"Skin type: {skin_type}\n"
-        f"{concerns_ctx}{score_ctx}\n"
+        f"{concerns_ctx}{score_ctx}{climate_prompt}\n"
         f"Routines requested: {n_sets}\n\n"
         f"Cosmetics catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
         f"Curate {n_sets} distinct skincare routine(s) and return the JSON."
