@@ -1172,7 +1172,9 @@ def _google_geocode(location: str, api_key: str) -> tuple:
     try:
         url = (
             f"{_GOOGLE_GEOCODING_API_BASE}/json"
-            f"?address={urllib.parse.quote(location)}&key={api_key}"
+            f"?address={urllib.parse.quote(location)}"
+            f"&region=PH&components=country:PH"
+            f"&key={api_key}"
         )
         data = _http_get_json(url)
         results = data.get("results", [])
@@ -1251,9 +1253,9 @@ def _search_single_location(api_key: str, lat: float, lng: float, query: str, ra
 
 
 def search_nearby_places(
-    lat: float,
-    lng: float,
     query: str,
+    lat: float = 0.0,
+    lng: float = 0.0,
     radius: int = 1500,
     location_name: str = None,
 ) -> dict:
@@ -1289,13 +1291,56 @@ def search_nearby_places(
                 "results": results,
             }
 
-        # Single location
+        # Single named destination: embed location in the text search query directly.
+        # This avoids geocoding ambiguity (e.g. "La Union" geocoding to a barangay
+        # instead of La Union Province).
         if location_name:
-            glat, glng = _google_geocode(location_name, api_key)
-            logging.info(f"[search_nearby_places] geocoded '{location_name}' -> ({glat}, {glng})")
-            lat, lng = glat, glng
+            full_query = f"{query} in {location_name}"
+            url = (
+                f"{_GOOGLE_PLACES_API_BASE}/textsearch/json"
+                f"?query={urllib.parse.quote(full_query)}"
+                f"&key={api_key}"
+            )
+            logging.info(f"[search_nearby_places] text search '{full_query}'")
+            data = _http_get_json(url)
+            status = data.get("status")
+            if status not in ("OK", "ZERO_RESULTS"):
+                return {"success": False, "location_label": location_name, "error": f"Google Places API error: {status}"}
+            places = []
+            for p in data.get("results", [])[:20]:
+                loc = p.get("geometry", {}).get("location", {})
+                photos = p.get("photos", [])
+                opening = p.get("opening_hours", {})
+                photo_ref = photos[0].get("photo_reference", "") if photos else ""
+                photo_url = (
+                    f"{_GOOGLE_PLACES_API_BASE}/photo?maxwidth=400"
+                    f"&photo_reference={photo_ref}&key={api_key}"
+                ) if photo_ref else ""
+                places.append({
+                    "name": p.get("name", ""),
+                    "address": p.get("vicinity") or p.get("formatted_address", ""),
+                    "rating": p.get("rating"),
+                    "user_ratings_total": p.get("user_ratings_total"),
+                    "place_id": p.get("place_id", ""),
+                    "types": p.get("types", []),
+                    "lat": loc.get("lat"),
+                    "lng": loc.get("lng"),
+                    "open_now": opening.get("open_now"),
+                    "photo_url": photo_url,
+                    "price_level": p.get("price_level"),
+                    "phone_number": None,
+                    "website": None,
+                })
+            return {
+                "success": True,
+                "query": full_query,
+                "location_label": location_name,
+                "search_mode": "text",
+                "total_results": len(places),
+                "places": places,
+            }
 
-        location_label = location_name if location_name else f"{lat:.4f},{lng:.4f}"
+        location_label = f"{lat:.4f},{lng:.4f}"
         return _search_single_location(api_key, lat, lng, query, radius, location_label)
 
     except Exception as e:
