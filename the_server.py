@@ -472,8 +472,10 @@ def process_persona(user_input: str):
             "For each product in the routine, write its name in bold followed by the reason:\n"
             "**[Product Name]** (brand) — [reason]\n\n"
             "Do NOT include image tags or image URLs in your text response — images are handled separately by the frontend.\n\n"
-            "Repeat the ## Routine N — [Vibe] header for each additional routine. "
-            "Start with a brief summary of what the skin analysis reveals. Keep the tone friendly and supportive."
+            "Repeat the ## Routine N — [Vibe] header for each additional routine.\n\n"
+            "RESPONSE LENGTH — Your opening chat message before the routines must be 3–4 sentences. "
+            "Briefly summarise what the skin analysis reveals, why these routines suit their skin profile, and invite them to explore the results. "
+            "Keep the tone warm and supportive. Do not repeat or list the products in text — the cards handle that."
         )
 
     elif user_input.lower().startswith("[general fashion]"):
