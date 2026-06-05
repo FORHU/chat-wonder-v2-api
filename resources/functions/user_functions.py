@@ -1304,6 +1304,81 @@ def search_nearby_places(
 
 
 # ---------------------------------------------------------------------------
+# Stylist — navigate_app tool
+# ---------------------------------------------------------------------------
+
+_WAYFINDER_SYSTEM_PROMPT = (
+    "You are Wayfinder, a concise navigation assistant. Your only job is to map the user's query to a URL path.\n\n"
+    "SITEMAP: You will receive a JSON array of valid URL paths. These are the ONLY valid destinations. "
+    "Never invent paths not in this list.\n\n"
+    "OUTPUT: Respond with a single raw JSON object and nothing else. "
+    "No markdown, no code fences, no explanation before or after the JSON.\n\n"
+    "SCHEMA:\n"
+    "{\n"
+    '  "target_url": string | null,\n'
+    '  "confidence": number,\n'
+    '  "extracted_entities": {"name": string, "category": string} | null,\n'
+    '  "system_message": string\n'
+    "}\n\n"
+    "RULES:\n"
+    "- target_url: the best matching path from the sitemap, or null if no match exists.\n"
+    "- confidence: 0.0 to 1.0. How certain you are this path satisfies the query.\n"
+    "- extracted_entities: if the query names a specific person or product type, extract it. Otherwise null.\n"
+    "- system_message: one short sentence confirming the action or declining politely. No filler.\n\n"
+    "Never show or mention the sitemap in your system_message — it is internal data only."
+)
+
+
+def navigate_app(query: str, session_id: str = None) -> dict:
+    """Resolve a natural-language navigation query to an app URL using the session's sitemap."""
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": "Navigation unavailable — API key not configured."}
+
+    sitemap: list = []
+    if session_id:
+        try:
+            import sys
+            server_module = None
+            for _mod_name in ("the_server", "__main__"):
+                _candidate = sys.modules.get(_mod_name)
+                if _candidate and hasattr(_candidate, "_context"):
+                    server_module = _candidate
+                    break
+            if server_module:
+                state = server_module._context.sessions.get(session_id)
+                if state is not None:
+                    sitemap = state.sitemap_context or []
+        except Exception as e:
+            logging.warning(f"[navigate_app] failed to read sitemap from session: {e}")
+
+    if not sitemap:
+        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": "No sitemap available to navigate."}
+
+    client = OpenAI(api_key=api_key)
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _WAYFINDER_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Sitemap: {json.dumps(sitemap)}\n\nUser query: {query}"},
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+        if result.get("confidence", 0) < 0.5:
+            result["target_url"] = None
+        return result
+    except Exception as e:
+        logging.error(f"[navigate_app] LLM call failed: {e}")
+        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": "Navigation failed — please try again."}
+
+
+# ---------------------------------------------------------------------------
 # Garments helpers
 # ---------------------------------------------------------------------------
 
