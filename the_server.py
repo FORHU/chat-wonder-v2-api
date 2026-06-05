@@ -457,7 +457,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["recommend_garments", "recommend_cosmetics", "navigate_app"]
+        stylist_whitelist = ["recommend_garments", "recommend_cosmetics", "search_nearby_places", "navigate_app"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -465,7 +465,7 @@ def process_persona(user_input: str):
             "Your scope: fashion, outfits, beauty, skincare, and self-expression. "
             "You are warm, direct, and opinionated. You have taste and you share it. "
             "You don't hedge — when you like something, say so. When something doesn't fit, redirect with care. "
-            "Keep conversational responses to 2–4 sentences unless the user asks for more.\n\n"
+            "Keep conversational responses to 1–2 sentences unless the user asks for more.\n\n"
             "TOOL USE — use the appropriate tool based on context and user intent:\n\n"
             "- If [FRONTEND_WEATHER:{...}] is present and the user's intent involves outfits or dressing: "
             "call recommend_garments. Extract the weather JSON exactly as-is and pass it as weather_json. "
@@ -474,7 +474,11 @@ def process_persona(user_input: str):
             "- If [SKIN_ANALYSIS:{...}] is present and the user's intent involves skincare or beauty: "
             "call recommend_cosmetics. Extract the skin analysis JSON exactly as-is and pass it as skin_analysis_json. "
             "After the tool completes, respond with exactly 1 warm sentence.\n\n"
-            "- If the user explicitly wants to go somewhere in the app (not an outfit or cosmetics request): "
+            "- If [USER_LOCATION:{...}] is present and the user wants to find nearby places: "
+            "call search_nearby_places. Extract lat/lng from the JSON and pass them to the function. "
+            "Respond with 1–2 sentences summarising what was found. "
+            "Do NOT list places in text — the frontend renders place cards.\n\n"
+            "- If the user explicitly wants to go somewhere in the app (not an outfit, cosmetics, or places request): "
             "call navigate_app. Pass a clear description of their destination as the query. "
             "After the tool completes, respond with exactly 1 brief acknowledgment.\n\n"
             "NEVER show, repeat, or mention any annotation ([FRONTEND_WEATHER:...], [USER_LOCATION:...], "
@@ -1662,6 +1666,8 @@ def chat(request: ChatRequest):
                     user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
             except Exception:
                 pass
+            if session_id and session_id in _context.sessions:
+                _context.sessions[session_id].last_maps_result = []
         if request.skin_analysis:
             try:
                 user_input = f"[SKIN_ANALYSIS:{json.dumps(request.skin_analysis, ensure_ascii=False)}]\n\n{user_input}"
@@ -1748,6 +1754,8 @@ def chat(request: ChatRequest):
             state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
         elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
             state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+        elif state.last_maps_result and not (state.last_nav_result or {}).get("target_url"):
+            state.last_nav_result = {"target_url": "/map", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -1758,7 +1766,7 @@ def chat(request: ChatRequest):
         "source_metadata": state.source_metadata,
         "garment_sets": state.last_garment_result if persona in ("garment", "stylist") and state.last_garment_result else None,
         "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "stylist") and state.last_cosmetics_result else None,
-        "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
+        "places_results": state.last_maps_result if persona in ("maps", "stylist") and state.last_maps_result else None,
         "nav_result": state.last_nav_result if persona in ("nav", "stylist") and state.last_nav_result else None,
     }
 
@@ -2075,6 +2083,7 @@ async def chat_stream(websocket: WebSocket):
                             user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
                         pass
+                    state.last_maps_result = []
                 if data.get("skin_analysis"):
                     try:
                         user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
@@ -2187,6 +2196,8 @@ async def chat_stream(websocket: WebSocket):
                         state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                     elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+                    elif state.last_maps_result and not (state.last_nav_result or {}).get("target_url"):
+                        state.last_nav_result = {"target_url": "/map", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                 if persona in ("garment", "stylist") and state.last_garment_result:
                     await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
@@ -2194,7 +2205,7 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
                 if persona in ("cosmetics", "stylist") and state.last_cosmetics_result:
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
-                if persona == "maps" and state.last_maps_result:
+                if persona in ("maps", "stylist") and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
                 if persona == "stylist" and state.last_nav_result:
                     await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
