@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Glass-Box Tracer — chat-wonder-v2-api local</title>
+    <style>
+        * { box-sizing: border-box; }
+
+        @keyframes fadeSlideIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .turn-group { animation: fadeSlideIn 0.2s ease-out; }
+        .entry      { animation: fadeSlideIn 0.15s ease-out; }
+
+        body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; padding: 20px; background: #0d1117; color: #cdd9e5; margin: 0; }
+
+        .header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+        h2 { margin: 0; font-size: 17px; color: #e6edf3; }
+        .subtitle { font-size: 12px; color: #484f58; margin-bottom: 16px; }
+
+        .status-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+        .dot { width: 9px; height: 9px; border-radius: 50%; background: #484f58; flex-shrink: 0; }
+        .dot.connected { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+        .dot.error { background: #e05252; }
+        .status-text { font-size: 12px; color: #8b949e; }
+
+        .toolbar { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+        .btn { padding: 4px 12px; cursor: pointer; border: 1px solid #30363d; border-radius: 5px;
+               background: #161b22; color: #8b949e; font-size: 12px; }
+        .btn:hover { border-color: #8b949e; color: #cdd9e5; }
+
+        .filter-wrap { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; }
+        #session-filter { background: #161b22; border: 1px solid #30363d; border-radius: 4px;
+                          color: #cdd9e5; padding: 3px 8px; font-size: 12px; min-width: 180px; }
+
+        /* Persistent AI status bar */
+        #ai-status-bar {
+            display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+            background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+            padding: 7px 12px; margin-bottom: 12px; font-size: 12px;
+        }
+        #ai-status-bar .sb-label { color: #484f58; }
+        #ai-status-bar .sb-value { color: #e6edf3; font-weight: 600; }
+        #ai-status-bar .sb-sep { color: #30363d; margin: 0 4px; }
+
+        .legend { display: flex; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+        .leg { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #8b949e; }
+        .leg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+        #trace { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+                 padding: 16px; min-height: 480px; overflow-y: auto;
+                 max-height: calc(100vh - 240px); }
+        .empty-msg { color: #484f58; font-size: 13px; font-family: monospace; }
+
+        /* Turn group card */
+        .turn-group { margin-bottom: 18px; border: 1px solid #21262d; border-radius: 8px; overflow: hidden; }
+        .turn-header {
+            display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+            background: #1a1f2e; padding: 10px 14px; cursor: pointer;
+            border-left: 3px solid #9e7dff; user-select: none;
+        }
+        .turn-header:hover { background: #1f2640; }
+        .turn-toggle { font-size: 10px; color: #484f58; flex-shrink: 0; transition: transform 0.15s; }
+        .turn-group.collapsed .turn-toggle { transform: rotate(-90deg); }
+        .turn-q { font-size: 13px; color: #e6edf3; flex: 1; white-space: pre-wrap; word-break: break-word; }
+        .turn-meta { font-size: 11px; color: #484f58; font-family: monospace; flex-shrink: 0; }
+        .turn-body { padding: 12px 14px 6px; background: #161b22; }
+        .turn-group.collapsed .turn-body { display: none; }
+
+        .entry { margin-bottom: 14px; border-left: 3px solid #30363d; padding: 8px 0 8px 14px; }
+        .entry.retrieval { border-left-color: #39d353; background: linear-gradient(to right, rgba(57,211,83,0.06), transparent); }
+        .entry.cognition { border-left-color: #388bfd; background: linear-gradient(to right, rgba(56,139,253,0.06), transparent); }
+        .entry.control   { border-left-color: #d29922; background: linear-gradient(to right, rgba(210,153,34,0.06), transparent); }
+        .entry.action    { border-left-color: #f0883e; background: linear-gradient(to right, rgba(240,136,62,0.06), transparent); }
+        .entry.memory    { border-left-color: #bc8cff; background: linear-gradient(to right, rgba(188,140,255,0.06), transparent); }
+
+        /* REASON entries — AI's genuine chain-of-thought */
+        .entry.reason { background: #111827; border-left-color: #60a5fa; }
+        .entry.reason .summary-body {
+            font-style: italic; color: #93c5fd;
+            border-left: 2px solid #388bfd; padding-left: 10px; margin-left: 2px;
+        }
+
+        /* Confidence footer — end-of-turn grounding summary */
+        .entry.confidence { background: #0a1a0a; border-left-color: #3fb950; margin-top: 8px; }
+        .entry.confidence .summary-body { color: #7ee787; font-size: 12px; }
+
+        /* Timing badge */
+        .turn-elapsed { font-size: 10px; color: #30363d; font-family: monospace; margin-left: auto; flex-shrink: 0; }
+
+        .entry-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+        .badge { font-size: 10px; font-weight: 700; letter-spacing: 0.07em; padding: 2px 6px;
+                 border-radius: 3px; cursor: help; }
+        .badge.request   { background: #1e1040; color: #9e7dff; box-shadow: 0 0 8px rgba(158,125,255,0.35); }
+        .badge.retrieval { background: #0d2210; color: #39d353; box-shadow: 0 0 8px rgba(57,211,83,0.35); }
+        .badge.cognition { background: #0d1b2e; color: #388bfd; box-shadow: 0 0 8px rgba(56,139,253,0.35); }
+        .badge.control   { background: #2b2000; color: #d29922; box-shadow: 0 0 8px rgba(210,153,34,0.35); }
+        .badge.action    { background: #3d1f00; color: #f0883e; box-shadow: 0 0 8px rgba(240,136,62,0.35); }
+        .badge.memory    { background: #1f0e40; color: #bc8cff; box-shadow: 0 0 8px rgba(188,140,255,0.35); }
+
+        .plain-label { font-size: 11px; color: #8b949e; font-style: italic; }
+        .ts   { font-size: 11px; color: #484f58; font-family: monospace; }
+
+        /* Human-readable summary — primary display */
+        .summary-body {
+            font-size: 13px; color: #e6edf3; line-height: 1.6;
+            white-space: pre-wrap; word-break: break-word; margin-bottom: 6px;
+        }
+
+        /* Collapsible technical detail */
+        details.tech-detail { margin-top: 4px; }
+        details.tech-detail > summary {
+            font-size: 11px; color: #484f58; cursor: pointer; user-select: none;
+            list-style: none; display: flex; align-items: center; gap: 4px;
+        }
+        details.tech-detail > summary::-webkit-details-marker { display: none; }
+        details.tech-detail > summary::before { content: '▶'; font-size: 9px; transition: transform 0.15s; }
+        details.tech-detail[open] > summary::before { content: '▼'; }
+        details.tech-detail > summary:hover { color: #8b949e; }
+        .tech-text {
+            font-family: monospace; font-size: 11px; color: #8b949e;
+            white-space: pre-wrap; word-break: break-word; margin: 6px 0 0 0;
+            padding: 8px; background: #0d1117; border-radius: 4px; border: 1px solid #21262d;
+        }
+        .tech-json {
+            font-family: monospace; font-size: 10px; color: #484f58;
+            white-space: pre-wrap; word-break: break-word; margin: 4px 0 0 0;
+            padding: 8px; background: #0d1117; border-radius: 4px; border: 1px solid #21262d;
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h2>Glass-Box Tracer — local</h2>
+</div>
+<div class="subtitle">Pointing at <strong style="color:#8b949e">http://localhost:8000</strong> — start chat-wonder-v2-api locally, then trigger requests via Swagger or any client.</div>
+
+<div class="status-bar">
+    <div class="dot" id="dot"></div>
+    <span class="status-text" id="status-text">Connecting…</span>
+    <div class="toolbar">
+        <div class="filter-wrap">
+            <label for="session-filter">Session:</label>
+            <select id="session-filter"><option value="">All sessions</option></select>
+        </div>
+        <button class="btn" onclick="clearTrace()">Clear</button>
+    </div>
+</div>
+
+<div id="ai-status-bar">
+    <span class="sb-label">Active persona:</span>
+    <span class="sb-value" id="sb-persona">—</span>
+    <span class="sb-sep">|</span>
+    <span class="sb-label">Tools:</span>
+    <span class="sb-value" id="sb-tools">—</span>
+</div>
+
+<div class="legend">
+    <div class="leg"><div class="leg-dot" style="background:#9e7dff"></div> Request</div>
+    <div class="leg"><div class="leg-dot" style="background:#39d353"></div> Retrieval</div>
+    <div class="leg"><div class="leg-dot" style="background:#388bfd"></div> Cognition</div>
+    <div class="leg"><div class="leg-dot" style="background:#d29922"></div> Control</div>
+    <div class="leg"><div class="leg-dot" style="background:#f0883e"></div> Action</div>
+    <div class="leg"><div class="leg-dot" style="background:#bc8cff"></div> Memory</div>
+</div>
+
+<div id="trace">
+    <div class="empty-msg" id="empty-msg">Waiting for function calls…</div>
+</div>
+
+<script>
+    const traceDiv   = document.getElementById('trace');
+    const dot        = document.getElementById('dot');
+    const statusText = document.getElementById('status-text');
+    const filterSel  = document.getElementById('session-filter');
+
+    const API_HOST = 'http://localhost:8000';
+    const seenSessions = new Set();
+    let es;
+    let currentTurnEl = null;
+    let turnStartTs   = null;
+
+    const TYPE_LABELS = {
+        request:   'User asked a question',
+        retrieval: 'AI checked its knowledge sources',
+        cognition: 'AI is thinking',
+        control:   'Safety check',
+        action:    'AI used a tool',
+        memory:    'AI remembered a result',
+    };
+
+    const TYPE_TOOLTIPS = {
+        request:   'The REQUEST stage records what the user asked and which AI mode was activated.',
+        retrieval: 'The RETRIEVAL stage shows whether the AI consulted a knowledge base or relied solely on its training.',
+        cognition: 'The COGNITION stage reveals the AI\'s reasoning — what it is thinking and why it made each decision.',
+        control:   'The CONTROL stage enforces safety rules, such as preventing the AI from repeating the same action twice.',
+        action:    'The ACTION stage records every tool the AI used and the exact results it received.',
+        memory:    'The MEMORY stage confirms what facts the AI has stored for use in its final answer.',
+    };
+
+    const STAGE_LABEL = {
+        request:   '⬤ REQUEST',
+        retrieval: '◎ RETRIEVAL',
+        cognition: '◈ COGNITION',
+        control:   '▣ CONTROL',
+        action:    '▶ ACTION',
+        memory:    '◉ MEMORY',
+    };
+
+    function connect() {
+        es = new EventSource(`${API_HOST}/trace-stream`);
+
+        es.onopen = () => {
+            dot.className = 'dot connected';
+            statusText.textContent = 'Connected — watching chat-wonder-v2-api R-CCAM events…';
+        };
+
+        es.onmessage = (event) => {
+            let payload;
+            try { payload = JSON.parse(event.data); } catch { return; }
+            if (payload.type === 'ping' || payload.type === 'connected') return;
+            trackSession(payload.session_id);
+            maybeUpdateStatusBar(payload);
+            appendEntry(payload);
+        };
+
+        es.onerror = () => {
+            dot.className = 'dot error';
+            statusText.textContent = 'Connection lost — retrying…';
+            es.close();
+            setTimeout(connect, 3000);
+        };
+    }
+
+    function trackSession(sid) {
+        if (!sid || seenSessions.has(sid)) return;
+        seenSessions.add(sid);
+        const opt = document.createElement('option');
+        opt.value = sid;
+        opt.textContent = sid.slice(0, 8) + '…';
+        filterSel.appendChild(opt);
+    }
+
+    function maybeUpdateStatusBar(payload) {
+        if (payload.type !== 'cognition') return;
+        const text = payload.text || '';
+        if (!text.startsWith('Mode:')) return;
+
+        const modeMatch = text.match(/Mode:\s*([^|]+)/);
+        const persona = modeMatch ? modeMatch[1].trim() : '—';
+
+        const toolMatches = [...text.matchAll(/•\s+(\S+):/g)];
+        const tools = toolMatches.length
+            ? toolMatches.map(m => m[1]).join(', ')
+            : 'none';
+
+        document.getElementById('sb-persona').textContent = persona;
+        document.getElementById('sb-tools').textContent = tools;
+        document.getElementById('ai-status-bar').style.display = 'flex';
+    }
+
+    filterSel.addEventListener('change', () => {
+        const selected = filterSel.value;
+        document.querySelectorAll('.turn-group[data-sid]').forEach(el => {
+            el.style.display = (!selected || el.dataset.sid === selected) ? '' : 'none';
+        });
+    });
+
+    function buildTurnGroup(payload) {
+        const group = document.createElement('div');
+        group.className = 'turn-group';
+        const sid = payload ? (payload.session_id || '') : '';
+        group.dataset.sid = sid;
+
+        const activeFilter = filterSel.value;
+        if (activeFilter && sid !== activeFilter) group.style.display = 'none';
+
+        const ts    = payload ? new Date(payload.ts * 1000).toLocaleTimeString([], { hour12: false }) : '—';
+        const short = sid ? sid.slice(0, 8) + '…' : '—';
+        const q     = payload ? (payload.summary || payload.text || '') : '(pre-session events)';
+
+        group.innerHTML =
+            `<div class="turn-header" onclick="toggleTurn(this)">` +
+            `<span class="turn-toggle">▼</span>` +
+            `<span class="turn-q">${escapeHtml(q)}</span>` +
+            `<span class="turn-meta">${escapeHtml(short)} · ${ts}</span>` +
+            `</div>` +
+            `<div class="turn-body"></div>`;
+
+        return group;
+    }
+
+    function buildEntry(payload) {
+        const ts           = new Date(payload.ts * 1000).toLocaleTimeString([], { hour12: false });
+        const type         = payload.type || 'cognition';
+        const isReason     = type === 'cognition' && (payload.text || '').startsWith('Reasoning:');
+        const isConfidence = type === 'cognition' && (payload.text || '').startsWith('Turn complete');
+        const label        = STAGE_LABEL[type] || type.toUpperCase();
+        const plLabel      = isReason ? "AI's own reasoning" : (TYPE_LABELS[type] || '');
+        const tooltip      = TYPE_TOOLTIPS[type] || '';
+        const elapsed      = (turnStartTs !== null) ? (payload.ts - turnStartTs) : null;
+
+        const displayText = (payload.summary && payload.summary.trim())
+            ? payload.summary
+            : (payload.text || '');
+
+        const el = document.createElement('div');
+        let cls = `entry ${type}`;
+        if (isReason) cls += ' reason';
+        if (isConfidence) cls += ' confidence';
+        el.className = cls;
+
+        el.innerHTML =
+            `<div class="entry-header">` +
+            `<span class="badge ${type}" title="${escapeHtml(tooltip)}">${escapeHtml(label)}</span>` +
+            (plLabel ? `<span class="plain-label">• ${escapeHtml(plLabel)}</span>` : '') +
+            `<span class="ts">${ts}</span>` +
+            (elapsed !== null ? `<span class="turn-elapsed">+${elapsed.toFixed(1)}s</span>` : '') +
+            `</div>` +
+            `<div class="summary-body">${escapeHtml(displayText)}</div>` +
+            `<details class="tech-detail">` +
+            `<summary>Technical detail</summary>` +
+            `<pre class="tech-text">${escapeHtml(payload.text || '')}</pre>` +
+            `<pre class="tech-json">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>` +
+            `</details>`;
+
+        return el;
+    }
+
+    function appendEntry(payload) {
+        const emptyMsg = document.getElementById('empty-msg');
+        if (emptyMsg) emptyMsg.remove();
+
+        const type = payload.type || 'cognition';
+
+        if (type === 'request') {
+            turnStartTs   = payload.ts;
+            const group   = buildTurnGroup(payload);
+            currentTurnEl = group.querySelector('.turn-body');
+            traceDiv.appendChild(group);
+            traceDiv.scrollTop = traceDiv.scrollHeight;
+            return;
+        }
+
+        if (!currentTurnEl) {
+            turnStartTs   = payload.ts;
+            const group   = buildTurnGroup(null);
+            currentTurnEl = group.querySelector('.turn-body');
+            traceDiv.appendChild(group);
+        }
+
+        currentTurnEl.appendChild(buildEntry(payload));
+        traceDiv.scrollTop = traceDiv.scrollHeight;
+    }
+
+    function toggleTurn(headerEl) {
+        headerEl.closest('.turn-group').classList.toggle('collapsed');
+    }
+
+    function clearTrace() {
+        traceDiv.innerHTML = '<div class="empty-msg" id="empty-msg">Waiting for function calls…</div>';
+        currentTurnEl = null;
+        turnStartTs   = null;
+        seenSessions.clear();
+        while (filterSel.options.length > 1) filterSel.remove(1);
+        document.getElementById('ai-status-bar').style.display = 'none';
+        document.getElementById('sb-persona').textContent = '—';
+        document.getElementById('sb-tools').textContent = '—';
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    connect();
+</script>
+</body>
+</html>
