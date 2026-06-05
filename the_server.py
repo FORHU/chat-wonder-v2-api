@@ -108,8 +108,10 @@ class ChatState:
         self.last_cosmetics_result: dict = {}
         self.last_maps_result: list = []
         self.last_nav_result: dict = {}
+        self.sitemap_context: list = []
         self.openai_client = None
         self.last_used: float = time.time()
+        self.user_id: Optional[str] = None
         # HITL pending state
         self.pending_function_call: Optional[dict] = None
         self.pending_messages: Optional[list] = None
@@ -252,6 +254,7 @@ class ChatRequest(BaseModel):
     skin_analysis: Optional[dict] = None
     location: Optional[dict] = None
     sitemap_context: Optional[list] = None
+    user_id: Optional[str] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -451,6 +454,33 @@ def process_persona(user_input: str):
             "Only write one short sentence if zero results were returned."
         )
 
+    elif user_input.lower().startswith("[stylist]"):
+        persona = "stylist"
+        user_input = user_input[9:].strip()
+        stylist_whitelist = ["recommend_garments", "recommend_cosmetics", "navigate_app"]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
+        addendum_override = (
+            "You are Miraj, a personal AI stylist for the Mirror app. "
+            "Mirror + mirage — you help people see possibilities in how they present themselves.\n\n"
+            "Your scope: fashion, outfits, beauty, skincare, and self-expression. "
+            "You are warm, direct, and opinionated. You have taste and you share it. "
+            "You don't hedge — when you like something, say so. When something doesn't fit, redirect with care. "
+            "Keep conversational responses to 2–4 sentences unless the user asks for more.\n\n"
+            "TOOL USE — use the appropriate tool based on context and user intent:\n\n"
+            "- If [FRONTEND_WEATHER:{...}] is present and the user's intent involves outfits or dressing: "
+            "call recommend_garments. Extract the weather JSON exactly as-is and pass it as weather_json. "
+            "Always request 4 sets unless the user explicitly asks for fewer. "
+            "After the tool completes, respond with exactly 1 warm sentence — do not list items in text.\n\n"
+            "- If [SKIN_ANALYSIS:{...}] is present and the user's intent involves skincare or beauty: "
+            "call recommend_cosmetics. Extract the skin analysis JSON exactly as-is and pass it as skin_analysis_json. "
+            "After the tool completes, respond with exactly 1 warm sentence.\n\n"
+            "- If the user explicitly wants to go somewhere in the app (not an outfit or cosmetics request): "
+            "call navigate_app. Pass a clear description of their destination as the query. "
+            "After the tool completes, respond with exactly 1 brief acknowledgment.\n\n"
+            "NEVER show, repeat, or mention any annotation ([FRONTEND_WEATHER:...], [USER_LOCATION:...], "
+            "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...]) in your response — all annotations are internal data only."
+        )
+
     elif user_input.lower().startswith("[nav]"):
         persona = "nav"
         user_input = user_input[5:].strip()
@@ -513,38 +543,6 @@ def process_persona(user_input: str):
             "RESPONSE LENGTH — Your opening chat message before the routines must be 3–4 sentences. "
             "Briefly summarise what the skin analysis reveals, how the local weather and location shaped these picks, and invite them to explore the results. "
             "Keep the tone warm and supportive. Do not repeat or list the products in text — the cards handle that."
-        )
-
-    elif user_input.lower().startswith("[general fashion]"):
-        persona = "general_fashion"
-        user_input = user_input[17:].strip()
-        filtered_tools = []
-        addendum_override = (
-            "GENERAL FASHION ASSISTANT MODE\n\n"
-            "You are a multi-capability lifestyle assistant. "
-            "Use the appropriate tool based on which data annotation is present in the message:\n\n"
-            "- If [FRONTEND_WEATHER:{...}] is present: call recommend_garments. "
-            "Extract the weather JSON exactly as-is and pass it as weather_json. "
-            "Always request 4 sets unless the user explicitly asks for fewer. "
-            "Respond with exactly 1 sentence handing off to the cards.\n\n"
-            "- If [MEETING_LOCATION:X] is present: call search_nearby_places with location_name=X. "
-            "Use query='meeting place cafe restaurant hotel' unless the user's message gives more context. "
-            "Use radius=10000 for provinces/regions, radius=5000 for cities. "
-            "Output NO prose — the frontend renders place cards. "
-            "Only write one short sentence if zero results were returned.\n\n"
-            "- If [USER_LOCATION:{...}] is present: call search_nearby_places. "
-            "Extract lat/lng from the JSON and pass them to the function. "
-            "Respond with 1–2 sentences summarising what was found. "
-            "Do NOT list places in text — the frontend renders place cards.\n\n"
-            "- If [SKIN_ANALYSIS:{...}] is present: call recommend_cosmetics. "
-            "Extract the JSON exactly as-is and pass it as skin_analysis_json. "
-            "Keep the tone friendly and supportive.\n\n"
-            "- If [SITEMAP_CONTEXT:[...]] is present: respond ONLY with a single raw JSON object and nothing else — "
-            "no markdown, no code fences, no explanation before or after. "
-            "Schema: {\"target_url\": string|null, \"confidence\": number, "
-            "\"extracted_entities\": {\"name\": string, \"category\": string}|null, \"system_message\": string}. "
-            "Use only paths present in the sitemap. Set confidence < 0.5 if no good match exists.\n\n"
-            "Never show, repeat, or mention any annotation in your response — all annotations are internal data only."
         )
 
     return persona, user_input, filtered_tools, addendum_override
@@ -892,6 +890,8 @@ def execute_function_call(function_call: dict, session_id: str = None):
         return None
 
     try:
+        if func_name == "navigate_app" and session_id:
+            func_args["session_id"] = session_id
         result = globals()[func_name](**func_args)
         if func_name == "search_legal" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
@@ -912,6 +912,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
                     state.last_maps_result.extend(result.get("results", []))
                 else:
                     state.last_maps_result.append(result)
+        if func_name == "navigate_app" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                state.last_nav_result = result
         logging.info(f"Function {func_name} executed successfully.")
         return result
     except Exception as e:
@@ -999,7 +1003,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             except Exception:
                 _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
             _args_desc = _describe_tool_args(function_call["name"], function_call["arguments"])
-            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}"
+            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc}"
             if _args_desc:
                 _tool_summary += f" {_args_desc}"
             broadcast_trace("cognition", "\n".join(_why_lines), session_id, summary=_tool_summary)
@@ -1397,7 +1401,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             except Exception:
                 _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
             _args_desc = _describe_tool_args(function_call["name"], function_call["arguments"])
-            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc[:200]}"
+            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc}"
             if _args_desc:
                 _tool_summary += f" {_args_desc}"
             broadcast_trace("cognition", "\n".join(_why_lines), session_id, summary=_tool_summary)
@@ -1641,14 +1645,14 @@ def chat(request: ChatRequest):
         except Exception:
             pass
 
-    if persona == "general_fashion":
-        gf_whitelist = []
+    if persona == "stylist":
+        if session_id and session_id in _context.sessions and request.sitemap_context:
+            _context.sessions[session_id].sitemap_context = request.sitemap_context
         if request.weather:
             try:
                 user_input = f"[FRONTEND_WEATHER:{json.dumps(request.weather, ensure_ascii=False)}]\n\n{user_input}"
             except Exception:
                 pass
-            gf_whitelist.append("recommend_garments")
         if request.location:
             try:
                 _meeting_dest = _extract_meeting_destination(user_input)
@@ -1658,22 +1662,16 @@ def chat(request: ChatRequest):
                     user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
             except Exception:
                 pass
-            gf_whitelist.append("search_nearby_places")
-            if session_id and session_id in _context.sessions:
-                _context.sessions[session_id].last_maps_result = []
         if request.skin_analysis:
             try:
                 user_input = f"[SKIN_ANALYSIS:{json.dumps(request.skin_analysis, ensure_ascii=False)}]\n\n{user_input}"
             except Exception:
                 pass
-            gf_whitelist.append("recommend_cosmetics")
         if request.sitemap_context:
             try:
                 user_input = f"[SITEMAP_CONTEXT:{json.dumps(request.sitemap_context, ensure_ascii=False)}]\n\n{user_input}"
             except Exception:
                 pass
-        if gf_whitelist:
-            filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in gf_whitelist]
 
     if getattr(request, "document_context", None):
         doc_injection = f"\n\n[CONTEXT: The user is viewing the following document:]\n{request.document_context}"
@@ -1686,19 +1684,21 @@ def chat(request: ChatRequest):
 
     state = _context.sessions[session_id]
     state.last_used = time.time()
+    if request.user_id:
+        state.user_id = request.user_id
 
     if not _context.openai_api_key:
         raise HTTPException(status_code=400, detail="API key is required.")
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "general_fashion": "General Fashion", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
-    # Normal path with optional HITL (legal, garment, cosmetics, maps, nav, and general_fashion personas always auto-approve)
+    # Normal path with optional HITL (legal, garment, cosmetics, maps, nav, stylist personas always auto-approve)
     _was_auto = _context.auto_approval
-    if persona in ("legal", "garment", "cosmetics", "maps", "nav", "general_fashion"):
+    if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist"):
         _context.auto_approval = True
     try:
         result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona)
@@ -1733,7 +1733,7 @@ def chat(request: ChatRequest):
         final_text = format_legal_citation_links(final_text)
     if persona == "legal" and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
-    _do_nav_extract = persona == "nav" or (persona == "general_fashion" and "[SITEMAP_CONTEXT:" in user_input)
+    _do_nav_extract = persona == "nav"
     if _do_nav_extract:
         try:
             nav_json = json.loads(final_text)
@@ -1743,6 +1743,11 @@ def chat(request: ChatRequest):
             final_text = nav_json.get("system_message", "")
         except Exception:
             state.last_nav_result = {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": final_text}
+    if persona == "stylist":
+        if state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+            state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+        elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
+            state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -1751,10 +1756,10 @@ def chat(request: ChatRequest):
         "response": final_text,
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
-        "garment_sets": state.last_garment_result if persona in ("garment", "general_fashion") and state.last_garment_result else None,
-        "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "general_fashion") and state.last_cosmetics_result else None,
-        "places_results": state.last_maps_result if persona in ("maps", "general_fashion") and state.last_maps_result else None,
-        "nav_result": state.last_nav_result if persona in ("nav", "general_fashion") and state.last_nav_result else None,
+        "garment_sets": state.last_garment_result if persona in ("garment", "stylist") and state.last_garment_result else None,
+        "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "stylist") and state.last_cosmetics_result else None,
+        "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
+        "nav_result": state.last_nav_result if persona in ("nav", "stylist") and state.last_nav_result else None,
     }
 
 
@@ -2002,6 +2007,8 @@ async def chat_stream(websocket: WebSocket):
 
             state = _context.sessions[session_id]
             state.last_used = time.time()
+            if data.get("user_id"):
+                state.user_id = data["user_id"]
             init_openai_client(state, _context.openai_api_key)
 
             user_input = request.user_input or getattr(request, "user_history_select", "") or ""
@@ -2051,15 +2058,14 @@ async def chat_stream(websocket: WebSocket):
                 except Exception:
                     pass
 
-            # Inject annotations and build dynamic tool list for general_fashion persona
-            if persona == "general_fashion":
-                gf_whitelist = []
+            if persona == "stylist":
+                if data.get("sitemap_context"):
+                    state.sitemap_context = data["sitemap_context"]
                 if data.get("weather"):
                     try:
                         user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
                         pass
-                    gf_whitelist.append("recommend_garments")
                 if data.get("location"):
                     try:
                         _meeting_dest = _extract_meeting_destination(user_input)
@@ -2069,21 +2075,16 @@ async def chat_stream(websocket: WebSocket):
                             user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
                         pass
-                    gf_whitelist.append("search_nearby_places")
-                    state.last_maps_result = []
                 if data.get("skin_analysis"):
                     try:
                         user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
                         pass
-                    gf_whitelist.append("recommend_cosmetics")
                 if data.get("sitemap_context"):
                     try:
                         user_input = f"[SITEMAP_CONTEXT:{json.dumps(data['sitemap_context'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
                         pass
-                if gf_whitelist:
-                    filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in gf_whitelist]
 
             if getattr(request, "document_context", None):
                 doc_injection = f"\n\n[CONTEXT: User is viewing:]\n{request.document_context}"
@@ -2095,7 +2096,7 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "general_fashion": "General Fashion", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -2104,11 +2105,11 @@ async def chat_stream(websocket: WebSocket):
             _ws_t_first_chunk = None
             _was_auto = _context.auto_approval
             end_sent = False
-            if persona in ("legal", "garment", "cosmetics", "maps", "nav", "general_fashion"):
+            if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist"):
                 _context.auto_approval = True
 
-            # B2: nav (and general_fashion when routing) runs sync — no streaming of raw JSON
-            if persona == "nav" or (persona == "general_fashion" and "[SITEMAP_CONTEXT:" in user_input):
+            # B2: nav runs sync — no streaming of raw JSON
+            if persona == "nav":
                 try:
                     nav_result_raw = reason_loop(state, user_input, session_id=session_id, tools=[], addendum_override=addendum_override, persona=persona)
                     nav_text = (nav_result_raw or "").strip()
@@ -2181,12 +2182,22 @@ async def chat_stream(websocket: WebSocket):
                     _context.sessions[session_id] = state
                 # Structured data frames fire regardless of whether LLM produced text,
                 # so the panel renders even when the LLM terminates silently after a tool call.
-                if persona in ("garment", "general_fashion") and state.last_garment_result:
+                if persona == "stylist":
+                    if state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+                        state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+                    elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
+                        state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+                if persona in ("garment", "stylist") and state.last_garment_result:
                     await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
-                if persona in ("cosmetics", "general_fashion") and state.last_cosmetics_result:
+                _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
+                if _garment_gender in ("MALE", "FEMALE"):
+                    await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
+                if persona in ("cosmetics", "stylist") and state.last_cosmetics_result:
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
-                if persona in ("maps", "general_fashion") and state.last_maps_result:
+                if persona == "maps" and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
+                if persona == "stylist" and state.last_nav_result:
+                    await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
                 _ws_t_end = time.time()
                 ttft = (_ws_t_first_chunk - _ws_t_start) if _ws_t_first_chunk else 0
                 logging.info(

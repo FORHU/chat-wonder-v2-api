@@ -317,6 +317,24 @@
   },
   {
     "type": "function",
+    "persona": "stylist",
+    "function": {
+      "name": "navigate_app",
+      "description": "Navigate the user to a specific page in the app based on their intent. Call this when the user explicitly asks to go somewhere in the app (e.g. 'take me to my profile', 'open cosmetics'). Do NOT call this for outfit or skincare requests — use recommend_garments or recommend_cosmetics instead.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The user's navigation intent in natural language, e.g. 'go to my profile' or 'open the cosmetics section'."
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  },
+  {
+    "type": "function",
     "persona": "garment",
     "function": {
       "name": "recommend_garments",
