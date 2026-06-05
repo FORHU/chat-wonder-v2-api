@@ -367,6 +367,28 @@ def init_openai_client(state, api_key, base_url=None):
 # Persona detection
 # ---------------------------------------------------------------------------
 
+_MEETING_DESTINATION_RE = re.compile(
+    r'\b(?:meeting|appointment|event|gathering|lunch|dinner|interview|client\s+meeting)\s+(?:in|at)\s+([A-Za-z][A-Za-z\s]+?)(?=\s+(?:next|this|on|for|with|about|tomorrow|today)|[,.]|$)',
+    re.IGNORECASE,
+)
+_GOING_TO_RE = re.compile(
+    r'\b(?:going|headed|traveling|travelling)\s+to\s+([A-Za-z][A-Za-z\s]+?)(?=\s+(?:for|next|this|on|tomorrow|today)|[,.]|$)',
+    re.IGNORECASE,
+)
+_WILL_BE_RE = re.compile(
+    r'\bwill\s+be\s+(?:in|at)\s+([A-Za-z][A-Za-z\s]+?)(?=\s+(?:for|next|this|on|tomorrow|today)|[,.]|$)',
+    re.IGNORECASE,
+)
+
+def _extract_meeting_destination(text: str) -> str | None:
+    """Extract named destination from meeting/travel-intent phrases. Returns title-cased name or None."""
+    for pattern in (_MEETING_DESTINATION_RE, _GOING_TO_RE, _WILL_BE_RE):
+        m = pattern.search(text)
+        if m:
+            return m.group(1).strip().title()
+    return None
+
+
 def process_persona(user_input: str):
     """Detect [legal ai] persona tag. Returns (persona, cleaned_input, filtered_tools, addendum_override)."""
     persona = "auto"
@@ -412,17 +434,24 @@ def process_persona(user_input: str):
         addendum_override = (
             "MAPS ASSISTANT MODE\n\n"
             "You are a helpful local guide and places discovery assistant. "
-            "Use the search_nearby_places function to find places near the user's current location.\n\n"
-            "IMPORTANT — location handling: If the message contains [USER_LOCATION:{...}], "
-            "you MUST extract the 'lat' and 'lng' values from that JSON and pass them to search_nearby_places. "
-            "Never show, repeat, or mention the [USER_LOCATION] annotation in your response — it is internal data only.\n\n"
-            "IMPORTANT — multi-location queries: If the user mentions multiple named places "
-            "(e.g. 'SM Baguio, La Union, Vigan City'), pass ALL of them as a SINGLE comma-separated "
-            "location_name value in ONE function call: location_name='SM Baguio, La Union, Vigan City'. "
-            "Do NOT make separate calls per location.\n\n"
-            "When presenting results, write 1-2 sentences summarising what was found across all locations. "
-            "Do NOT list all places in text — the frontend renders place cards from the structured data.\n\n"
-            "RESPONSE LENGTH — 1-2 sentences maximum. Every sentence must carry useful detail."
+            "Use the search_nearby_places function to find places.\n\n"
+
+            "LOCATION — the message may contain one of two annotations:\n"
+            "• [MEETING_LOCATION:X] — the user is going TO place X for a meeting or event. "
+            "You MUST call search_nearby_places with location_name=X. "
+            "Use query='meeting place cafe restaurant hotel' unless the user's message gives more context. "
+            "Use radius=10000 for provinces/regions, radius=5000 for cities.\n"
+            "• [USER_LOCATION:{lat,lng}] — the user's current GPS position. "
+            "Extract lat/lng and pass them to search_nearby_places. "
+            "Never mention this annotation in your response.\n\n"
+
+            "MULTI-LOCATION — if the user mentions multiple named places "
+            "(e.g. 'SM Baguio, La Union, Vigan City'), pass ALL as a SINGLE comma-separated "
+            "location_name in ONE call. Do NOT make separate calls per location.\n\n"
+
+            "RESPONSE — when results are found, output NO prose. "
+            "The frontend renders place cards. "
+            "Only write one short sentence if zero results were returned."
         )
 
     elif user_input.lower().startswith("[stylist]"):
@@ -1130,6 +1159,27 @@ def _summarize_tool_result(tool_name: str, result) -> str:
     return "The tool completed and returned a result."
 
 
+def _describe_tool_args(tool_name: str, arguments: str) -> str:
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        if tool_name == "search_nearby_places":
+            query = args.get("query", "")
+            location = args.get("location_name") or f"{args.get('lat', '')},{args.get('lng', '')}"
+            radius = args.get("radius", 1500)
+            return f"Searching for '{query}' in '{location}' (radius: {radius}m)."
+        if tool_name == "recommend_garments":
+            sets = args.get("sets", 1)
+            return f"Requesting {sets} outfit recommendation(s)."
+        if tool_name == "recommend_cosmetics":
+            return "Requesting skincare routine recommendations."
+        if tool_name == "search_legal":
+            q = args.get("query", "")
+            return f"Searching legal knowledge base for: '{q[:100]}'."
+    except Exception:
+        pass
+    return ""
+
+
 def _broadcast_retrieval_context(state, tools, addendum_override, session_id, query: str = "", persona: str = "auto"):
     rag_sources = getattr(state, "source_metadata", [])
     if rag_sources:
@@ -1578,7 +1628,10 @@ def chat(request: ChatRequest):
                 pass
 
     if persona == "maps":
-        if request.location:
+        _meeting_dest = _extract_meeting_destination(user_input)
+        if _meeting_dest:
+            user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
+        elif request.location:
             try:
                 user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
             except Exception:
@@ -1602,7 +1655,11 @@ def chat(request: ChatRequest):
                 pass
         if request.location:
             try:
-                user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
+                _meeting_dest = _extract_meeting_destination(user_input)
+                if _meeting_dest:
+                    user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
+                else:
+                    user_input = f"[USER_LOCATION:{json.dumps(request.location, ensure_ascii=False)}]\n\n{user_input}"
             except Exception:
                 pass
         if request.skin_analysis:
@@ -1984,7 +2041,10 @@ async def chat_stream(websocket: WebSocket):
 
             # Inject frontend-provided location for maps persona
             if persona == "maps":
-                if data.get("location"):
+                _meeting_dest = _extract_meeting_destination(user_input)
+                if _meeting_dest:
+                    user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
+                elif data.get("location"):
                     try:
                         user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
@@ -2008,7 +2068,11 @@ async def chat_stream(websocket: WebSocket):
                         pass
                 if data.get("location"):
                     try:
-                        user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
+                        _meeting_dest = _extract_meeting_destination(user_input)
+                        if _meeting_dest:
+                            user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
+                        else:
+                            user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
                         pass
                 if data.get("skin_analysis"):
