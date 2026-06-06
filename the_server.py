@@ -474,6 +474,8 @@ def process_persona(user_input: str):
             "If the conversation context implies a destination other than the user's current location "
             "(e.g. they mentioned a place, a trip, or a venue), also pass that place as the location parameter — "
             "the function will fetch weather there instead of relying on the frontend weather. "
+            "IMPORTANT — if the user's gender is not clear from the conversation (no 'i am male/female' in the message), "
+            "ask for it before calling recommend_garments. Never guess or assume gender. "
             "After the tool completes, respond with exactly 1 warm sentence — do not list items in text.\n\n"
             "- If [SKIN_ANALYSIS:{...}] is present and the user's intent involves skincare or beauty: "
             "call recommend_cosmetics. Extract the skin analysis JSON exactly as-is and pass it as skin_analysis_json. "

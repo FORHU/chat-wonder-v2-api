@@ -1842,14 +1842,16 @@ def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dic
         image_bytes = base64.b64decode(image_b64)
 
         tailor_bucket = os.getenv("TAILOR_S3_BUCKET_NAME")
+        tailor_region = os.getenv("TAILOR_AWS_REGION")
         s3_key = f"tailor/generated/{uuid.uuid4()}.png"
         uploaded = s3_storage.upload_bytes_to_s3(
-            image_bytes, s3_key, content_type="image/png", bucket_name=tailor_bucket
+            image_bytes, s3_key, content_type="image/png",
+            bucket_name=tailor_bucket, region=tailor_region
         )
         if not uploaded:
             return {"success": False, "error": "Failed to upload generated outfit image to S3."}
 
-        image_url = s3_storage.generate_presigned_get(s3_key, bucket_name=tailor_bucket)
+        image_url = s3_storage.generate_presigned_get(s3_key, bucket_name=tailor_bucket, region=tailor_region)
         if not image_url:
             return {"success": False, "error": "Failed to generate presigned URL for generated image."}
 
