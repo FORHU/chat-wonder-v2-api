@@ -108,6 +108,7 @@ class ChatState:
         self.last_cosmetics_result: dict = {}
         self.last_maps_result: list = []
         self.last_nav_result: dict = {}
+        self.last_tailor_result: dict = {}
         self.sitemap_context: list = []
         self.openai_client = None
         self.last_used: float = time.time()
@@ -552,6 +553,21 @@ def process_persona(user_input: str):
             "Keep the tone warm and supportive. Do not repeat or list the products in text — the cards handle that."
         )
 
+    elif user_input.lower().startswith("[tailor]"):
+        persona = "tailor"
+        user_input = user_input[8:].strip()
+        tailor_whitelist = ["generate_outfit_image"]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in tailor_whitelist]
+        addendum_override = (
+            "TAILOR MODE\n\n"
+            "You are a fashion tailor AI. Generate a ghost mannequin outfit photograph from the selected garment images.\n\n"
+            "TOOL USE — call generate_outfit_image immediately. "
+            "Extract garment_image_urls from [GARMENT_IMAGES:[...]] in the message. "
+            "Extract gender from [GENDER:MALE] or [GENDER:FEMALE] in the message, defaulting to MALE if absent.\n\n"
+            "Never show, mention, or repeat any annotation in your response — all annotations are internal data only.\n\n"
+            "RESPONSE — after the tool completes, respond with exactly 1 short sentence confirming the outfit has been generated."
+        )
+
     return persona, user_input, filtered_tools, addendum_override
 
 # ---------------------------------------------------------------------------
@@ -923,6 +939,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_nav_result = result
+        if func_name == "generate_outfit_image" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                state.last_tailor_result = result
         logging.info(f"Function {func_name} executed successfully.")
         return result
     except Exception as e:
@@ -1105,37 +1125,6 @@ def _describe_input(text: str) -> str:
     return text
 
 
-def _describe_tool_args(tool_name: str, arguments_json: str) -> str:
-    try:
-        args = json.loads(arguments_json)
-    except Exception:
-        return ""
-    if tool_name == "search_legal":
-        q = args.get("query", "")
-        return f'It will search for: "{q}"' if q else ""
-    if tool_name == "summarize_legal_case":
-        item_id = args.get("item_id", "")
-        return f"It will retrieve document #{item_id}." if item_id else ""
-    if tool_name == "recommend_garments":
-        gender = args.get("gender", "")
-        event_type = args.get("event_type", "")
-        location = args.get("location", "")
-        sets = args.get("sets", "")
-        event_date = args.get("event_date", "")
-        parts = []
-        if gender:
-            parts.append(gender)
-        if event_type:
-            parts.append(f"attending {event_type}")
-        if location:
-            parts.append(f"in {location}")
-        if event_date:
-            parts.append(f"on {event_date}")
-        base = f"It will recommend {sets} outfit set(s)" if sets else "It will recommend outfit sets"
-        return f"{base} for a {', '.join(parts)}." if parts else f"{base}."
-    return ""
-
-
 def _interpret_score(score: float) -> str:
     if score >= 0.7:
         return "high"
@@ -1161,6 +1150,48 @@ def _summarize_tool_result(tool_name: str, result) -> str:
             places = result.get("places", []) if isinstance(result, dict) else []
             query = result.get("query", "") if isinstance(result, dict) else ""
             return f"{len(places)} place(s) found for '{query}'."
+        if tool_name == "recommend_cosmetics":
+            skin_type = result.get("skin_type", "unknown") if isinstance(result, dict) else "unknown"
+            concerns = result.get("concerns", []) if isinstance(result, dict) else []
+            sets_req = result.get("sets_requested", 1) if isinstance(result, dict) else 1
+            concern_str = f" Concerns flagged: {', '.join(concerns[:3])}." if concerns else ""
+            return f"{sets_req} skincare routine(s) were generated for {skin_type} skin.{concern_str}"
+        if tool_name == "get_legal_recommendation":
+            issue = (result.get("issue") or "")[:80] if isinstance(result, dict) else ""
+            mats = len(result.get("relevant_materials", [])) if isinstance(result, dict) else 0
+            mat_str = f" {mats} material(s) referenced." if mats else ""
+            return f'A legal recommendation was produced for: "{issue}".{mat_str}'
+        if tool_name == "generate_legal_document":
+            doc_name = (result.get("document_name") or result.get("document_type") or "document") if isinstance(result, dict) else "document"
+            return f"A {doc_name} was drafted successfully."
+        if tool_name == "analyze_document":
+            fname = (result.get("filename") or "document") if isinstance(result, dict) else "document"
+            chars = result.get("char_count", 0) if isinstance(result, dict) else 0
+            trunc = " (truncated)" if isinstance(result, dict) and result.get("truncated") else ""
+            return f'Analysis complete for "{fname}" ({chars:,} chars{trunc}).'
+        if tool_name == "scan_cosmetic":
+            product = (result.get("product_name") or result.get("product_title") or "unknown product") if isinstance(result, dict) else "unknown product"
+            return f'Scan complete for "{str(product)[:60]}".'
+        if tool_name == "match_cosmetics":
+            verdict = (result.get("verdict") or "unknown") if isinstance(result, dict) else "unknown"
+            reason = (result.get("verdict_reason") or "") if isinstance(result, dict) else ""
+            return f"Compatibility verdict: {verdict}. {reason}".rstrip()
+        if tool_name == "navigate_app":
+            url = result.get("target_url") if isinstance(result, dict) else None
+            conf = result.get("confidence", 0) if isinstance(result, dict) else 0
+            if url:
+                return f"Navigation resolved to: {url} (confidence: {int(conf * 100)}%)."
+            return "No matching screen found for the navigation query."
+        if tool_name == "generate_outfit_image":
+            count = result.get("garment_count", "?") if isinstance(result, dict) else "?"
+            gender = (result.get("gender") or "MALE") if isinstance(result, dict) else "MALE"
+            return f"Outfit image generated for {gender} from {count} garment(s)."
+        if tool_name == "execute_code":
+            status = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
+            res_str = str(result.get("result", ""))[:100] if isinstance(result, dict) else ""
+            if status == "success":
+                return f"Code executed successfully. Result: {res_str}"
+            return f"Code execution failed: {res_str}"
     except Exception:
         pass
     return "The tool completed and returned a result."
@@ -1169,19 +1200,61 @@ def _summarize_tool_result(tool_name: str, result) -> str:
 def _describe_tool_args(tool_name: str, arguments: str) -> str:
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        if tool_name == "search_legal":
+            q = args.get("query", "")
+            return f'It will search for: "{q}"' if q else ""
+        if tool_name == "summarize_legal_case":
+            item_id = args.get("item_id", "") or args.get("case_identifier", "")
+            return f"It will retrieve document #{item_id}." if item_id else ""
+        if tool_name == "recommend_garments":
+            gender = args.get("gender", "")
+            event_type = args.get("event_type", "")
+            location = args.get("location", "")
+            sets = args.get("sets", "")
+            event_date = args.get("event_date", "")
+            parts = []
+            if gender: parts.append(gender)
+            if event_type: parts.append(f"attending {event_type}")
+            if location: parts.append(f"in {location}")
+            if event_date: parts.append(f"on {event_date}")
+            base = f"It will recommend {sets} outfit set(s)" if sets else "It will recommend outfit sets"
+            return f"{base} for a {', '.join(parts)}." if parts else f"{base}."
         if tool_name == "search_nearby_places":
             query = args.get("query", "")
             location = args.get("location_name") or f"{args.get('lat', '')},{args.get('lng', '')}"
             radius = args.get("radius", 1500)
-            return f"Searching for '{query}' in '{location}' (radius: {radius}m)."
-        if tool_name == "recommend_garments":
-            sets = args.get("sets", 1)
-            return f"Requesting {sets} outfit recommendation(s)."
+            return f'It will search for "{query}" near {location} (radius: {radius}m).'
         if tool_name == "recommend_cosmetics":
-            return "Requesting skincare routine recommendations."
-        if tool_name == "search_legal":
-            q = args.get("query", "")
-            return f"Searching legal knowledge base for: '{q[:100]}'."
+            sets = args.get("sets", 1)
+            return f"It will generate {sets} skincare routine(s) based on the skin analysis."
+        if tool_name == "get_legal_recommendation":
+            issue = args.get("legal_issue", "")
+            return f'It will research and provide a recommendation on: "{issue[:100]}".' if issue else ""
+        if tool_name == "generate_legal_document":
+            doc_type = args.get("document_type", "document")
+            return f"It will draft a {doc_type}."
+        if tool_name == "analyze_document":
+            s3_key = args.get("s3_key", "")
+            fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
+            return f'It will analyze the document: "{fname}".' if fname else ""
+        if tool_name == "scan_cosmetic":
+            skin_type = args.get("skin_type", "general")
+            return f"It will scan a cosmetic product label for {skin_type} skin."
+        if tool_name == "match_cosmetics":
+            a = args.get("product_a_name", "product A")
+            b = args.get("product_b_name", "product B")
+            return f'It will check if "{a}" and "{b}" are compatible.'
+        if tool_name == "navigate_app":
+            query = args.get("query", "")
+            return f'It will navigate to the screen matching: "{query[:80]}".' if query else ""
+        if tool_name == "generate_outfit_image":
+            urls = args.get("garment_image_urls", [])
+            gender = args.get("gender", "MALE")
+            return f"It will generate a {gender} outfit image from {len(urls)} garment image(s)."
+        if tool_name == "execute_code":
+            code = args.get("code", "")
+            snippet = code[:80] + ("…" if len(code) > 80 else "")
+            return f"It will execute: {snippet}" if code else ""
     except Exception:
         pass
     return ""
@@ -1771,6 +1844,7 @@ def chat(request: ChatRequest):
         "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "stylist") and state.last_cosmetics_result else None,
         "places_results": state.last_maps_result if persona in ("maps", "stylist") and state.last_maps_result else None,
         "nav_result": state.last_nav_result if persona in ("nav", "stylist") and state.last_nav_result else None,
+        "tailor_result": state.last_tailor_result if persona == "tailor" and state.last_tailor_result else None,
     }
 
 
@@ -2108,7 +2182,7 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -2117,7 +2191,7 @@ async def chat_stream(websocket: WebSocket):
             _ws_t_first_chunk = None
             _was_auto = _context.auto_approval
             end_sent = False
-            if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist"):
+            if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist", "tailor"):
                 _context.auto_approval = True
 
             # B2: nav runs sync — no streaming of raw JSON
@@ -2210,6 +2284,8 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
                 if persona in ("maps", "stylist") and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
+                if persona == "tailor" and state.last_tailor_result:
+                    await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
                 if persona == "stylist" and state.last_nav_result:
                     await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
                 _ws_t_end = time.time()

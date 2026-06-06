@@ -2,6 +2,7 @@ import os
 import io
 import json
 import time
+import uuid
 import hashlib
 import tempfile
 import logging
@@ -1763,4 +1764,103 @@ def recommend_garments(
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"Failed to parse AI response: {e}"}
     except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dict:
+    """Generate a ghost mannequin outfit photograph from individual garment images using GPT image generation."""
+    import base64
+    import s3_storage
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+    if not garment_image_urls:
+        return {"success": False, "error": "No garment images provided."}
+
+    gender_upper = (gender or "MALE").strip().upper()
+    gender_word = "female" if gender_upper == "FEMALE" else "male"
+
+    prompt = (
+        f"Using the provided garment images as the only reference, create a premium ghost mannequin "
+        f"fashion product photograph combining all garments into one complete outfit. "
+        f"Preserve every garment exactly as shown — original colors, prints, logos, patterns, stitching, "
+        f"fabric texture, proportions, wrinkles, folds, and construction details. "
+        f"Do not redesign, replace, simplify, or generate alternative clothing. "
+        f"Reconstruct the outfit on a completely invisible {gender_word} mannequin with realistic body volume, "
+        f"natural garment draping, and accurate layering. The mannequin must be entirely hidden — "
+        f"no visible head, neck, face, arms, hands, legs, feet, skin, mannequin parts, or display stands. "
+        f"Subtle luxury pose: one leg slightly forward, weight shifted to back leg, slight knee bend, "
+        f"relaxed shoulders, clean editorial silhouette. "
+        f"If shoes are present, they must appear naturally worn with no visible feet, ankles, or shoe interiors; "
+        f"hems must flow directly into the shoes creating a seamless ghost mannequin effect. "
+        f"Studio-quality luxury e-commerce fashion photography. Centered full-body view. "
+        f"Pure white seamless background (#FFFFFF). Ultra-sharp focus. Professional catalog lighting. "
+        f"Negative: visible body parts, mannequin structure, display stand, floor reflection, "
+        f"extra garments, duplicated clothing, watermark, cropped outfit, redesigned clothing."
+    )
+
+    content = []
+    loaded_count = 0
+    for url in garment_image_urls[:6]:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                img_bytes = resp.read()
+            ext = os.path.splitext(url.split("?")[0])[1].lower().lstrip(".") or "jpeg"
+            if ext == "jpg":
+                ext = "jpeg"
+            mime = f"image/{ext}" if ext in ("jpeg", "png", "webp", "gif") else "image/jpeg"
+            b64 = base64.b64encode(img_bytes).decode("utf-8")
+            content.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}"})
+            loaded_count += 1
+        except Exception as e:
+            _logger.warning(f"[generate_outfit_image] Could not load image {url}: {e}")
+
+    if loaded_count == 0:
+        return {"success": False, "error": "Could not download any garment images."}
+
+    content.append({"type": "input_text", "text": prompt})
+
+    client = OpenAI(api_key=api_key)
+    try:
+        response = client.responses.create(
+            model="gpt-image-1",
+            input=[{"role": "user", "content": content}],
+        )
+
+        image_b64 = None
+        for item in response.output:
+            if getattr(item, "type", "") == "image_generation_call":
+                image_b64 = item.result
+                break
+
+        if not image_b64:
+            return {"success": False, "error": "No image returned by gpt-image-1."}
+
+        image_bytes = base64.b64decode(image_b64)
+
+        tailor_bucket = os.getenv("TAILOR_S3_BUCKET_NAME")
+        s3_key = f"tailor/generated/{uuid.uuid4()}.png"
+        uploaded = s3_storage.upload_bytes_to_s3(
+            image_bytes, s3_key, content_type="image/png", bucket_name=tailor_bucket
+        )
+        if not uploaded:
+            return {"success": False, "error": "Failed to upload generated outfit image to S3."}
+
+        image_url = s3_storage.generate_presigned_get(s3_key, bucket_name=tailor_bucket)
+        if not image_url:
+            return {"success": False, "error": "Failed to generate presigned URL for generated image."}
+
+        return {
+            "success": True,
+            "image_url": image_url,
+            "s3_key": s3_key,
+            "gender": gender_upper,
+            "garment_count": loaded_count,
+        }
+
+    except Exception as e:
+        _logger.error(f"[generate_outfit_image] Failed: {e}")
         return {"success": False, "error": str(e)}
