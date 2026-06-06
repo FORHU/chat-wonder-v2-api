@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tailor Persona Test</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d0d0d;
+      color: #e8e8e8;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      margin-bottom: 28px;
+      color: #fff;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 400px 1fr;
+      gap: 24px;
+      max-width: 1100px;
+      align-items: start;
+    }
+
+    .panel {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 14px;
+      padding: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #666;
+      margin-bottom: 6px;
+    }
+
+    input[type="text"], input[type="url"], textarea {
+      width: 100%;
+      background: #111;
+      border: 1px solid #2e2e2e;
+      border-radius: 8px;
+      color: #e8e8e8;
+      font-size: 13px;
+      font-family: inherit;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input[type="text"]:focus, input[type="url"]:focus, textarea:focus {
+      border-color: #555;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 70px;
+      line-height: 1.5;
+    }
+
+    .field { margin-bottom: 16px; }
+
+    .url-list { display: flex; flex-direction: column; gap: 8px; }
+
+    .url-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .url-row input { flex: 1; }
+
+    .btn-icon {
+      background: #2a2a2a;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #999;
+      font-size: 16px;
+      width: 36px;
+      height: 36px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .btn-icon:hover { background: #333; color: #e8e8e8; }
+
+    .btn-add {
+      background: none;
+      border: 1px dashed #333;
+      border-radius: 8px;
+      color: #555;
+      font-size: 13px;
+      padding: 8px 12px;
+      cursor: pointer;
+      width: 100%;
+      text-align: left;
+      transition: border-color 0.15s, color 0.15s;
+    }
+
+    .btn-add:hover { border-color: #555; color: #999; }
+
+    .gender-row { display: flex; gap: 8px; }
+
+    .gender-btn {
+      flex: 1;
+      background: #111;
+      border: 1px solid #2e2e2e;
+      border-radius: 8px;
+      color: #666;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .gender-btn.active {
+      background: #fff;
+      border-color: #fff;
+      color: #000;
+    }
+
+    .btn-generate {
+      width: 100%;
+      background: #fff;
+      border: none;
+      border-radius: 10px;
+      color: #000;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 13px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      margin-top: 4px;
+    }
+
+    .btn-generate:hover { opacity: 0.88; }
+    .btn-generate:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .server-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      margin-bottom: 20px;
+    }
+
+    .server-row .field { flex: 1; margin-bottom: 0; }
+
+    .btn-session {
+      background: #2a2a2a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      color: #ccc;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 10px 14px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+
+    .btn-session:hover { background: #333; }
+
+    .session-badge {
+      font-size: 11px;
+      color: #555;
+      margin-bottom: 16px;
+      font-family: monospace;
+    }
+
+    .session-badge.ok { color: #4caf76; }
+
+    /* Right panel */
+
+    .result-panel { display: flex; flex-direction: column; gap: 16px; }
+
+    .stream-box {
+      background: #111;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      padding: 16px;
+      min-height: 80px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #bbb;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .stream-box.streaming { border-color: #3a3a3a; }
+
+    .stream-box .cursor {
+      display: inline-block;
+      width: 2px;
+      height: 14px;
+      background: #fff;
+      animation: blink 0.8s step-end infinite;
+      vertical-align: middle;
+      margin-left: 1px;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .data-box {
+      background: #111;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      padding: 16px;
+      font-size: 12px;
+      font-family: monospace;
+      color: #7ec8a0;
+      white-space: pre-wrap;
+      word-break: break-all;
+      display: none;
+    }
+
+    .data-box.visible { display: block; }
+
+    .image-box {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .image-box.visible { display: flex; }
+
+    .image-box img {
+      width: 100%;
+      max-width: 420px;
+      border-radius: 12px;
+      border: 1px solid #2a2a2a;
+      background: #f8f8f8;
+    }
+
+    .image-meta {
+      font-size: 12px;
+      color: #555;
+      text-align: center;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #444;
+      margin-bottom: 6px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #555;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #333;
+      flex-shrink: 0;
+    }
+
+    .dot.green { background: #4caf76; }
+    .dot.yellow { background: #e5a43a; animation: pulse 1s ease-in-out infinite; }
+    .dot.red { background: #e05252; }
+
+    @keyframes pulse { 50% { opacity: 0.4; } }
+
+    .raw-input-box {
+      background: #0a0a0a;
+      border: 1px solid #222;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 11px;
+      font-family: monospace;
+      color: #555;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    hr { border: none; border-top: 1px solid #1e1e1e; margin: 4px 0; }
+
+    .thumb-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .thumb {
+      width: 56px;
+      height: 56px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: #222;
+      border: 1px solid #2a2a2a;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Tailor Persona — Test</h1>
+
+<div class="layout">
+
+  <!-- LEFT: Controls -->
+  <div>
+    <div class="panel">
+
+      <div class="server-row">
+        <div class="field">
+          <label>Server URL</label>
+          <input type="text" id="serverUrl" value="http://localhost:8000" />
+        </div>
+        <button class="btn-session" onclick="getSession()">Get Session</button>
+      </div>
+
+      <div class="session-badge" id="sessionBadge">No session — click Get Session</div>
+
+      <div class="field">
+        <label>Gender</label>
+        <div class="gender-row">
+          <button class="gender-btn active" id="genderMale" onclick="setGender('MALE')">Male</button>
+          <button class="gender-btn" id="genderFemale" onclick="setGender('FEMALE')">Female</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Garment Image URLs</label>
+        <div class="url-list" id="urlList"></div>
+        <button class="btn-add" onclick="addUrl()" style="margin-top: 8px;">+ Add garment URL</button>
+      </div>
+
+      <div class="field">
+        <label>Thumbnails</label>
+        <div class="thumb-row" id="thumbRow"><span style="font-size:12px;color:#444">Enter URLs above to preview</span></div>
+      </div>
+
+      <hr style="margin: 16px 0;" />
+
+      <button class="btn-generate" id="btnGenerate" onclick="generate()">Generate Outfit Image</button>
+    </div>
+  </div>
+
+  <!-- RIGHT: Results -->
+  <div class="result-panel">
+
+    <div>
+      <div class="section-label">Status</div>
+      <div class="status-row">
+        <div class="dot" id="statusDot"></div>
+        <span id="statusText">Idle</span>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Raw Input Sent</div>
+      <div class="raw-input-box" id="rawInput">—</div>
+    </div>
+
+    <div>
+      <div class="section-label">Streaming Response</div>
+      <div class="stream-box" id="streamBox">Waiting…</div>
+    </div>
+
+    <div>
+      <div class="section-label">[TAILOR_DATA] Block</div>
+      <div class="data-box" id="dataBox"></div>
+    </div>
+
+    <div>
+      <div class="section-label">Generated Outfit Image</div>
+      <div class="image-box" id="imageBox">
+        <img id="outfitImg" src="" alt="Generated outfit" />
+        <div class="image-meta" id="imageMeta"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  let sessionId = null;
+  let gender = "MALE";
+  let ws = null;
+  let urlCount = 0;
+
+  // Seed with 3 empty URL inputs
+  addUrl(); addUrl(); addUrl();
+
+  function setGender(g) {
+    gender = g;
+    document.getElementById("genderMale").classList.toggle("active", g === "MALE");
+    document.getElementById("genderFemale").classList.toggle("active", g === "FEMALE");
+  }
+
+  function addUrl(value = "") {
+    urlCount++;
+    const id = `url_${urlCount}`;
+    const row = document.createElement("div");
+    row.className = "url-row";
+    row.id = `row_${id}`;
+    row.innerHTML = `
+      <input type="url" id="${id}" placeholder="https://…" value="${value}"
+             oninput="refreshThumbs()" />
+      <button class="btn-icon" onclick="removeUrl('row_${id}')" title="Remove">✕</button>
+    `;
+    document.getElementById("urlList").appendChild(row);
+  }
+
+  function removeUrl(rowId) {
+    const row = document.getElementById(rowId);
+    if (row) row.remove();
+    refreshThumbs();
+  }
+
+  function getUrls() {
+    return Array.from(document.querySelectorAll("#urlList input[type='url']"))
+      .map(el => el.value.trim())
+      .filter(Boolean);
+  }
+
+  function refreshThumbs() {
+    const urls = getUrls();
+    const container = document.getElementById("thumbRow");
+    container.innerHTML = "";
+    if (!urls.length) {
+      container.innerHTML = '<span style="font-size:12px;color:#444">Enter URLs above to preview</span>';
+      return;
+    }
+    urls.forEach(url => {
+      const img = document.createElement("img");
+      img.className = "thumb";
+      img.src = url;
+      img.alt = "";
+      img.onerror = () => { img.style.opacity = "0.3"; };
+      container.appendChild(img);
+    });
+  }
+
+  async function getSession() {
+    const base = document.getElementById("serverUrl").value.trim().replace(/\/$/, "");
+    try {
+      const res = await fetch(`${base}/session-id`);
+      const data = await res.json();
+      sessionId = data.session_id;
+      const badge = document.getElementById("sessionBadge");
+      badge.textContent = `Session: ${sessionId}`;
+      badge.className = "session-badge ok";
+      setStatus("green", "Session ready");
+    } catch (e) {
+      setStatus("red", `Failed to get session: ${e.message}`);
+    }
+  }
+
+  function setStatus(color, text) {
+    document.getElementById("statusDot").className = `dot ${color}`;
+    document.getElementById("statusText").textContent = text;
+  }
+
+  function generate() {
+    if (!sessionId) {
+      alert("Get a session first.");
+      return;
+    }
+
+    const urls = getUrls();
+    if (!urls.length) {
+      alert("Add at least one garment image URL.");
+      return;
+    }
+
+    const base = document.getElementById("serverUrl").value.trim().replace(/\/$/, "");
+    const wsUrl = base.replace(/^http/, "ws") + "/chat-stream";
+
+    const garmentAnnotation = `[GARMENT_IMAGES:${JSON.stringify(urls)}]`;
+    const genderAnnotation = `[GENDER:${gender}]`;
+    const userInput = `[tailor] ${garmentAnnotation} ${genderAnnotation} Generate my outfit.`;
+
+    document.getElementById("rawInput").textContent = userInput;
+    document.getElementById("streamBox").textContent = "";
+    document.getElementById("streamBox").className = "stream-box streaming";
+
+    const dataBox = document.getElementById("dataBox");
+    dataBox.className = "data-box";
+    dataBox.textContent = "";
+
+    const imageBox = document.getElementById("imageBox");
+    imageBox.className = "image-box";
+
+    document.getElementById("btnGenerate").disabled = true;
+    setStatus("yellow", "Connecting…");
+
+    if (ws) { try { ws.close(); } catch(e) {} }
+
+    ws = new WebSocket(wsUrl);
+
+    let streamText = "";
+    let tailorData = null;
+
+    ws.onopen = () => {
+      setStatus("yellow", "Generating — this may take 30–60 s…");
+      ws.send(JSON.stringify({
+        user_input: userInput,
+        session_id: sessionId,
+      }));
+      appendCursor();
+    };
+
+    ws.onmessage = (evt) => {
+      const chunk = evt.data;
+
+      if (chunk === "[DONE]") {
+        removeCursor();
+        setStatus("green", "Done");
+        document.getElementById("btnGenerate").disabled = false;
+        ws.close();
+        return;
+      }
+
+      if (chunk.startsWith("__END__") || chunk === "__END__") {
+        return;
+      }
+
+      if (chunk.startsWith("[TAILOR_DATA]")) {
+        try {
+          tailorData = JSON.parse(chunk.slice("[TAILOR_DATA]".length));
+          dataBox.textContent = JSON.stringify(tailorData, null, 2);
+          dataBox.className = "data-box visible";
+
+          if (tailorData.success && tailorData.image_url) {
+            const img = document.getElementById("outfitImg");
+            img.src = tailorData.image_url;
+            img.onload = () => {
+              imageBox.className = "image-box visible";
+              document.getElementById("imageMeta").textContent =
+                `Gender: ${tailorData.gender} · Garments: ${tailorData.garment_count} · S3: ${tailorData.s3_key}`;
+            };
+            img.onerror = () => {
+              imageBox.className = "image-box visible";
+              document.getElementById("imageMeta").textContent =
+                "Image loaded from URL above (direct display failed — check CORS)";
+              imageBox.className = "image-box visible";
+            };
+          }
+        } catch (e) {
+          dataBox.textContent = chunk;
+          dataBox.className = "data-box visible";
+        }
+        return;
+      }
+
+      if (chunk.startsWith("[Error]")) {
+        removeCursor();
+        setStatus("red", chunk);
+        document.getElementById("btnGenerate").disabled = false;
+        return;
+      }
+
+      if (chunk.startsWith("[") && chunk.includes("_DATA]")) {
+        // Other data blocks — ignore for this test
+        return;
+      }
+
+      streamText += chunk;
+      const box = document.getElementById("streamBox");
+      removeCursor();
+      box.textContent = streamText;
+      appendCursor();
+    };
+
+    ws.onerror = (e) => {
+      removeCursor();
+      setStatus("red", "WebSocket error — is the server running?");
+      document.getElementById("btnGenerate").disabled = false;
+    };
+
+    ws.onclose = () => {
+      removeCursor();
+      document.getElementById("btnGenerate").disabled = false;
+    };
+  }
+
+  function appendCursor() {
+    const box = document.getElementById("streamBox");
+    if (!box.querySelector(".cursor")) {
+      const cursor = document.createElement("span");
+      cursor.className = "cursor";
+      box.appendChild(cursor);
+    }
+  }
+
+  function removeCursor() {
+    const box = document.getElementById("streamBox");
+    const cursor = box.querySelector(".cursor");
+    if (cursor) cursor.remove();
+  }
+</script>
+</body>
+</html>

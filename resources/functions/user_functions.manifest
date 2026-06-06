@@ -320,7 +320,7 @@
     "persona": "stylist",
     "function": {
       "name": "navigate_app",
-      "description": "Navigate the user to a specific page in the app based on their intent. Call this when the user explicitly asks to go somewhere in the app (e.g. 'take me to my profile', 'open cosmetics'). Do NOT call this for outfit or skincare requests — use recommend_garments or recommend_cosmetics instead.",
+      "description": "Navigate the user to a specific page in the app based on their intent. Call this when the user explicitly asks to go somewhere in the app (e.g. 'take me to my profile', 'open cosmetics'). Do NOT call this for outfit or skincare requests \u00e2\u20ac\u201d use recommend_garments or recommend_cosmetics instead.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -329,7 +329,9 @@
             "description": "The user's navigation intent in natural language, e.g. 'go to my profile' or 'open the cosmetics section'."
           }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       }
     }
   },
@@ -388,11 +390,11 @@
         "properties": {
           "lat": {
             "type": "number",
-            "description": "User's latitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided — it will be ignored."
+            "description": "User's latitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided \u00e2\u20ac\u201d it will be ignored."
           },
           "lng": {
             "type": "number",
-            "description": "User's longitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided — it will be ignored."
+            "description": "User's longitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided \u00e2\u20ac\u201d it will be ignored."
           },
           "query": {
             "type": "string",
@@ -404,10 +406,12 @@
           },
           "location_name": {
             "type": "string",
-            "description": "Named location(s) to search AT instead of the user's GPS. Single: 'La Union'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. REQUIRED when the user names a destination (e.g. 'meeting in La Union', 'going to Baguio'). When set, GPS lat/lng is ignored — the place is geocoded automatically."
+            "description": "Named location(s) to search AT instead of the user's GPS. Single: 'La Union'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. REQUIRED when the user names a destination (e.g. 'meeting in La Union', 'going to Baguio'). When set, GPS lat/lng is ignored \u00e2\u20ac\u201d the place is geocoded automatically."
           }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       }
     }
   },
@@ -430,6 +434,38 @@
           }
         },
         "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "tailor",
+    "function": {
+      "name": "generate_outfit_image",
+      "description": "Generate a premium ghost mannequin outfit photograph from individual garment images. Call this immediately when the user wants to visualize selected garments as a complete outfit. Uses AI image generation to composite the garments onto an invisible mannequin with professional studio lighting.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "garment_image_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of image URLs for the selected garment items (top, bottom, shoes, etc.). Extract from [GARMENT_IMAGES:[...]] annotation in the message."
+          },
+          "gender": {
+            "type": "string",
+            "enum": [
+              "MALE",
+              "FEMALE"
+            ],
+            "description": "Mannequin gender for the generated outfit photo. Extract from [GENDER:MALE] or [GENDER:FEMALE] annotation in the message. Defaults to MALE."
+          }
+        },
+        "required": [
+          "garment_image_urls",
+          "gender"
+        ]
       }
     }
   }

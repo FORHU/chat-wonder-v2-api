@@ -111,6 +111,7 @@ jobs:
                       OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                       LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                       GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
+                      TAILOR_S3_BUCKET_NAME=${{ vars.TAILOR_S3_BUCKET_NAME }}
                       ENVEOF
 
                       # ── Write user_functions.env (legal RAG credentials) ─────────
