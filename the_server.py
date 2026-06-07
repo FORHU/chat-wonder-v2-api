@@ -458,7 +458,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["recommend_garments", "recommend_cosmetics", "search_nearby_places", "navigate_app"]
+        stylist_whitelist = ["recommend_garments", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
