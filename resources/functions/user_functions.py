@@ -1375,14 +1375,8 @@ _WAYFINDER_SYSTEM_PROMPT = (
 )
 
 
-def navigate_app(query: str, session_id: str = None) -> dict:
-    """Resolve a natural-language navigation query to an app URL using the session's sitemap."""
-    from openai import OpenAI
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": "Navigation unavailable — API key not configured."}
-
+def navigate_app(target_url: str, session_id: str = None) -> dict:
+    """Validate target_url against the session's sitemap and return a nav result."""
     sitemap: list = []
     if session_id:
         try:
@@ -1403,25 +1397,10 @@ def navigate_app(query: str, session_id: str = None) -> dict:
     if not sitemap:
         return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": "No sitemap available to navigate."}
 
-    client = OpenAI(api_key=api_key)
-    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _WAYFINDER_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Sitemap: {json.dumps(sitemap)}\n\nUser query: {query}"},
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
-        result = json.loads(resp.choices[0].message.content.strip())
-        if result.get("confidence", 0) < 0.5:
-            result["target_url"] = None
-        return result
-    except Exception as e:
-        logging.error(f"[navigate_app] LLM call failed: {e}")
-        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": "Navigation failed — please try again."}
+    if target_url not in sitemap:
+        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": f"'{target_url}' is not a valid app route."}
+
+    return {"target_url": target_url, "confidence": 1.0, "extracted_entities": None, "system_message": ""}
 
 
 # ---------------------------------------------------------------------------
