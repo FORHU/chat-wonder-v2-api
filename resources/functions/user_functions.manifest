@@ -320,17 +320,17 @@
     "persona": "stylist",
     "function": {
       "name": "navigate_app",
-      "description": "Navigate the user to a specific page in the app based on their intent. Call this when the user explicitly asks to go somewhere in the app (e.g. 'take me to my profile', 'open cosmetics'). Do NOT call this for outfit or skincare requests \u00e2\u20ac\u201d use recommend_garments or recommend_cosmetics instead.",
+      "description": "Navigate the user to a specific page in the app. Call this ONLY when the user explicitly asks to go somewhere (not for outfit or cosmetics requests). Pick the exact target_url from the sitemap table in your instructions. Do not invent URLs.",
       "parameters": {
         "type": "object",
         "properties": {
-          "query": {
+          "target_url": {
             "type": "string",
-            "description": "The user's navigation intent in natural language, e.g. 'go to my profile' or 'open the cosmetics section'."
+            "description": "The exact URL path from the sitemap table, e.g. '/ai-recommendation-fashion'. Must match a route in the table exactly."
           }
         },
         "required": [
-          "query"
+          "target_url"
         ]
       }
     }

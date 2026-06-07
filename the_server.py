@@ -485,7 +485,13 @@ def process_persona(user_input: str):
             "Respond with 1–2 sentences summarising what was found. "
             "Do NOT list places in text — the frontend renders place cards.\n\n"
             "- If the user explicitly wants to go somewhere in the app (not an outfit, cosmetics, or places request): "
-            "call navigate_app. Pass a clear description of their destination as the query. "
+            "call navigate_app. Pass target_url as the EXACT URL from this table — do not invent URLs. "
+            "If nothing matches, tell the user instead.\n\n"
+            "  /ai-assistant               → home / chat / start over\n"
+            "  /ai-recommendation-fashion  → outfits & garment recommendations\n"
+            "  /ai-recommendation-cosmetic → cosmetics & skincare\n"
+            "  /map                        → map & nearby places\n"
+            "  /overview                   → itinerary overview\n\n"
             "After the tool completes, respond with exactly 1 brief acknowledgment.\n\n"
             "NEVER show, repeat, or mention any annotation ([FRONTEND_WEATHER:...], [USER_LOCATION:...], "
             "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...]) in your response — all annotations are internal data only."
@@ -1519,6 +1525,22 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id,
             summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.")
         await asyncio.sleep(0)
+
+        _implicit_nav = {
+            "recommend_garments": "/ai-recommendation-fashion",
+            "recommend_cosmetics": "/ai-recommendation-cosmetic",
+            "search_nearby_places": "/map",
+        }
+        _tool = function_call["name"]
+        if _tool in _implicit_nav:
+            yield f'[NAV_DATA]{json.dumps({"target_url": _implicit_nav[_tool]})}'
+        elif _tool == "navigate_app":
+            try:
+                _target = json.loads(function_call["arguments"]).get("target_url")
+                if _target:
+                    yield f'[NAV_DATA]{json.dumps({"target_url": _target})}'
+            except Exception:
+                pass
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
 
