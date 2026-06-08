@@ -25,9 +25,9 @@ import pandas as pd
 import tiktoken
 import langid
 from openai import OpenAI
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
@@ -483,7 +483,7 @@ def process_persona(user_input: str):
             "After the tool completes, respond with exactly 1 warm sentence.\n\n"
             "- If the user uploads or references a cosmetic product photo (front and back labels are in S3): "
             "call scan_cosmetic with the S3 keys and the user's skin type. "
-            "After the tool completes, summarise the key ingredients and any concerns in 2–3 sentences.\n\n"
+            "After the tool completes, summarise the key ingredients and any concerns in 1–2 sentences.\n\n"
             "- If the user wants to know whether two scanned products are safe to use together: "
             "call match_cosmetics with the ingredient lists from the prior scans and the user's skin type. "
             "After the tool completes, give a clear verdict in 1–2 sentences.\n\n"
@@ -3273,3 +3273,116 @@ async def match_cosmetic_products(request: CosmeticMatchRequest):
         summary="Compatibility check complete. Results are ready.")
     logging.info(f"[Cosmetics Match] {scan_a.get('product_name')} + {scan_b.get('product_name')} → {result.get('verdict')}")
     return result
+
+
+@app.post("/api/tailor/generate")
+async def tailor_generate_outfit(
+    image: UploadFile = File(..., description="PNG canvas snapshot of the T-pose outfit"),
+    gender: str = Form(..., description="MALE or FEMALE"),
+):
+    """
+    REST endpoint for the Generate Outfit feature.
+    Accepts a canvas blob (PNG) from OutfitPreviewCanvas.getBlob() plus the
+    user's gender, calls gpt-image-1, uploads the result to S3, and returns
+    a presigned GET URL. Separate from the WebSocket [tailor] persona which
+    takes individual garment URLs.
+    """
+    if not _context.openai_api_key:
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+    gender_upper = (gender or "MALE").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        raise HTTPException(status_code=422, detail="gender must be MALE or FEMALE")
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(status_code=422, detail="image file is empty")
+
+    import base64
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    gender_word = "female" if gender_upper == "FEMALE" else "male"
+
+    prompt = (
+        f"Using the provided garment images as the only reference, create a premium ghost mannequin "
+        f"fashion product photograph combining all garments into one complete outfit. "
+        f"Preserve every garment exactly as shown — original colors, prints, logos, patterns, stitching, "
+        f"fabric texture, proportions, wrinkles, folds, and construction details. "
+        f"Do not redesign, replace, simplify, or generate alternative clothing. "
+        f"Reconstruct the outfit on a completely invisible {gender_word} mannequin with realistic body volume, "
+        f"natural garment draping, and accurate layering. The mannequin must be entirely hidden — "
+        f"no visible head, neck, face, arms, hands, legs, feet, skin, mannequin parts, or display stands. "
+        f"Subtle luxury pose: one leg slightly forward, weight shifted to back leg, slight knee bend, "
+        f"relaxed shoulders, clean editorial silhouette. "
+        f"If shoes are present, they must appear naturally worn with no visible feet, ankles, or shoe interiors; "
+        f"hems must flow directly into the shoes creating a seamless ghost mannequin effect. "
+        f"Studio-quality luxury e-commerce fashion photography. Centered full-body view. "
+        f"Pure white seamless background (#FFFFFF). Ultra-sharp focus. Professional catalog lighting. "
+        f"Negative: visible body parts, mannequin structure, display stand, floor reflection, "
+        f"extra garments, duplicated clothing, watermark, cropped outfit, redesigned clothing."
+    )
+
+    from openai import OpenAI
+    client = OpenAI(api_key=_context.openai_api_key)
+    try:
+        response = client.responses.create(
+            model="gpt-image-1",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"},
+                    {"type": "input_text", "text": prompt},
+                ],
+            }],
+        )
+
+        image_b64 = None
+        for item in response.output:
+            if getattr(item, "type", "") == "image_generation_call":
+                image_b64 = item.result
+                break
+
+        if not image_b64:
+            raise HTTPException(status_code=500, detail="No image returned by gpt-image-1.")
+
+        result_bytes = base64.b64decode(image_b64)
+
+        tailor_bucket = os.getenv("TAILOR_S3_BUCKET_NAME")
+        tailor_region = os.getenv("TAILOR_AWS_REGION")
+        s3_key = f"tailor/generated/{uuid.uuid4()}.png"
+
+        uploaded = s3_storage.upload_bytes_to_s3(
+            result_bytes, s3_key, content_type="image/png",
+            bucket_name=tailor_bucket, region=tailor_region,
+        )
+        if not uploaded:
+            raise HTTPException(status_code=500, detail="Failed to upload generated outfit image to S3.")
+
+        image_url = s3_storage.generate_presigned_get(
+            s3_key, bucket_name=tailor_bucket, region=tailor_region,
+        )
+        if not image_url:
+            raise HTTPException(status_code=500, detail="Failed to generate presigned URL.")
+
+        logging.info(f"[tailor_generate_outfit] gender={gender_upper} s3_key={s3_key}")
+        return {"success": True, "image_url": image_url, "s3_key": s3_key, "gender": gender_upper}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[tailor_generate_outfit] Failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/proxy-image")
+async def proxy_image(url: str = Query(..., description="Public image URL to proxy")):
+    """Fetches an external image server-side and returns it. Used by the test
+    HTML so canvas.toBlob() works without CORS taint."""
+    import urllib.request as _urlreq
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+            content_type = resp.headers.get("Content-Type", "image/png")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not fetch image: {e}")
+    return Response(content=data, media_type=content_type.split(";")[0].strip())
