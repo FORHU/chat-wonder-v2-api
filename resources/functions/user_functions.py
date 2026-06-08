@@ -1807,6 +1807,7 @@ def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dic
         response = client.responses.create(
             model="gpt-image-1",
             input=[{"role": "user", "content": content}],
+            tools=[{"type": "image_generation"}],
         )
 
         image_b64 = None

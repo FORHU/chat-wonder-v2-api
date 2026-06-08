@@ -578,7 +578,7 @@ def process_persona(user_input: str):
             "You are a fashion tailor AI. Generate a ghost mannequin outfit photograph from the selected garment images.\n\n"
             "TOOL USE — call generate_outfit_image immediately. "
             "Extract garment_image_urls from [GARMENT_IMAGES:[...]] in the message. "
-            "Extract gender from [GENDER:MALE] or [GENDER:FEMALE] in the message, defaulting to MALE if absent.\n\n"
+            "Extract gender from [GENDER:MALE] or [GENDER:FEMALE] in the message.\n\n"
             "Never show, mention, or repeat any annotation in your response — all annotations are internal data only.\n\n"
             "RESPONSE — after the tool completes, respond with exactly 1 short sentence confirming the outfit has been generated."
         )
@@ -3324,22 +3324,14 @@ async def tailor_generate_outfit(
     from openai import OpenAI
     client = OpenAI(api_key=_context.openai_api_key)
     try:
-        response = client.responses.create(
+        gen = client.images.edit(
             model="gpt-image-1",
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"},
-                    {"type": "input_text", "text": prompt},
-                ],
-            }],
+            image=("outfit.png", image_bytes, "image/png"),
+            prompt=prompt,
+            n=1,
         )
 
-        image_b64 = None
-        for item in response.output:
-            if getattr(item, "type", "") == "image_generation_call":
-                image_b64 = item.result
-                break
+        image_b64 = gen.data[0].b64_json if gen.data else None
 
         if not image_b64:
             raise HTTPException(status_code=500, detail="No image returned by gpt-image-1.")
