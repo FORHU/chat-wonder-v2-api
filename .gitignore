@@ -24,3 +24,4 @@ legal_rag/__pycache__/retrieval.cpython-310.pyc
 legal_rag/__pycache__/router.cpython-310.pyc
 legal_rag/__pycache__/s3_client.cpython-310.pyc
 resources/functions/__pycache__/user_functions.cpython-310.pyc
+.claude/settings.local.json
