@@ -1798,9 +1798,9 @@ def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dic
         f"extra garments, duplicated clothing, watermark, cropped outfit, redesigned clothing."
     )
 
-    content = []
+    image_files = []
     loaded_count = 0
-    for url in garment_image_urls[:6]:
+    for i, url in enumerate(garment_image_urls[:6]):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1809,8 +1809,7 @@ def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dic
             if ext == "jpg":
                 ext = "jpeg"
             mime = f"image/{ext}" if ext in ("jpeg", "png", "webp", "gif") else "image/jpeg"
-            b64 = base64.b64encode(img_bytes).decode("utf-8")
-            content.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}"})
+            image_files.append((f"garment_{i}.png", img_bytes, mime))
             loaded_count += 1
         except Exception as e:
             _logger.warning(f"[generate_outfit_image] Could not load image {url}: {e}")
@@ -1818,32 +1817,27 @@ def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dic
     if loaded_count == 0:
         return {"success": False, "error": "Could not download any garment images."}
 
-    content.append({"type": "input_text", "text": prompt})
-
     client = OpenAI(api_key=api_key)
     try:
-        response = client.responses.create(
+        gen = client.images.edit(
             model="gpt-image-1",
-            input=[{"role": "user", "content": content}],
-            tools=[{"type": "image_generation"}],
+            image=image_files,
+            prompt=prompt,
+            n=1,
         )
 
-        image_b64 = None
-        for item in response.output:
-            if getattr(item, "type", "") == "image_generation_call":
-                image_b64 = item.result
-                break
+        image_b64 = gen.data[0].b64_json if gen.data else None
 
         if not image_b64:
             return {"success": False, "error": "No image returned by gpt-image-1."}
 
-        image_bytes = base64.b64decode(image_b64)
+        result_bytes = base64.b64decode(image_b64)
 
         tailor_bucket = os.getenv("TAILOR_S3_BUCKET_NAME")
         tailor_region = os.getenv("TAILOR_AWS_REGION")
         s3_key = f"tailor/generated/{uuid.uuid4()}.png"
         uploaded = s3_storage.upload_bytes_to_s3(
-            image_bytes, s3_key, content_type="image/png",
+            result_bytes, s3_key, content_type="image/png",
             bucket_name=tailor_bucket, region=tailor_region
         )
         if not uploaded:
