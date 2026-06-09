@@ -474,8 +474,8 @@ def process_persona(user_input: str):
             "If the conversation context implies a destination other than the user's current location "
             "(e.g. they mentioned a place, a trip, or a venue), also pass that place as the location parameter — "
             "the function will fetch weather there instead of relying on the frontend weather. "
-            "IMPORTANT — if the user's gender is not clear from the conversation (no 'i am male/female' in the message), "
-            "ask for it before calling recommend_garments. Never guess or assume gender. "
+            "If [USER_GENDER:MALE] or [USER_GENDER:FEMALE] is present in the message, use that gender directly — do not ask. "
+            "If gender is absent from annotations AND not clear from the conversation, ask before calling recommend_garments. "
             "After the tool completes, respond with exactly 1 warm sentence — do not list items in text.\n\n"
             "- If the user's intent involves skincare, beauty, or product recommendations: "
             "call recommend_cosmetics. If [SKIN_ANALYSIS:{...}] is present, extract it exactly as-is and pass as skin_analysis_json — "
@@ -501,7 +501,7 @@ def process_persona(user_input: str):
             "  /overview                   → itinerary overview\n\n"
             "After the tool completes, respond with exactly 1 brief acknowledgment.\n\n"
             "NEVER show, repeat, or mention any annotation ([FRONTEND_WEATHER:...], [USER_LOCATION:...], "
-            "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...]) in your response — all annotations are internal data only."
+            "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...], [USER_GENDER:...]) in your response — all annotations are internal data only."
         )
 
     elif user_input.lower().startswith("[nav]"):
@@ -2195,6 +2195,11 @@ async def chat_stream(websocket: WebSocket):
                 if data.get("skin_analysis"):
                     try:
                         user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
+                    except Exception:
+                        pass
+                if data.get("gender"):
+                    try:
+                        user_input = f"[USER_GENDER:{str(data['gender']).strip().upper()}]\n\n{user_input}"
                     except Exception:
                         pass
                 if data.get("sitemap_context"):
