@@ -1787,7 +1787,12 @@ def chat(request: ChatRequest):
                 pass
 
     if getattr(request, "document_context", None):
-        doc_injection = f"\n\n[CONTEXT: The user is viewing the following document:]\n{request.document_context}"
+        doc_injection = (
+            "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
+            "beauty, or cosmetics products. If the user is asking about outfits, garments, or "
+            "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
+            + request.document_context
+        )
         addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
 
     if not user_input.strip():
@@ -2209,7 +2214,12 @@ async def chat_stream(websocket: WebSocket):
                         pass
 
             if getattr(request, "document_context", None):
-                doc_injection = f"\n\n[CONTEXT: User is viewing:]\n{request.document_context}"
+                doc_injection = (
+                    "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
+                    "beauty, or cosmetics products. If the user is asking about outfits, garments, or "
+                    "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
+                    + request.document_context
+                )
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
 
             if not user_input.strip():
