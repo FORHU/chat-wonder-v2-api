@@ -2150,6 +2150,11 @@ async def chat_stream(websocket: WebSocket):
             init_openai_client(state, _context.openai_api_key)
 
             user_input = request.user_input or getattr(request, "user_history_select", "") or ""
+            if not user_input.strip():
+                await websocket.send_text("[Error] User input is empty.")
+                await websocket.send_text(_context.__END__)
+                continue
+
             persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
 
             # Inject frontend-provided weather for garment persona
@@ -2241,11 +2246,6 @@ async def chat_stream(websocket: WebSocket):
                     + request.document_context
                 )
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
-
-            if not user_input.strip():
-                await websocket.send_text("[Error] User input is empty.")
-                await websocket.send_text(_context.__END__)
-                continue
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
             _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
@@ -3340,20 +3340,31 @@ async def tailor_generate_outfit(
     prompt = (
         f"Using the provided garment images as the only reference, create a premium ghost mannequin "
         f"fashion product photograph combining all garments into one complete outfit. "
-        f"Preserve every garment exactly as shown — original colors, prints, logos, patterns, stitching, "
-        f"fabric texture, proportions, wrinkles, folds, and construction details. "
-        f"Do not redesign, replace, simplify, or generate alternative clothing. "
+        f"Reproduce EVERY garment EXACTLY as shown — same color, same cut, same length, same fabric texture, "
+        f"same prints, logos, patterns, stitching, proportions, wrinkles, folds, and construction details. "
+        f"Do not substitute, redesign, replace, simplify, or generate alternative versions of any garment. "
         f"Reconstruct the outfit on a completely invisible {gender_word} mannequin with realistic body volume, "
         f"natural garment draping, and accurate layering. The mannequin must be entirely hidden — "
-        f"no visible head, neck, face, arms, hands, legs, feet, skin, mannequin parts, or display stands. "
+        f"no visible head, neck, face, arms, hands, wrists, legs, feet, ankles, skin, mannequin parts, or display stands. "
         f"Subtle luxury pose: one leg slightly forward, weight shifted to back leg, slight knee bend, "
         f"relaxed shoulders, clean editorial silhouette. "
-        f"If shoes are present, they must appear naturally worn with no visible feet, ankles, or shoe interiors; "
-        f"hems must flow directly into the shoes creating a seamless ghost mannequin effect. "
+        f"If shoes are present, they must appear naturally worn with no visible feet, ankles, or shoe interiors. "
+        f"If a trouser or skirt hem falls above the shoe collar, the gap between hem and shoe must be empty white space — never skin, ankle, or leg. "
+        f"If the hem reaches the shoe, it must meet the shoe collar with zero gap — no skin visible between hem and shoe. "
+        f"If a bag is present, it must hang from the shoulder strap alone — no visible hand, wrist, or fingers gripping the strap or the bag body. "
+        f"All accessories (belts, scarves, jewelry) must appear worn on the invisible mannequin with no body parts visible. "
+        f"If any top is a crop top, tube top, or tank top, any exposed midriff, torso, or armhole area must show empty space or the garment's interior edge — never skin, flesh, or body. "
+        f"Shoulder straps and armholes must not reveal shoulder skin, arm skin, or collarbone — the mannequin is entirely invisible beneath. "
+        f"Any gap between garments (e.g., between a crop top hem and a waistband) must be empty space, not skin. "
         f"Studio-quality luxury e-commerce fashion photography. Centered full-body view. "
         f"Pure white seamless background (#FFFFFF). Ultra-sharp focus. Professional catalog lighting. "
         f"Negative: visible body parts, mannequin structure, display stand, floor reflection, "
-        f"extra garments, duplicated clothing, watermark, cropped outfit, redesigned clothing."
+        f"extra garments, duplicated clothing, watermark, cropped outfit, redesigned clothing, "
+        f"visible hands, visible wrists, visible fingers, visible ankles, visible socks, skin at hem, skin at cuff, "
+        f"shoe interior visible, trouser hem floating above shoe, leg between hem and shoe, ankle between hem and shoe, garment color changed, garment style changed, "
+        f"hand gripping bag, hand on strap, wrist near bag, "
+        f"visible midriff skin, visible torso skin, visible shoulder skin, visible collarbone, visible armhole skin, "
+        f"skin between garments, flesh gap, exposed body between top and bottom."
     )
 
     from openai import OpenAI
