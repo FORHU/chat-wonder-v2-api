@@ -350,11 +350,11 @@
               "MALE",
               "FEMALE"
             ],
-            "description": "User's gender for filtering garments. Required \u2014 ask the user if not stated."
+            "description": "User's gender for filtering garments. Required — ask the user if not stated."
           },
           "event_type": {
             "type": "string",
-            "description": "Type of event or occasion, e.g. 'formal dinner', 'casual day out', 'business meeting', 'wedding', 'beach outing'. Infer from context when possible."
+            "description": "Type of event or occasion described in natural language — e.g. 'formal dinner', 'casual day out', 'beach outing'. Used as context for the AI selection prompt. Use 'category' for structured API filtering instead."
           },
           "event_date": {
             "type": "string",
@@ -366,11 +366,27 @@
           },
           "sets": {
             "type": "integer",
-            "description": "Number of distinct outfit sets to recommend. Defaults to 1. Maximum is 3. Each set has a unique vibe tied to local fashion trends. Infer from user prompt \u2014 e.g. 'give me 2 outfits' \u2192 sets=2."
+            "description": "Number of distinct outfit sets to recommend. Defaults to 1. Maximum is 3. Each set has a unique vibe tied to local fashion trends. Infer from user prompt — e.g. 'give me 2 outfits' → sets=2."
           },
           "weather_json": {
             "type": "string",
             "description": "Pre-fetched weather data from the frontend as a JSON string. When the message contains [FRONTEND_WEATHER:{...}], extract that exact JSON string and pass it here verbatim. The function will skip internal weather fetching and use this data directly."
+          },
+          "category": {
+            "type": "string",
+            "description": "Outfit category to filter by, matching the outfit's metaData.category. Infer from the event or vibe the user describes — e.g. 'Formal', 'Casual', 'Streetwear', 'Smart Casual', 'Business', 'Party', 'Athleisure'. Omit if the user has no clear style preference."
+          },
+          "silhouette": {
+            "type": "string",
+            "description": "Outfit silhouette to filter by, matching metaData.silhouette. Use when the user expresses a fit or cut preference — e.g. 'Structured', 'Relaxed', 'Fitted', 'Oversized', 'Tailored'. Omit if unspecified."
+          },
+          "garment_type": {
+            "type": "string",
+            "description": "Specific garment type to include, matching metaData.garmentType — e.g. 'Jacket', 'Pants', 'Dress', 'TShirt', 'Shoes', 'Skirt'. Use when the user asks for an outfit built around a particular piece. Omit if not mentioned."
+          },
+          "tags": {
+            "type": "string",
+            "description": "Descriptive tag to narrow results, matching metaData.tags — e.g. 'wide leg pants', 'all white', 'monochrome', 'floral'. Use only when the user mentions a very specific descriptor. Omit if not applicable."
           }
         },
         "required": [
@@ -390,11 +406,11 @@
         "properties": {
           "lat": {
             "type": "number",
-            "description": "User's latitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided \u00e2\u20ac\u201d it will be ignored."
+            "description": "User's latitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided â€” it will be ignored."
           },
           "lng": {
             "type": "number",
-            "description": "User's longitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided \u00e2\u20ac\u201d it will be ignored."
+            "description": "User's longitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided â€” it will be ignored."
           },
           "query": {
             "type": "string",
@@ -406,7 +422,7 @@
           },
           "location_name": {
             "type": "string",
-            "description": "Named location(s) to search AT instead of the user's GPS. Single: 'La Union'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. REQUIRED when the user names a destination (e.g. 'meeting in La Union', 'going to Baguio'). When set, GPS lat/lng is ignored \u00e2\u20ac\u201d the place is geocoded automatically."
+            "description": "Named location(s) to search AT instead of the user's GPS. Single: 'La Union'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. REQUIRED when the user names a destination (e.g. 'meeting in La Union', 'going to Baguio'). When set, GPS lat/lng is ignored â€” the place is geocoded automatically."
           }
         },
         "required": [
@@ -430,7 +446,7 @@
           },
           "sets": {
             "type": "integer",
-            "description": "Number of distinct skincare routines to recommend. Defaults to 1. Maximum is 3. Each routine targets a different vibe or concern. Infer from user prompt \u2014 e.g. \"give me 2 routines\" -> sets=2."
+            "description": "Number of distinct skincare routines to recommend. Defaults to 1. Maximum is 3. Each routine targets a different vibe or concern. Infer from user prompt — e.g. \"give me 2 routines\" -> sets=2."
           }
         },
         "required": []
