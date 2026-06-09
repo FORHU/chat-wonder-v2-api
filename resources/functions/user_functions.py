@@ -1413,8 +1413,17 @@ def _http_get_json(url: str, headers: dict = None) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _fetch_all_garments() -> list:
+def _fetch_all_garments(search: str = None) -> list:
     api_key = os.getenv("GARMENTS_API_KEY", "")
+    if search:
+        query = urllib.parse.quote(search.strip())
+        try:
+            resp = _http_get_json(f"{_GARMENTS_API_BASE}?search={query}&page=1&limit=100", {"x-api-key": api_key})
+            if resp.get("status") == "success":
+                return resp["data"]["items"]
+            logging.warning(f"[garments] search '{search}' returned non-success, falling back to full fetch")
+        except Exception as e:
+            logging.warning(f"[garments] search fetch failed: {e}, falling back to full fetch")
     if _garments_cache["data"] and (time.time() - _garments_cache["timestamp"]) < _GARMENTS_CACHE_TTL:
         return _garments_cache["data"]
     try:
