@@ -1454,8 +1454,12 @@ def _fetch_all_outfits(search: str = None) -> list:
         try:
             resp = _http_get_json(f"{_OUTFITS_API_BASE}?search={query}&page=1&limit=100", {"x-api-key": api_key})
             if resp.get("status") == "success":
-                return resp["data"]["items"]
-            logging.warning(f"[outfits] search '{search}' returned non-success, falling back to full fetch")
+                items = resp["data"]["items"]
+                if items:
+                    return items
+                logging.warning(f"[outfits] search '{search}' returned empty results, falling back to full fetch")
+            else:
+                logging.warning(f"[outfits] search '{search}' returned non-success, falling back to full fetch")
         except Exception as e:
             logging.warning(f"[outfits] search fetch failed: {e}, falling back to full fetch")
     if _outfits_cache["data"] and (time.time() - _outfits_cache["timestamp"]) < _OUTFITS_CACHE_TTL:
