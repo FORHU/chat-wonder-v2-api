@@ -1447,21 +1447,53 @@ def _fetch_all_garments(search: str = None) -> list:
         return _garments_cache["data"] or []
 
 
-def _fetch_all_outfits(search: str = None) -> list:
+def _fetch_outfits(
+    meta_gender: str = None,
+    meta_category: str = None,
+    meta_silhouette: str = None,
+    meta_garment_type: str = None,
+    meta_tags: str = None,
+) -> list:
+    """Fetch outfits using structured API params.
+    Priority: filtered → gender-only → cached full catalogue."""
     api_key = os.getenv("GARMENTS_API_KEY", "")
-    if search:
-        query = urllib.parse.quote(search.strip())
+
+    def _call(params: dict) -> list:
+        qs = "&".join(
+            f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v
+        )
+        url = f"{_OUTFITS_API_BASE}?{qs}&page=1&limit=100" if qs else f"{_OUTFITS_API_BASE}?page=1&limit=100"
         try:
-            resp = _http_get_json(f"{_OUTFITS_API_BASE}?search={query}&page=1&limit=100", {"x-api-key": api_key})
+            resp = _http_get_json(url, {"x-api-key": api_key})
             if resp.get("status") == "success":
-                items = resp["data"]["items"]
-                if items:
-                    return items
-                logging.warning(f"[outfits] search '{search}' returned empty results, falling back to full fetch")
-            else:
-                logging.warning(f"[outfits] search '{search}' returned non-success, falling back to full fetch")
+                return resp["data"]["items"]
         except Exception as e:
-            logging.warning(f"[outfits] search fetch failed: {e}, falling back to full fetch")
+            logging.warning(f"[outfits] fetch failed {params}: {e}")
+        return []
+
+    # 1. Try with all structured filters
+    has_filters = any([meta_category, meta_silhouette, meta_garment_type, meta_tags])
+    if has_filters:
+        params = {}
+        if meta_gender: params["metaGender"] = meta_gender
+        if meta_category: params["metaCategory"] = meta_category
+        if meta_silhouette: params["metaSilhouette"] = meta_silhouette
+        if meta_garment_type: params["metaGarmentType"] = meta_garment_type
+        if meta_tags: params["metaTags"] = meta_tags
+        items = _call(params)
+        if items:
+            logging.info(f"[outfits] filtered fetch: {len(items)} item(s)")
+            return items
+        logging.info("[outfits] filtered fetch empty, falling back to gender-only")
+
+    # 2. Gender-only API call
+    if meta_gender:
+        items = _call({"metaGender": meta_gender})
+        if items:
+            logging.info(f"[outfits] gender-only fetch: {len(items)} item(s)")
+            return items
+
+    # 3. Full catalogue fallback (cached, paginated)
     if _outfits_cache["data"] and (time.time() - _outfits_cache["timestamp"]) < _OUTFITS_CACHE_TTL:
         return _outfits_cache["data"]
     try:
@@ -1574,6 +1606,10 @@ def recommend_garments(
     location: str = None,
     sets: int = 4,
     weather_json: str = None,
+    category: str = None,
+    silhouette: str = None,
+    garment_type: str = None,
+    tags: str = None,
 ) -> dict:
     """Fetch live weather and pre-composed outfit catalogue, then return AI-selected outfit sets as JSON.
 
@@ -1589,7 +1625,13 @@ def recommend_garments(
 
     gender_upper = (gender or "").strip().upper()
     if gender_upper not in ("MALE", "FEMALE"):
-        return {"success": False, "error": "gender must be 'MALE' or 'FEMALE'."}
+        return {
+            "success": False,
+            "error": (
+                "Gender is required to fetch outfits. "
+                "Ask the user: 'Could you tell me your gender so I can recommend the right outfits for you?'"
+            ),
+        }
 
     n_sets = max(1, min(int(sets or 1), 4))
 
@@ -1625,7 +1667,13 @@ def recommend_garments(
         lat, lon = _DEFAULT_LAT, _DEFAULT_LON
         weather = _fetch_weather(lat, lon, resolved_date)
 
-    all_outfits = _fetch_all_outfits(search=event_type or None)
+    all_outfits = _fetch_outfits(
+        meta_gender=gender_upper,
+        meta_category=category or None,
+        meta_silhouette=silhouette or None,
+        meta_garment_type=garment_type or None,
+        meta_tags=tags or None,
+    )
     if not all_outfits:
         return {"success": False, "error": "Outfit catalogue is unavailable. Please try again later."}
 

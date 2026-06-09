@@ -109,6 +109,7 @@ class ChatState:
         self.last_maps_result: list = []
         self.last_nav_result: dict = {}
         self.last_tailor_result: dict = {}
+        self.confirmed_gender: str = ""
         self.sitemap_context: list = []
         self.openai_client = None
         self.last_used: float = time.time()
@@ -474,8 +475,21 @@ def process_persona(user_input: str):
             "If the conversation context implies a destination other than the user's current location "
             "(e.g. they mentioned a place, a trip, or a venue), also pass that place as the location parameter — "
             "the function will fetch weather there instead of relying on the frontend weather. "
-            "If [USER_GENDER:MALE] or [USER_GENDER:FEMALE] is present in the message, use that gender directly — do not ask. "
-            "If gender is absent from annotations AND not clear from the conversation, ask before calling recommend_garments. "
+            "Gender rule: "
+            "1. If the user explicitly states a gender in the CURRENT message (e.g. 'I'm a male', 'for a woman', 'I said male'), use that — it overrides everything including the annotation. "
+            "2. Otherwise, use the [USER_GENDER:X] annotation that appears at the top of the current message — it is always the most recently confirmed gender for this session. "
+            "3. If no annotation is present AND no gender was stated in the current message, ask the user for their gender before calling recommend_garments. "
+            "Never read gender from conversation history — the annotation is the sole authoritative source across turns.\n"
+            "Event rule: for follow-up corrections or short replies ('I said male', 'make it 2 sets'), "
+            "carry forward the event type and other context from the MOST RECENT outfit request in the conversation — not from older turns. "
+            "Do not use event or occasion context from exchanges more than one turn back.\n"
+            "Use the structured filter params to narrow the catalogue before the AI makes its selection — "
+            "pass as many as are clearly implied by the conversation:\n"
+            "  category     → overall style/occasion vibe (e.g. 'Formal', 'Casual', 'Streetwear', 'Smart Casual', 'Party', 'Athleisure')\n"
+            "  silhouette   → fit or cut preference (e.g. 'Structured', 'Relaxed', 'Fitted', 'Oversized', 'Tailored')\n"
+            "  garment_type → specific piece the user wants the outfit built around (e.g. 'Jacket', 'Dress', 'Pants')\n"
+            "  tags         → very specific descriptor the user mentioned (e.g. 'wide leg pants', 'all white', 'monochrome')\n"
+            "Omit any param that is not clearly implied — do not guess. "
             "After the tool completes, respond with exactly 1 warm sentence — do not list items in text.\n\n"
             "- If the user's intent involves skincare, beauty, or product recommendations: "
             "call recommend_cosmetics. If [SKIN_ANALYSIS:{...}] is present, extract it exactly as-is and pass as skin_analysis_json — "
@@ -939,6 +953,9 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_garment_result = result
+                _g = result.get("gender", "").upper()
+                if _g in ("MALE", "FEMALE"):
+                    state.confirmed_gender = _g
         if func_name == "recommend_cosmetics" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -2202,11 +2219,14 @@ async def chat_stream(websocket: WebSocket):
                         user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
                     except Exception:
                         pass
-                if data.get("gender"):
-                    try:
-                        user_input = f"[USER_GENDER:{str(data['gender']).strip().upper()}]\n\n{user_input}"
-                    except Exception:
-                        pass
+                try:
+                    # Resolve gender: prefer client-sent DB value, fall back to server-side
+                    # state (set immediately when recommend_garments returns, no round-trip).
+                    _raw_gender = (data.get("gender") or "").strip().upper() or state.confirmed_gender
+                    if _raw_gender in ("MALE", "FEMALE"):
+                        user_input = f"[USER_GENDER:{_raw_gender}]\n\n{user_input}"
+                except Exception:
+                    pass
                 if data.get("sitemap_context"):
                     try:
                         user_input = f"[SITEMAP_CONTEXT:{json.dumps(data['sitemap_context'], ensure_ascii=False)}]\n\n{user_input}"
