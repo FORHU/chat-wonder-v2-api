@@ -879,8 +879,7 @@ def _fetch_cosmetics_by_search(search_term: str) -> list:
     """Fetch all pages for a single search term, using a per-term cache."""
     api_key = os.getenv("GARMENTS_API_KEY", "")
     cached = _cosmetics_cache.get(search_term)
-    if cached and (time.time() - cached["timestamp"]) < _COSMETICS_CACHE_TTL:
-        return cached["data"]
+    return cached["data"]
     try:
         encoded = urllib.parse.quote(search_term)
         first = _http_get_json(
