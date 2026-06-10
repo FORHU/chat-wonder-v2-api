@@ -459,7 +459,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["get_outfits_by_category", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics"]
+        stylist_whitelist = ["get_outfits_by_category", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -500,8 +500,12 @@ def process_persona(user_input: str):
             "  /map                        → map & nearby places\n"
             "  /overview                   → itinerary overview\n\n"
             "After the tool completes, respond with exactly 1 brief acknowledgment.\n\n"
+            "- If [GARMENT_IMAGES:[...]] is present and the user's intent is to generate an outfit image: "
+            "call generate_outfit_image. Extract the URL array exactly from the [GARMENT_IMAGES:...] annotation and pass as garment_image_urls. "
+            "Use gender from [USER_GENDER:X] — apply the same gender rule as for get_outfits_by_category. "
+            "After the tool completes, respond with exactly 1 warm sentence.\n\n"
             "NEVER show, repeat, or mention any annotation ([FRONTEND_WEATHER:...], [USER_LOCATION:...], "
-            "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...], [USER_GENDER:...]) in your response — all annotations are internal data only."
+            "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...], [USER_GENDER:...], [GARMENT_IMAGES:...]) in your response — all annotations are internal data only."
         )
 
     elif user_input.lower().startswith("[nav]"):
@@ -2321,7 +2325,9 @@ async def chat_stream(websocket: WebSocket):
                 # Structured data frames fire regardless of whether LLM produced text,
                 # so the panel renders even when the LLM terminates silently after a tool call.
                 if persona == "stylist":
-                    if state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+                    if state.last_tailor_result and not (state.last_nav_result or {}).get("target_url"):
+                        state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+                    elif state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                     elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
@@ -2336,7 +2342,7 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
                 if persona in ("maps", "stylist") and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
-                if persona == "tailor" and state.last_tailor_result:
+                if persona in ("tailor", "stylist") and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
                 if persona == "stylist" and state.last_nav_result:
                     await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
