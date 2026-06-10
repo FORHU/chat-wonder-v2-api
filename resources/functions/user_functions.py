@@ -1598,6 +1598,105 @@ def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
 # Garment recommendation function
 # ---------------------------------------------------------------------------
 
+# Maps LLM-generated or user-spoken category terms → valid DB metaCategory values.
+# Keys are lowercase; values must match exactly what mirror-api stores.
+_CATEGORY_ALIAS: dict[str, str] = {
+    # Casual
+    "casual":           "Casual",
+    "everyday":         "Casual",
+    "daily":            "Casual",
+    "weekend":          "Casual",
+    "relaxed":          "Casual",
+    "lounge":           "Casual",
+    "chill":            "Casual",
+    "beach":            "Casual",
+    "vacation":         "Casual",
+    "travel":           "Casual",
+    "brunch":           "Casual",
+    # SmartCasual
+    "smart casual":     "SmartCasual",
+    "smartcasual":      "SmartCasual",
+    "smart-casual":     "SmartCasual",
+    "date":             "SmartCasual",
+    "date night":       "SmartCasual",
+    "dinner":           "SmartCasual",
+    "cocktail":         "SmartCasual",
+    "semi formal":      "SmartCasual",
+    "semi-formal":      "SmartCasual",
+    # Formal
+    "formal":           "Formal",
+    "interview":        "Formal",
+    "job interview":    "Formal",
+    "wedding":          "Formal",
+    "gala":             "Formal",
+    "black tie":        "Formal",
+    "ceremony":         "Formal",
+    "graduation":       "Formal",
+    "church":           "Formal",
+    # Business
+    "business":         "Business",
+    "office":           "Business",
+    "work":             "Business",
+    "professional":     "Business",
+    "corporate":        "Business",
+    "meeting":          "Business",
+    "business casual":  "Business",
+    # Streetwear
+    "streetwear":       "Streetwear",
+    "street":           "Streetwear",
+    "urban":            "Streetwear",
+    "hype":             "Streetwear",
+    "hypebeast":        "Streetwear",
+    "skate":            "Streetwear",
+    # Athleisure
+    "athleisure":       "Athleisure",
+    "athleisure wear":  "Athleisure",
+    # Activewear
+    "activewear":       "Activewear",
+    "active":           "Activewear",
+    "gym":              "Activewear",
+    "workout":          "Activewear",
+    "exercise":         "Activewear",
+    "fitness":          "Activewear",
+    "yoga":             "Activewear",
+    "pilates":          "Activewear",
+    "running":          "Activewear",
+    "hiking":           "Activewear",
+    "outdoor":          "Activewear",
+    "trail":            "Activewear",
+    "camp":             "Activewear",
+    "camping":          "Activewear",
+    # Sportswear
+    "sportswear":       "Sportswear",
+    "sport":            "Sportswear",
+    "sports":           "Sportswear",
+    "athletic":         "Sportswear",
+    "basketball":       "Sportswear",
+    "football":         "Sportswear",
+    "tennis":           "Sportswear",
+    "soccer":           "Sportswear",
+    "cycling":          "Sportswear",
+    "swimming":         "Sportswear",
+}
+
+_VALID_CATEGORIES = {
+    "Casual", "SmartCasual", "Formal", "Business",
+    "Streetwear", "Athleisure", "Activewear", "Sportswear",
+}
+
+
+def _normalize_category(raw: str) -> str:
+    """Return the closest valid metaCategory for raw, or raw itself if already valid."""
+    if not raw:
+        return raw
+    # Already a valid category (case-insensitive check)
+    for valid in _VALID_CATEGORIES:
+        if raw.lower() == valid.lower():
+            return valid
+    # Alias table lookup
+    return _CATEGORY_ALIAS.get(raw.strip().lower(), raw)
+
+
 def get_outfits_by_category(
     category: str,
     gender: str,
@@ -1613,10 +1712,13 @@ def get_outfits_by_category(
             ),
         }
 
+    normalized = _normalize_category(category)
+
     return {
         "success": True,
-        "query": f"metaCategory={category}&metaGender={gender_upper}",
-        "reason": f"{category} outfits",
+        "query": f"metaCategory={normalized}&metaGender={gender_upper}",
+        "reason": f"{normalized} outfits",
+        "original_category": category if category != normalized else None,
     }
 
 
