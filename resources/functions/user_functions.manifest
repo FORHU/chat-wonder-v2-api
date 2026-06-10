@@ -337,6 +337,29 @@
   },
   {
     "type": "function",
+    "persona": "stylist",
+    "function": {
+      "name": "get_outfits_by_category",
+      "description": "Fetch outfits from the catalogue filtered by a specific category and gender. Use this when the user selects a category (e.g. 'Casual', 'Formal', 'Streetwear'). Returns all matching outfits directly — no AI selection, no weather.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Outfit category to filter by — pass the value exactly as received (e.g. 'Casual', 'Formal', 'Streetwear', 'Business', 'Athleisure')."
+          },
+          "gender": {
+            "type": "string",
+            "enum": ["MALE", "FEMALE"],
+            "description": "User's gender for filtering outfits. Required — ask the user if not known."
+          }
+        },
+        "required": ["category", "gender"]
+      }
+    }
+  },
+  {
+    "type": "function",
     "persona": "garment",
     "function": {
       "name": "recommend_garments",

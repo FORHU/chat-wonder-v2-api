@@ -1599,6 +1599,68 @@ def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
 # Garment recommendation function
 # ---------------------------------------------------------------------------
 
+def get_outfits_by_category(
+    category: str,
+    gender: str,
+) -> dict:
+    """Fetch outfits from the catalogue filtered by a specific category and gender. No AI selection — returns all matching outfits directly."""
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {
+            "success": False,
+            "error": (
+                "Gender is required to fetch outfits. "
+                "Ask the user: 'Could you tell me your gender so I can recommend the right outfits for you?'"
+            ),
+        }
+
+    all_outfits = _fetch_outfits(
+        meta_gender=gender_upper,
+        meta_category=category or None,
+    )
+    if not all_outfits:
+        return {"success": False, "error": f"No outfits found for category: {category}"}
+
+    filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
+    if not filtered:
+        filtered = all_outfits
+
+    sets = [
+        {
+            "set_number": i + 1,
+            "outfit_id": o["id"],
+            "outfit_name": o.get("name", ""),
+            "outfit_description": o.get("description", ""),
+            "outfit_imageUrl": o.get("imageUrl", ""),
+            "vibe": category,
+            "reason": f"{category} outfit",
+            "recommendations": [
+                {
+                    "id": g["garment"]["id"],
+                    "name": g["garment"]["name"],
+                    "description": g["garment"].get("description", ""),
+                    "imageUrl": g["garment"].get("imageUrl", ""),
+                    "fittingSlot": g["garment"].get("fittingSlot", []),
+                    "garmentType": g["garment"].get("garmentType", []),
+                    "category": g["garment"].get("category", []),
+                    "layerLevel": g["garment"].get("layerLevel", ""),
+                    "silhouette": g["garment"].get("silhouette", ""),
+                }
+                for g in o.get("items", [])
+                if g.get("garment")
+            ],
+        }
+        for i, o in enumerate(filtered)
+    ]
+
+    return {
+        "success": True,
+        "gender": gender_upper,
+        "category": category,
+        "sets": sets,
+    }
+
+
 def recommend_garments(
     gender: str,
     event_type: str = None,
