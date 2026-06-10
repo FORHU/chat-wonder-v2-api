@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>get_outfits_by_category — Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #e5e5e5; min-height: 100vh; padding: 32px; }
+    h1 { font-size: 18px; font-weight: 600; margin-bottom: 24px; color: #fff; }
+
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 24px;
+    }
+    label { font-size: 12px; color: #888; display: block; margin-bottom: 4px; }
+    input, select {
+      background: #1a1a1a; border: 1px solid #333; color: #e5e5e5;
+      padding: 8px 12px; border-radius: 6px; font-size: 14px; outline: none;
+    }
+    input:focus, select:focus { border-color: #555; }
+    input[type="text"] { width: 220px; }
+
+    .category-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+    .chip {
+      padding: 6px 14px; border-radius: 20px; font-size: 13px; cursor: pointer;
+      border: 1px solid #333; background: #1a1a1a; color: #aaa; transition: all 0.15s;
+    }
+    .chip:hover { border-color: #666; color: #fff; }
+    .chip.active { background: #fff; color: #000; border-color: #fff; }
+
+    button {
+      padding: 9px 20px; background: #fff; color: #000; border: none; border-radius: 6px;
+      font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .status {
+      font-size: 13px; color: #666; margin-bottom: 20px; min-height: 18px;
+    }
+    .status.error { color: #f87171; }
+    .status.ok { color: #4ade80; }
+
+    .meta {
+      font-size: 12px; color: #555; margin-bottom: 20px; font-family: monospace;
+      background: #111; padding: 12px; border-radius: 6px; border: 1px solid #222;
+    }
+    .meta span { color: #888; }
+
+    .sets { display: flex; flex-direction: column; gap: 32px; }
+
+    .outfit-card {
+      background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; overflow: hidden;
+    }
+    .outfit-header {
+      display: flex; gap: 16px; padding: 16px; border-bottom: 1px solid #222;
+    }
+    .outfit-img {
+      width: 80px; height: 80px; object-fit: cover; border-radius: 6px;
+      background: #222; flex-shrink: 0;
+    }
+    .outfit-img-placeholder {
+      width: 80px; height: 80px; border-radius: 6px; background: #222;
+      display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0;
+    }
+    .outfit-meta { flex: 1; min-width: 0; }
+    .outfit-name { font-size: 15px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+    .outfit-desc { font-size: 13px; color: #666; margin-bottom: 6px; }
+    .outfit-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+    .badge {
+      padding: 2px 8px; border-radius: 4px; font-size: 11px;
+      background: #252525; color: #888; border: 1px solid #333;
+    }
+    .badge.id { font-family: monospace; color: #555; }
+
+    .garments { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; padding: 16px; }
+
+    .garment-card {
+      background: #111; border: 1px solid #222; border-radius: 8px; overflow: hidden;
+    }
+    .garment-img {
+      width: 100%; aspect-ratio: 1; object-fit: cover; background: #1a1a1a;
+    }
+    .garment-img-placeholder {
+      width: 100%; aspect-ratio: 1; background: #1a1a1a;
+      display: flex; align-items: center; justify-content: center; font-size: 32px;
+    }
+    .garment-info { padding: 10px; }
+    .garment-name { font-size: 12px; font-weight: 600; color: #ccc; margin-bottom: 4px; truncate: 2; }
+    .garment-desc { font-size: 11px; color: #555; margin-bottom: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .garment-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+    .gtag {
+      padding: 1px 6px; border-radius: 3px; font-size: 10px;
+      background: #1e1e1e; color: #666; border: 1px solid #2a2a2a;
+    }
+    .gtag.slot { color: #60a5fa; border-color: #1e3a5f; background: #0f1f33; }
+    .gtag.layer { color: #a78bfa; border-color: #2d1f4a; background: #160f28; }
+
+    .raw-toggle {
+      margin-top: 32px; font-size: 12px; color: #555; cursor: pointer; user-select: none;
+    }
+    .raw-toggle:hover { color: #888; }
+    .raw {
+      margin-top: 10px; background: #111; border: 1px solid #222; border-radius: 6px;
+      padding: 16px; font-family: monospace; font-size: 11px; color: #666;
+      white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto;
+      display: none;
+    }
+    .raw.visible { display: block; }
+  </style>
+</head>
+<body>
+
+<h1>get_outfits_by_category — Test Harness</h1>
+
+<div class="controls">
+  <div>
+    <label>API Base URL</label>
+    <input type="text" id="baseUrl" value="http://localhost:8000" />
+  </div>
+  <div>
+    <label>Gender</label>
+    <select id="gender">
+      <option value="MALE">MALE</option>
+      <option value="FEMALE">FEMALE</option>
+    </select>
+  </div>
+  <div>
+    <label>Category (or type custom below)</label>
+    <input type="text" id="customCategory" placeholder="e.g. Casual" />
+  </div>
+  <div style="padding-bottom:1px">
+    <button id="runBtn" onclick="runTest()">Run</button>
+  </div>
+</div>
+
+<div class="category-chips" id="chips"></div>
+
+<div class="status" id="status">Ready.</div>
+<div class="meta" id="meta" style="display:none"></div>
+<div class="sets" id="results"></div>
+
+<div class="raw-toggle" id="rawToggle" style="display:none" onclick="toggleRaw()">▶ Show raw response</div>
+<pre class="raw" id="raw"></pre>
+
+<script>
+  const CATEGORIES = ["Casual", "Formal", "Streetwear", "SmartCasual", "Athleisure", "Activewear", "Sportswear", "Business"];
+
+  let selectedCategory = "Casual";
+  let rawVisible = false;
+  let sessionId = null;
+
+  // Build chips
+  const chipsEl = document.getElementById("chips");
+  CATEGORIES.forEach(cat => {
+    const chip = document.createElement("div");
+    chip.className = "chip" + (cat === selectedCategory ? " active" : "");
+    chip.textContent = cat;
+    chip.onclick = () => {
+      selectedCategory = cat;
+      document.getElementById("customCategory").value = "";
+      document.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+    };
+    chipsEl.appendChild(chip);
+  });
+
+  document.getElementById("customCategory").addEventListener("input", (e) => {
+    if (e.target.value.trim()) {
+      document.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
+      selectedCategory = null;
+    } else {
+      selectedCategory = "Casual";
+      document.querySelector(".chip").classList.add("active");
+    }
+  });
+
+  function setStatus(msg, type = "") {
+    const el = document.getElementById("status");
+    el.textContent = msg;
+    el.className = "status " + type;
+  }
+
+  async function getSessionId(base) {
+    const res = await fetch(`${base}/session-id`);
+    const json = await res.json();
+    return json.session_id;
+  }
+
+  async function runTest() {
+    const base = document.getElementById("baseUrl").value.replace(/\/$/, "");
+    const gender = document.getElementById("gender").value;
+    const customVal = document.getElementById("customCategory").value.trim();
+    const category = customVal || selectedCategory || "Casual";
+
+    document.getElementById("runBtn").disabled = true;
+    document.getElementById("results").innerHTML = "";
+    document.getElementById("meta").style.display = "none";
+    document.getElementById("rawToggle").style.display = "none";
+    document.getElementById("raw").classList.remove("visible");
+    setStatus("Getting session…");
+
+    try {
+      sessionId = await getSessionId(base);
+      setStatus("Calling get_outfits_by_category…");
+
+      const payload = {
+        user_input: `[stylist] [USER_GENDER:${gender}]\n\n${category}`,
+        session_id: sessionId,
+      };
+
+      const t0 = Date.now();
+      const res = await fetch(`${base}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt}`);
+      }
+
+      const data = await res.json();
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+
+      // Show raw
+      document.getElementById("raw").textContent = JSON.stringify(data, null, 2);
+      document.getElementById("rawToggle").style.display = "block";
+
+      const garmentSets = data.garment_sets;
+
+      if (!garmentSets || !garmentSets.success) {
+        const err = garmentSets?.error || "No garment_sets returned.";
+        setStatus(`Error: ${err}`, "error");
+        document.getElementById("runBtn").disabled = false;
+        return;
+      }
+
+      // New architecture: chat-wonder emits a query descriptor only.
+      // Mirror-api resolves the actual outfits from its DB.
+      const query = garmentSets.query || null;
+      if (!query) {
+        setStatus("Unexpected: garment_sets returned but has no query field.", "error");
+        document.getElementById("runBtn").disabled = false;
+        return;
+      }
+
+      setStatus(`OK — query descriptor emitted in ${elapsed}s`, "ok");
+
+      const params = Object.fromEntries(new URLSearchParams(query));
+      const metaEl = document.getElementById("meta");
+      metaEl.style.display = "block";
+      metaEl.innerHTML =
+        `<span>session_id</span>   ${sessionId}<br>` +
+        `<span>query</span>        ${query}<br>` +
+        `<span>metaCategory</span> ${params.metaCategory ?? "—"}<br>` +
+        `<span>metaGender</span>   ${params.metaGender ?? "—"}<br>` +
+        `<span>reason</span>       ${garmentSets.reason ?? "—"}<br>` +
+        `<span>elapsed</span>      ${elapsed}s<br><br>` +
+        `<span style="color:#4ade80">✓ Chat-wonder emitted the query. Mirror-api resolves outfits from its DB.</span>`;
+    } catch (err) {
+      setStatus("Error: " + err.message, "error");
+    }
+
+    document.getElementById("runBtn").disabled = false;
+  }
+
+function toggleRaw() {
+    rawVisible = !rawVisible;
+    const rawEl = document.getElementById("raw");
+    const toggle = document.getElementById("rawToggle");
+    rawEl.classList.toggle("visible", rawVisible);
+    toggle.textContent = rawVisible ? "▼ Hide raw response" : "▶ Show raw response";
+  }
+</script>
+</body>
+</html>

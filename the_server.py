@@ -459,7 +459,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["recommend_garments", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics"]
+        stylist_whitelist = ["get_outfits_by_category", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -469,27 +469,13 @@ def process_persona(user_input: str):
             "You don't hedge — when you like something, say so. When something doesn't fit, redirect with care. "
             "Keep conversational responses to 1–2 sentences unless the user asks for more.\n\n"
             "TOOL USE — use the appropriate tool based on context and user intent:\n\n"
-            "- If [FRONTEND_WEATHER:{...}] is present and the user's intent involves outfits or dressing: "
-            "call recommend_garments. Extract the weather JSON exactly as-is and pass it as weather_json. "
-            "Always request 4 sets unless the user explicitly asks for fewer. "
-            "If the conversation context implies a destination other than the user's current location "
-            "(e.g. they mentioned a place, a trip, or a venue), also pass that place as the location parameter — "
-            "the function will fetch weather there instead of relying on the frontend weather. "
+            "- If the user's intent involves outfits or dressing (including a single category word like 'Casual', 'Formal', 'Streetwear'): "
+            "call get_outfits_by_category. Pass the category exactly as given. "
             "Gender rule: "
             "1. If the user explicitly states a gender in the CURRENT message (e.g. 'I'm a male', 'for a woman', 'I said male'), use that — it overrides everything including the annotation. "
             "2. Otherwise, use the [USER_GENDER:X] annotation that appears at the top of the current message — it is always the most recently confirmed gender for this session. "
-            "3. If no annotation is present AND no gender was stated in the current message, ask the user for their gender before calling recommend_garments. "
+            "3. If no annotation is present AND no gender was stated in the current message, ask the user for their gender before calling the tool. "
             "Never read gender from conversation history — the annotation is the sole authoritative source across turns.\n"
-            "Event rule: for follow-up corrections or short replies ('I said male', 'make it 2 sets'), "
-            "carry forward the event type and other context from the MOST RECENT outfit request in the conversation — not from older turns. "
-            "Do not use event or occasion context from exchanges more than one turn back.\n"
-            "Use the structured filter params to narrow the catalogue before the AI makes its selection — "
-            "pass as many as are clearly implied by the conversation:\n"
-            "  category     → overall style/occasion vibe (e.g. 'Formal', 'Casual', 'Streetwear', 'Smart Casual', 'Party', 'Athleisure')\n"
-            "  silhouette   → fit or cut preference (e.g. 'Structured', 'Relaxed', 'Fitted', 'Oversized', 'Tailored')\n"
-            "  garment_type → specific piece the user wants the outfit built around (e.g. 'Jacket', 'Dress', 'Pants')\n"
-            "  tags         → very specific descriptor the user mentioned (e.g. 'wide leg pants', 'all white', 'monochrome')\n"
-            "Omit any param that is not clearly implied — do not guess. "
             "After the tool completes, respond with exactly 1 warm sentence — do not list items in text.\n\n"
             "- If the user's intent involves skincare, beauty, or product recommendations: "
             "call recommend_cosmetics. If [SKIN_ANALYSIS:{...}] is present, extract it exactly as-is and pass as skin_analysis_json — "
@@ -514,8 +500,12 @@ def process_persona(user_input: str):
             "  /map                        → map & nearby places\n"
             "  /overview                   → itinerary overview\n\n"
             "After the tool completes, respond with exactly 1 brief acknowledgment.\n\n"
+            "- If [GARMENT_IMAGES:[...]] is present and the user's intent is to generate an outfit image: "
+            "call generate_outfit_image. Extract the URL array exactly from the [GARMENT_IMAGES:...] annotation and pass as garment_image_urls. "
+            "Use gender from [USER_GENDER:X] — apply the same gender rule as for get_outfits_by_category. "
+            "After the tool completes, respond with exactly 1 warm sentence.\n\n"
             "NEVER show, repeat, or mention any annotation ([FRONTEND_WEATHER:...], [USER_LOCATION:...], "
-            "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...], [USER_GENDER:...]) in your response — all annotations are internal data only."
+            "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...], [USER_GENDER:...], [GARMENT_IMAGES:...]) in your response — all annotations are internal data only."
         )
 
     elif user_input.lower().startswith("[nav]"):
@@ -949,7 +939,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_search_legal_results = result.get("results", [])
-        if func_name == "recommend_garments" and session_id and isinstance(result, dict):
+        if func_name == "get_outfits_by_category" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_garment_result = result
@@ -1551,7 +1541,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         await asyncio.sleep(0)
 
         _implicit_nav = {
-            "recommend_garments": "/ai-recommendation-fashion",
+            "get_outfits_by_category": "/ai-recommendation-fashion",
             "recommend_cosmetics": "/ai-recommendation-cosmetic",
             "search_nearby_places": "/map",
         }
@@ -2335,7 +2325,9 @@ async def chat_stream(websocket: WebSocket):
                 # Structured data frames fire regardless of whether LLM produced text,
                 # so the panel renders even when the LLM terminates silently after a tool call.
                 if persona == "stylist":
-                    if state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+                    if state.last_tailor_result and not (state.last_nav_result or {}).get("target_url"):
+                        state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+                    elif state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                     elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
@@ -2350,7 +2342,7 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
                 if persona in ("maps", "stylist") and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
-                if persona == "tailor" and state.last_tailor_result:
+                if persona in ("tailor", "stylist") and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
                 if persona == "stylist" and state.last_nav_result:
                     await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")

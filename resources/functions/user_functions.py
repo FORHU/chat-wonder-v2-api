@@ -1599,6 +1599,28 @@ def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
 # Garment recommendation function
 # ---------------------------------------------------------------------------
 
+def get_outfits_by_category(
+    category: str,
+    gender: str,
+) -> dict:
+    """Signal mirror-api to fetch outfits by category. Returns a query descriptor — mirror-api resolves the actual outfits from its DB."""
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {
+            "success": False,
+            "error": (
+                "Gender is required to fetch outfits. "
+                "Ask the user: 'Could you tell me your gender so I can recommend the right outfits for you?'"
+            ),
+        }
+
+    return {
+        "success": True,
+        "query": f"metaCategory={category}&metaGender={gender_upper}",
+        "reason": f"{category} outfits",
+    }
+
+
 def recommend_garments(
     gender: str,
     event_type: str = None,
