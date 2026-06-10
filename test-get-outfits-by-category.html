@@ -123,6 +123,7 @@
     <select id="gender">
       <option value="MALE">MALE</option>
       <option value="FEMALE">FEMALE</option>
+      <option value="null">null (no gender)</option>
     </select>
   </div>
   <div>
@@ -135,6 +136,14 @@
 </div>
 
 <div class="category-chips" id="chips"></div>
+
+<div style="margin-bottom:24px">
+  <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">
+    Free-form prompt <span style="color:#555">(optional — overrides category chips when filled)</span>
+  </label>
+  <input type="text" id="freePrompt" placeholder='e.g. I need an outfit for a job interview'
+    style="width:100%;max-width:600px;background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:8px 12px;border-radius:6px;font-size:14px;outline:none;" />
+</div>
 
 <div class="status" id="status">Ready.</div>
 <div class="meta" id="meta" style="display:none"></div>
@@ -189,9 +198,18 @@
 
   async function runTest() {
     const base = document.getElementById("baseUrl").value.replace(/\/$/, "");
-    const gender = document.getElementById("gender").value;
+    const genderVal = document.getElementById("gender").value;
     const customVal = document.getElementById("customCategory").value.trim();
+    const freePrompt = document.getElementById("freePrompt").value.trim();
     const category = customVal || selectedCategory || "Casual";
+
+    // Free-form prompt overrides category chips; gender annotation is omitted when gender=null
+    const genderAnnotation = genderVal !== "null" ? ` [USER_GENDER:${genderVal}]` : "";
+    const userInput = freePrompt
+      ? `[stylist]${genderAnnotation}\n\n${freePrompt}`
+      : `[stylist]${genderAnnotation}\n\n${category}`;
+
+    const modeLabel = freePrompt ? `free-form: "${freePrompt}"` : `category: ${category}`;
 
     document.getElementById("runBtn").disabled = true;
     document.getElementById("results").innerHTML = "";
@@ -201,13 +219,19 @@
     setStatus("Getting session…");
 
     try {
+      console.group(`[get_outfits_by_category] ${modeLabel} / gender=${genderVal}`);
+      console.log("[1] getting session…");
       sessionId = await getSessionId(base);
-      setStatus("Calling get_outfits_by_category…");
+      console.log("[2] session_id:", sessionId);
+
+      setStatus("Sending prompt…");
 
       const payload = {
-        user_input: `[stylist] [USER_GENDER:${gender}]\n\n${category}`,
+        user_input: userInput,
         session_id: sessionId,
       };
+
+      console.log("[3] sending payload:", payload);
 
       const t0 = Date.now();
       const res = await fetch(`${base}/chat`, {
@@ -218,11 +242,17 @@
 
       if (!res.ok) {
         const txt = await res.text();
+        console.error("[!] HTTP error:", res.status, txt);
         throw new Error(`HTTP ${res.status}: ${txt}`);
       }
 
       const data = await res.json();
       const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+
+      console.log("[4] full response:", data);
+      console.log("[5] garment_sets:", data.garment_sets);
+      console.log("[6] nav_result:", data.nav_result);
+      console.log("[7] elapsed:", elapsed + "s");
 
       // Show raw
       document.getElementById("raw").textContent = JSON.stringify(data, null, 2);
@@ -232,8 +262,10 @@
 
       if (!garmentSets || !garmentSets.success) {
         const err = garmentSets?.error || "No garment_sets returned.";
+        console.warn("[!] garment_sets missing or failed:", garmentSets);
         setStatus(`Error: ${err}`, "error");
         document.getElementById("runBtn").disabled = false;
+        console.groupEnd();
         return;
       }
 
@@ -241,17 +273,24 @@
       // Mirror-api resolves the actual outfits from its DB.
       const query = garmentSets.query || null;
       if (!query) {
+        console.warn("[!] garment_sets has no query field — unexpected shape:", garmentSets);
         setStatus("Unexpected: garment_sets returned but has no query field.", "error");
         document.getElementById("runBtn").disabled = false;
+        console.groupEnd();
         return;
       }
 
+      const params = Object.fromEntries(new URLSearchParams(query));
+      console.log("[8] query descriptor OK:", { query, params, reason: garmentSets.reason });
+
       setStatus(`OK — query descriptor emitted in ${elapsed}s`, "ok");
 
-      const params = Object.fromEntries(new URLSearchParams(query));
       const metaEl = document.getElementById("meta");
       metaEl.style.display = "block";
       metaEl.innerHTML =
+        `<span>mode</span>         ${freePrompt ? "free-form" : "category"}<br>` +
+        `<span>input</span>        ${freePrompt || category}<br>` +
+        `<span>gender</span>       ${genderVal}<br>` +
         `<span>session_id</span>   ${sessionId}<br>` +
         `<span>query</span>        ${query}<br>` +
         `<span>metaCategory</span> ${params.metaCategory ?? "—"}<br>` +
@@ -259,8 +298,12 @@
         `<span>reason</span>       ${garmentSets.reason ?? "—"}<br>` +
         `<span>elapsed</span>      ${elapsed}s<br><br>` +
         `<span style="color:#4ade80">✓ Chat-wonder emitted the query. Mirror-api resolves outfits from its DB.</span>`;
+
+      console.groupEnd();
     } catch (err) {
+      console.error("[!] exception:", err);
       setStatus("Error: " + err.message, "error");
+      console.groupEnd();
     }
 
     document.getElementById("runBtn").disabled = false;
