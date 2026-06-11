@@ -879,7 +879,8 @@ def _fetch_cosmetics_by_search(search_term: str) -> list:
     """Fetch all pages for a single search term, using a per-term cache."""
     api_key = os.getenv("GARMENTS_API_KEY", "")
     cached = _cosmetics_cache.get(search_term)
-    return cached["data"]
+    if cached and (time.time() - cached["timestamp"]) < _COSMETICS_CACHE_TTL:
+        return cached["data"]
     try:
         encoded = urllib.parse.quote(search_term)
         first = _http_get_json(
@@ -959,7 +960,7 @@ _VALID_SKIN_TYPES = {"DRY", "OILY", "COMBINATION", "NORMAL", "SENSITIVE"}
 
 
 def get_cosmetics_by_skin_type(skin_type: str) -> dict:
-    """Signal mirror-api to fetch cosmetic products by skin type. Returns a skin_type descriptor — mirror-api resolves the actual products from its DB."""
+    """Emit skin type to mirror-api which resolves the matching cosmetic products from its DB."""
     skin_upper = (skin_type or "").strip().upper()
     if skin_upper not in _VALID_SKIN_TYPES:
         return {
@@ -973,7 +974,6 @@ def get_cosmetics_by_skin_type(skin_type: str) -> dict:
     return {
         "success": True,
         "skin_type": skin_upper,
-        "reason": f"{skin_upper} skin type cosmetics",
     }
 
 
@@ -1620,110 +1620,11 @@ def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
 # Garment recommendation function
 # ---------------------------------------------------------------------------
 
-# Maps LLM-generated or user-spoken category terms → valid DB metaCategory values.
-# Keys are lowercase; values must match exactly what mirror-api stores.
-_CATEGORY_ALIAS: dict[str, str] = {
-    # Casual
-    "casual":           "Casual",
-    "everyday":         "Casual",
-    "daily":            "Casual",
-    "weekend":          "Casual",
-    "relaxed":          "Casual",
-    "lounge":           "Casual",
-    "chill":            "Casual",
-    "beach":            "Casual",
-    "vacation":         "Casual",
-    "travel":           "Casual",
-    "brunch":           "Casual",
-    # SmartCasual
-    "smart casual":     "SmartCasual",
-    "smartcasual":      "SmartCasual",
-    "smart-casual":     "SmartCasual",
-    "date":             "SmartCasual",
-    "date night":       "SmartCasual",
-    "dinner":           "SmartCasual",
-    "cocktail":         "SmartCasual",
-    "semi formal":      "SmartCasual",
-    "semi-formal":      "SmartCasual",
-    # Formal
-    "formal":           "Formal",
-    "interview":        "Formal",
-    "job interview":    "Formal",
-    "wedding":          "Formal",
-    "gala":             "Formal",
-    "black tie":        "Formal",
-    "ceremony":         "Formal",
-    "graduation":       "Formal",
-    "church":           "Formal",
-    # Business
-    "business":         "Business",
-    "office":           "Business",
-    "work":             "Business",
-    "professional":     "Business",
-    "corporate":        "Business",
-    "meeting":          "Business",
-    "business casual":  "Business",
-    # Streetwear
-    "streetwear":       "Streetwear",
-    "street":           "Streetwear",
-    "urban":            "Streetwear",
-    "hype":             "Streetwear",
-    "hypebeast":        "Streetwear",
-    "skate":            "Streetwear",
-    # Athleisure
-    "athleisure":       "Athleisure",
-    "athleisure wear":  "Athleisure",
-    # Activewear
-    "activewear":       "Activewear",
-    "active":           "Activewear",
-    "gym":              "Activewear",
-    "workout":          "Activewear",
-    "exercise":         "Activewear",
-    "fitness":          "Activewear",
-    "yoga":             "Activewear",
-    "pilates":          "Activewear",
-    "running":          "Activewear",
-    "hiking":           "Activewear",
-    "outdoor":          "Activewear",
-    "trail":            "Activewear",
-    "camp":             "Activewear",
-    "camping":          "Activewear",
-    # Sportswear
-    "sportswear":       "Sportswear",
-    "sport":            "Sportswear",
-    "sports":           "Sportswear",
-    "athletic":         "Sportswear",
-    "basketball":       "Sportswear",
-    "football":         "Sportswear",
-    "tennis":           "Sportswear",
-    "soccer":           "Sportswear",
-    "cycling":          "Sportswear",
-    "swimming":         "Sportswear",
-}
-
-_VALID_CATEGORIES = {
-    "Casual", "SmartCasual", "Formal", "Business",
-    "Streetwear", "Athleisure", "Activewear", "Sportswear",
-}
-
-
-def _normalize_category(raw: str) -> str:
-    """Return the closest valid metaCategory for raw, or raw itself if already valid."""
-    if not raw:
-        return raw
-    # Already a valid category (case-insensitive check)
-    for valid in _VALID_CATEGORIES:
-        if raw.lower() == valid.lower():
-            return valid
-    # Alias table lookup
-    return _CATEGORY_ALIAS.get(raw.strip().lower(), raw)
-
-
 def get_outfits_by_category(
     category: str,
     gender: str,
 ) -> dict:
-    """Signal mirror-api to fetch outfits by category. Returns a query descriptor — mirror-api resolves the actual outfits from its DB."""
+    """Fetch outfits from the catalogue filtered by a specific category and gender. No AI selection — returns all matching outfits directly."""
     gender_upper = (gender or "").strip().upper()
     if gender_upper not in ("MALE", "FEMALE"):
         return {
@@ -1734,13 +1635,50 @@ def get_outfits_by_category(
             ),
         }
 
-    normalized = _normalize_category(category)
+    all_outfits = _fetch_outfits(
+        meta_gender=gender_upper,
+        meta_category=category or None,
+    )
+    if not all_outfits:
+        return {"success": False, "error": f"No outfits found for category: {category}"}
+
+    filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
+    if not filtered:
+        filtered = all_outfits
+
+    sets = [
+        {
+            "set_number": i + 1,
+            "outfit_id": o["id"],
+            "outfit_name": o.get("name", ""),
+            "outfit_description": o.get("description", ""),
+            "outfit_imageUrl": o.get("imageUrl", ""),
+            "vibe": category,
+            "reason": f"{category} outfit",
+            "recommendations": [
+                {
+                    "id": g["garment"]["id"],
+                    "name": g["garment"]["name"],
+                    "description": g["garment"].get("description", ""),
+                    "imageUrl": g["garment"].get("imageUrl", ""),
+                    "fittingSlot": g["garment"].get("fittingSlot", []),
+                    "garmentType": g["garment"].get("garmentType", []),
+                    "category": g["garment"].get("category", []),
+                    "layerLevel": g["garment"].get("layerLevel", ""),
+                    "silhouette": g["garment"].get("silhouette", ""),
+                }
+                for g in o.get("items", [])
+                if g.get("garment")
+            ],
+        }
+        for i, o in enumerate(filtered)
+    ]
 
     return {
         "success": True,
-        "query": f"metaCategory={normalized}&metaGender={gender_upper}",
-        "reason": f"{normalized} outfits",
-        "original_category": category if category != normalized else None,
+        "gender": gender_upper,
+        "category": category,
+        "sets": sets,
     }
 
 
