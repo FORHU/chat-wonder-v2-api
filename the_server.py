@@ -459,7 +459,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["get_outfits_by_category", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
+        stylist_whitelist = ["get_outfits_by_category", "recommend_garments", "get_cosmetics_by_skin_type", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -469,18 +469,27 @@ def process_persona(user_input: str):
             "You don't hedge — when you like something, say so. When something doesn't fit, redirect with care. "
             "Keep conversational responses to 1–2 sentences unless the user asks for more.\n\n"
             "TOOL USE — use the appropriate tool based on context and user intent:\n\n"
-            "- If the user's intent involves outfits or dressing (including a single category word like 'Casual', 'Formal', 'Streetwear'): "
-            "call get_outfits_by_category. Pass the category exactly as given. "
+            "- OUTFIT REQUESTS — this is the most important rule: "
+            "ANY message that names a clothing category, style, or occasion (e.g. 'Casual', 'Formal', 'Business', 'Streetwear', 'Athleisure', 'Sportswear', 'Vintage', 'Minimalist', or any similar word) "
+            "MUST trigger an immediate call to get_outfits_by_category. "
+            "Do NOT respond with text advice, outfit guides, or questions about what the user wants. "
+            "Do NOT ask for clarification. Just call the tool. "
+            "Pass the category value exactly as received — do not rephrase or translate it. "
             "Gender rule: "
-            "1. If the user explicitly states a gender in the CURRENT message (e.g. 'I'm a male', 'for a woman', 'I said male'), use that — it overrides everything including the annotation. "
-            "2. Otherwise, use the [USER_GENDER:X] annotation that appears at the top of the current message — it is always the most recently confirmed gender for this session. "
-            "3. If no annotation is present AND no gender was stated in the current message, ask the user for their gender before calling the tool. "
-            "Never read gender from conversation history — the annotation is the sole authoritative source across turns.\n"
+            "1. If the user explicitly states a gender in the CURRENT message, use that. "
+            "2. Otherwise use the [USER_GENDER:X] annotation — it is always the authoritative gender for this session. "
+            "3. If no annotation and no gender stated, ask ONLY for gender — nothing else — then call the tool immediately once answered. "
+            "Never read gender from conversation history.\n"
             "After the tool completes, respond with exactly 1 warm sentence — do not list items in text.\n\n"
-            "- If the user's intent involves skincare, beauty, or product recommendations: "
-            "call recommend_cosmetics. If [SKIN_ANALYSIS:{...}] is present, extract it exactly as-is and pass as skin_analysis_json — "
-            "this personalises results to their actual skin profile. If not present, call without it (a general routine is returned). "
-            "After the tool completes, respond with exactly 1 warm sentence.\n\n"
+            "- SKINCARE / COSMETICS REQUESTS — this is the most important rule: "
+            "ANY message that names a skin type (e.g. 'Dry', 'Oily', 'Combination', 'Normal', 'Sensitive') "
+            "in the context of skincare or beauty MUST trigger an immediate call to get_cosmetics_by_skin_type. "
+            "Do NOT respond with text advice or ask for clarification. Just call the tool. "
+            "Pass the skin type value exactly as received — do not rephrase or translate it. "
+            "If [SKIN_TYPE:X] annotation is present, use that value. "
+            "After the tool completes, respond with exactly 1 warm sentence — do not list products in text.\n\n"
+            "- If the user's intent involves skincare or beauty but no skin type is stated or annotated: "
+            "ask ONLY for their skin type — nothing else — then call get_cosmetics_by_skin_type immediately once answered.\n\n"
             "- If the user uploads or references a cosmetic product photo (front and back labels are in S3): "
             "call scan_cosmetic with the S3 keys and the user's skin type. "
             "After the tool completes, summarise the key ingredients and any concerns in 1–2 sentences.\n\n"
@@ -946,10 +955,33 @@ def execute_function_call(function_call: dict, session_id: str = None):
                 _g = result.get("gender", "").upper()
                 if _g in ("MALE", "FEMALE"):
                     state.confirmed_gender = _g
-        if func_name == "recommend_cosmetics" and session_id and isinstance(result, dict):
+            _bg_gender = func_args.get("gender", "")
+            _bg_category = func_args.get("category", "")
+            if _bg_gender:
+                def _scl_garments(gender=_bg_gender, category=_bg_category):
+                    try:
+                        r = globals()["recommend_garments"](gender=gender, category=category or None, sets=1)
+                        logging.info(f"[SCL_TRACE] recommend_garments gender={gender} category={category} success={r.get('success')}")
+                    except Exception as _e:
+                        logging.warning(f"[SCL_TRACE] recommend_garments failed: {_e}")
+                Thread(target=_scl_garments, daemon=True).start()
+        if func_name in ("recommend_cosmetics", "get_cosmetics_by_skin_type") and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_cosmetics_result = result
+            if func_name == "get_cosmetics_by_skin_type":
+                _bg_skin_type = func_args.get("skin_type", "")
+                if _bg_skin_type:
+                    _SKIN_OILINESS = {"DRY": 20, "OILY": 80, "COMBINATION": 45, "NORMAL": 60, "SENSITIVE": 60}
+                    _oiliness = _SKIN_OILINESS.get(_bg_skin_type.upper(), 50)
+                    _skin_json = json.dumps({"output": [{"type": "oiliness", "ui_score": _oiliness}]})
+                    def _scl_cosmetics(skin_json=_skin_json, skin_type=_bg_skin_type):
+                        try:
+                            r = globals()["recommend_cosmetics"](skin_analysis_json=skin_json, sets=1)
+                            logging.info(f"[SCL_TRACE] recommend_cosmetics skin_type={skin_type} success={r.get('success')}")
+                        except Exception as _e:
+                            logging.warning(f"[SCL_TRACE] recommend_cosmetics failed: {_e}")
+                    Thread(target=_scl_cosmetics, daemon=True).start()
         if func_name == "search_nearby_places" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -1172,6 +1204,9 @@ def _summarize_tool_result(tool_name: str, result) -> str:
             places = result.get("places", []) if isinstance(result, dict) else []
             query = result.get("query", "") if isinstance(result, dict) else ""
             return f"{len(places)} place(s) found for '{query}'."
+        if tool_name == "get_cosmetics_by_skin_type":
+            skin_type = result.get("skin_type", "unknown") if isinstance(result, dict) else "unknown"
+            return f"Cosmetics fetched for {skin_type} skin type."
         if tool_name == "recommend_cosmetics":
             skin_type = result.get("skin_type", "unknown") if isinstance(result, dict) else "unknown"
             concerns = result.get("concerns", []) if isinstance(result, dict) else []
@@ -1246,6 +1281,9 @@ def _describe_tool_args(tool_name: str, arguments: str) -> str:
             location = args.get("location_name") or f"{args.get('lat', '')},{args.get('lng', '')}"
             radius = args.get("radius", 1500)
             return f'It will search for "{query}" near {location} (radius: {radius}m).'
+        if tool_name == "get_cosmetics_by_skin_type":
+            skin_type = args.get("skin_type", "unknown")
+            return f"It will fetch cosmetic products for {skin_type} skin type."
         if tool_name == "recommend_cosmetics":
             sets = args.get("sets", 1)
             return f"It will generate {sets} skincare routine(s) based on the skin analysis."
@@ -1543,6 +1581,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         _implicit_nav = {
             "get_outfits_by_category": "/ai-recommendation-fashion",
             "recommend_cosmetics": "/ai-recommendation-cosmetic",
+            "get_cosmetics_by_skin_type": "/ai-recommendation-cosmetic",
             "search_nearby_places": "/map",
         }
         _tool = function_call["name"]

@@ -456,6 +456,25 @@
   },
   {
     "type": "function",
+    "persona": "stylist",
+    "function": {
+      "name": "get_cosmetics_by_skin_type",
+      "description": "Fetch cosmetic product recommendations by skin type. Use this when the user selects or states their skin type (e.g. 'Dry', 'Oily', 'Combination', 'Normal', 'Sensitive'). Returns a skin_type signal — mirror-api resolves the matching products directly.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skin_type": {
+            "type": "string",
+            "enum": ["DRY", "OILY", "COMBINATION", "NORMAL", "SENSITIVE"],
+            "description": "User's skin type — pass the value exactly as received. Valid values: DRY, OILY, COMBINATION, NORMAL, SENSITIVE."
+          }
+        },
+        "required": ["skin_type"]
+      }
+    }
+  },
+  {
+    "type": "function",
     "persona": "cosmetics",
     "function": {
       "name": "recommend_cosmetics",
