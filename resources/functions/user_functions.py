@@ -955,6 +955,28 @@ def _derive_skin_profile(analysis_output: list) -> tuple:
     return skin_type, concerns
 
 
+_VALID_SKIN_TYPES = {"DRY", "OILY", "COMBINATION", "NORMAL", "SENSITIVE"}
+
+
+def get_cosmetics_by_skin_type(skin_type: str) -> dict:
+    """Signal mirror-api to fetch cosmetic products by skin type. Returns a skin_type descriptor — mirror-api resolves the actual products from its DB."""
+    skin_upper = (skin_type or "").strip().upper()
+    if skin_upper not in _VALID_SKIN_TYPES:
+        return {
+            "success": False,
+            "error": (
+                f"Invalid skin type '{skin_type}'. "
+                f"Valid values are: {', '.join(sorted(_VALID_SKIN_TYPES))}. "
+                "Ask the user their skin type if unknown."
+            ),
+        }
+    return {
+        "success": True,
+        "skin_type": skin_upper,
+        "reason": f"{skin_upper} skin type cosmetics",
+    }
+
+
 def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1, weather_json: str = None, location_json: str = None) -> dict:
     """Fetch cosmetics catalogue and return AI-curated skincare routines based on skin analysis scores.
 
