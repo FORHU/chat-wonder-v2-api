@@ -956,19 +956,6 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_garment_result = result
-                _g = result.get("gender", "").upper()
-                if _g in ("MALE", "FEMALE"):
-                    state.confirmed_gender = _g
-            _bg_gender = func_args.get("gender", "")
-            _bg_category = func_args.get("category", "")
-            if _bg_gender:
-                def _scl_garments(gender=_bg_gender, category=_bg_category):
-                    try:
-                        r = globals()["recommend_garments"](gender=gender, category=category or None, sets=1)
-                        logging.info(f"[SCL_TRACE] recommend_garments gender={gender} category={category} success={r.get('success')}")
-                    except Exception as _e:
-                        logging.warning(f"[SCL_TRACE] recommend_garments failed: {_e}")
-                Thread(target=_scl_garments, daemon=True).start()
         if func_name in ("recommend_cosmetics", "get_cosmetics_by_skin_type") and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -1851,7 +1838,7 @@ def chat(request: ChatRequest):
     if persona == "stylist" and request.category:
         _meta = request.category.get("meta", "")
         _gender = request.gender or state.confirmed_gender or "MALE"
-        _sets = max(1, min(4, request.sets or 3))
+        _sets = max(1, min(4, request.sets or 4))
         _outfit_result = search_outfits_by_category(
             gender=_gender,
             meta_categories=_meta,
@@ -2343,7 +2330,7 @@ async def chat_stream(websocket: WebSocket):
             if persona == "stylist" and data.get("category"):
                 _meta = data["category"].get("meta", "")
                 _gender = (data.get("gender") or "").strip().upper() or state.confirmed_gender or "MALE"
-                _sets = max(1, min(4, data.get("sets") or 3))
+                _sets = max(1, min(4, data.get("sets") or 4))
                 _outfit_result = search_outfits_by_category(
                     gender=_gender,
                     meta_categories=_meta,

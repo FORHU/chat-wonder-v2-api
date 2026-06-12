@@ -1904,7 +1904,7 @@ def search_outfits_by_category(
     meta_categories: str,
     location: dict = None,
     weather: dict = None,
-    sets: int = 3,
+    sets: int = 4,
 ) -> dict:
     """Filter outfits by metacategory + gender, use LLM to select UUIDs, return ids only.
 
@@ -1922,7 +1922,7 @@ def search_outfits_by_category(
     if gender_upper not in ("MALE", "FEMALE"):
         return {"success": False, "error": "gender must be MALE or FEMALE."}
 
-    n_sets = max(1, min(4, sets or 3))
+    n_sets = max(1, min(4, sets or 4))
 
     # Resolve location → lat/lon
     lat, lon = _DEFAULT_LAT, _DEFAULT_LON
@@ -1947,10 +1947,13 @@ def search_outfits_by_category(
         return {"success": False, "error": "No outfits found for the given categories."}
 
     # Slim catalogue — only what the LLM needs for selection
+    # Shuffle so repeated calls with the same query produce varied picks
+    import random
     slim = [
         {"id": o["id"], "name": o.get("name", ""), "description": o.get("description", "")}
         for o in outfits
     ]
+    random.shuffle(slim)
 
     # Build weather context string
     weather_parts = []
@@ -1989,7 +1992,7 @@ def search_outfits_by_category(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.5,
+            temperature=0.9,
             response_format={"type": "json_object"},
         )
         result = json.loads(resp.choices[0].message.content.strip())
