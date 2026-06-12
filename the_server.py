@@ -1578,15 +1578,6 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.")
         await asyncio.sleep(0)
 
-        _tool = function_call["name"]
-        if _tool == "navigate_app":
-            try:
-                _target = json.loads(function_call["arguments"]).get("target_url")
-                if _target:
-                    yield f'[NAV_DATA]{json.dumps({"target_url": _target})}'
-            except Exception:
-                pass
-
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
 
         _tool_start = time.time()
