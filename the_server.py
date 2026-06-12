@@ -1578,16 +1578,8 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.")
         await asyncio.sleep(0)
 
-        _implicit_nav = {
-            "get_outfits_by_category": "/ai-recommendation-fashion",
-            "recommend_cosmetics": "/ai-recommendation-cosmetic",
-            "get_cosmetics_by_skin_type": "/ai-recommendation-cosmetic",
-            "search_nearby_places": "/map",
-        }
         _tool = function_call["name"]
-        if _tool in _implicit_nav:
-            yield f'[NAV_DATA]{json.dumps({"target_url": _implicit_nav[_tool]})}'
-        elif _tool == "navigate_app":
+        if _tool == "navigate_app":
             try:
                 _target = json.loads(function_call["arguments"]).get("target_url")
                 if _target:
