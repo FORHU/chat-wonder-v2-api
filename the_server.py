@@ -459,7 +459,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["get_outfits_by_category", "recommend_garments", "get_cosmetics_by_skin_type", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
+        stylist_whitelist = ["get_outfits_by_category", "recommend_garments", "get_cosmetics_by_skin_type", "recommend_cosmetics", "search_nearby_places", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -2366,8 +2366,7 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
                 if persona in ("tailor", "stylist") and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
-                if persona == "stylist" and state.last_nav_result:
-                    await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
+                # nav emission disabled for stylist — front end handles navigation
                 _ws_t_end = time.time()
                 ttft = (_ws_t_first_chunk - _ws_t_start) if _ws_t_first_chunk else 0
                 logging.info(
