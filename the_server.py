@@ -109,6 +109,7 @@ class ChatState:
         self.last_maps_result: list = []
         self.last_nav_result: dict = {}
         self.last_tailor_result: dict = {}
+        self.last_outfit_ids_result: list = []
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
         self.openai_client = None
@@ -257,6 +258,9 @@ class ChatRequest(BaseModel):
     location: Optional[dict] = None
     sitemap_context: Optional[list] = None
     user_id: Optional[str] = None
+    gender: Optional[str] = None
+    category: Optional[dict] = None
+    sets: Optional[int] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -1843,6 +1847,38 @@ def chat(request: ChatRequest):
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
+    # Structured outfit search — bypass Miraj LLM when category is provided
+    if persona == "stylist" and request.category:
+        _meta = request.category.get("meta", "")
+        _gender = request.gender or state.confirmed_gender or "MALE"
+        _sets = max(1, min(4, request.sets or 3))
+        _outfit_result = search_outfits_by_category(
+            gender=_gender,
+            meta_categories=_meta,
+            location=request.location,
+            weather=request.weather,
+            sets=_sets,
+        )
+        if _outfit_result.get("success"):
+            state.last_outfit_ids_result = _outfit_result.get("ids", [])
+            if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
+                state.confirmed_gender = _outfit_result["gender"].upper()
+            def _scl_outfit_search(gender=_gender, meta=_meta):
+                try:
+                    r = search_outfits_by_category(gender=gender, meta_categories=meta, sets=1)
+                    logging.info(f"[SCL_TRACE] search_outfits_by_category gender={gender} meta={meta} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] search_outfits_by_category failed: {_e}")
+            Thread(target=_scl_outfit_search, daemon=True).start()
+        else:
+            logging.warning(f"[stylist] search_outfits_by_category failed: {_outfit_result.get('error')}")
+        logging.info("/chat [stylist/direct] %.2fs session=%s", time.time() - _t_start, session_id)
+        return {
+            "response": "",
+            "outfit_ids": state.last_outfit_ids_result,
+            "nav_result": {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
+        }
+
     # Normal path with optional HITL (legal, garment, cosmetics, maps, nav, stylist personas always auto-approve)
     _was_auto = _context.auto_approval
     if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist"):
@@ -2301,6 +2337,39 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text("[DONE]")
                 finally:
                     _context.auto_approval = _was_auto
+                continue
+
+            # Structured outfit search — bypass streaming LLM when category is provided
+            if persona == "stylist" and data.get("category"):
+                _meta = data["category"].get("meta", "")
+                _gender = (data.get("gender") or "").strip().upper() or state.confirmed_gender or "MALE"
+                _sets = max(1, min(4, data.get("sets") or 3))
+                _outfit_result = search_outfits_by_category(
+                    gender=_gender,
+                    meta_categories=_meta,
+                    location=data.get("location"),
+                    weather=data.get("weather"),
+                    sets=_sets,
+                )
+                if _outfit_result.get("success"):
+                    state.last_outfit_ids_result = _outfit_result.get("ids", [])
+                    if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
+                        state.confirmed_gender = _outfit_result["gender"].upper()
+                    def _scl_ws(gender=_gender, meta=_meta):
+                        try:
+                            r = search_outfits_by_category(gender=gender, meta_categories=meta, sets=1)
+                            logging.info(f"[SCL_TRACE] search_outfits_by_category gender={gender} meta={meta} success={r.get('success')}")
+                        except Exception as _e:
+                            logging.warning(f"[SCL_TRACE] search_outfits_by_category failed: {_e}")
+                    Thread(target=_scl_ws, daemon=True).start()
+                else:
+                    logging.warning(f"[stylist/ws] search_outfits_by_category failed: {_outfit_result.get('error')}")
+                state.prompt.append(user_input)
+                state.generated.append("")
+                _context.sessions[session_id] = state
+                await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
+                await websocket.send_text(_context.__END__)
+                _context.auto_approval = _was_auto
                 continue
 
             try:
