@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tailor — Generate Outfit Test</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d0d0d;
+      color: #e8e8e8;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+
+    h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; margin-bottom: 4px; color: #fff; }
+    .subtitle { font-size: 12px; color: #555; margin-bottom: 28px; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 24px;
+      max-width: 1140px;
+      align-items: start;
+    }
+
+    .panel {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 14px;
+      padding: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #666;
+      margin-bottom: 6px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      background: #111;
+      border: 1px solid #2e2e2e;
+      border-radius: 8px;
+      color: #e8e8e8;
+      font-size: 13px;
+      font-family: inherit;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="text"]:focus { border-color: #555; }
+
+    .field { margin-bottom: 16px; }
+
+    .gender-row { display: flex; gap: 8px; }
+    .gender-btn {
+      flex: 1;
+      background: #111;
+      border: 1px solid #2e2e2e;
+      border-radius: 8px;
+      color: #666;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .gender-btn.active { background: #fff; border-color: #fff; color: #000; }
+
+    /* Canvas area */
+    .canvas-wrap {
+      background: #111;
+      border: 1px solid #2e2e2e;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 200px;
+      position: relative;
+    }
+
+    canvas#tposeCanvas {
+      max-width: 100%;
+      display: block;
+      background: #f8f9fb;
+    }
+
+    .canvas-empty {
+      font-size: 12px;
+      color: #444;
+      padding: 40px;
+      text-align: center;
+    }
+
+    .slot-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .slot-box {
+      background: #111;
+      border: 1px dashed #2e2e2e;
+      border-radius: 8px;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .slot-box label { font-size: 10px; color: #555; margin-bottom: 0; }
+
+    .slot-box input {
+      width: 100%;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid #2a2a2a;
+      border-radius: 0;
+      color: #e8e8e8;
+      font-size: 11px;
+      padding: 4px 0;
+      outline: none;
+    }
+
+    .slot-thumb {
+      width: 100%;
+      height: 64px;
+      object-fit: contain;
+      background: #1a1a1a;
+      border-radius: 4px;
+      display: none;
+    }
+
+    .btn-build {
+      width: 100%;
+      background: #1e1e1e;
+      border: 1px solid #333;
+      border-radius: 10px;
+      color: #ccc;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 11px;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-bottom: 12px;
+    }
+    .btn-build:hover { background: #252525; }
+
+    .btn-generate {
+      width: 100%;
+      background: #fff;
+      border: none;
+      border-radius: 10px;
+      color: #000;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 13px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn-generate:hover { opacity: 0.88; }
+    .btn-generate:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    hr { border: none; border-top: 1px solid #1e1e1e; margin: 16px 0; }
+
+    /* Right panel */
+    .result-panel { display: flex; flex-direction: column; gap: 16px; }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #444;
+      margin-bottom: 6px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #555;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #333; flex-shrink: 0; }
+    .dot.green { background: #4caf76; }
+    .dot.yellow { background: #e5a43a; animation: pulse 1s ease-in-out infinite; }
+    .dot.red { background: #e05252; }
+    @keyframes pulse { 50% { opacity: 0.4; } }
+
+    .data-box {
+      background: #111;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      padding: 16px;
+      font-size: 12px;
+      font-family: monospace;
+      color: #7ec8a0;
+      white-space: pre-wrap;
+      word-break: break-all;
+      display: none;
+    }
+    .data-box.visible { display: block; }
+
+    .image-box { display: none; flex-direction: column; align-items: center; gap: 12px; }
+    .image-box.visible { display: flex; }
+    .image-box img {
+      width: 100%;
+      max-width: 440px;
+      border-radius: 12px;
+      border: 1px solid #2a2a2a;
+      background: #f8f8f8;
+    }
+    .image-meta { font-size: 12px; color: #555; text-align: center; }
+
+    /* Canvas side-by-side comparison */
+    .comparison { display: none; flex-direction: column; gap: 12px; }
+    .comparison.visible { display: flex; }
+    .comp-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .comp-col { display: flex; flex-direction: column; gap: 6px; }
+    .comp-col .section-label { margin-bottom: 0; }
+    .comp-col img, .comp-col canvas {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid #2a2a2a;
+      background: #f8f8f8;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Tailor — Generate Outfit</h1>
+<p class="subtitle">REST flow: canvas blob → POST /api/tailor/generate → gpt-image-1 → S3</p>
+
+<div class="layout">
+
+  <!-- LEFT: Controls -->
+  <div>
+    <div class="panel">
+
+      <div class="field">
+        <label>Server URL</label>
+        <input type="text" id="serverUrl" value="http://localhost:8000" />
+      </div>
+
+      <div class="field">
+        <label>Gender</label>
+        <div class="gender-row">
+          <button class="gender-btn active" id="genderMale" onclick="setGender('MALE')">Male</button>
+          <button class="gender-btn" id="genderFemale" onclick="setGender('FEMALE')">Female</button>
+        </div>
+      </div>
+
+      <hr />
+
+      <div class="field">
+        <label>Garment slots — paste image URLs</label>
+        <div class="slot-grid">
+          <div class="slot-box">
+            <label>Base Top</label>
+            <input type="text" id="slot_base" placeholder="https://…" oninput="slotChanged()" />
+            <img class="slot-thumb" id="thumb_base" />
+          </div>
+          <div class="slot-box">
+            <label>Mid Top</label>
+            <input type="text" id="slot_mid" placeholder="https://…" oninput="slotChanged()" />
+            <img class="slot-thumb" id="thumb_mid" />
+          </div>
+          <div class="slot-box">
+            <label>Outer Top</label>
+            <input type="text" id="slot_outer" placeholder="https://…" oninput="slotChanged()" />
+            <img class="slot-thumb" id="thumb_outer" />
+          </div>
+          <div class="slot-box">
+            <label>Bottom</label>
+            <input type="text" id="slot_bottom" placeholder="https://…" oninput="slotChanged()" />
+            <img class="slot-thumb" id="thumb_bottom" />
+          </div>
+          <div class="slot-box">
+            <label>Shoes</label>
+            <input type="text" id="slot_shoe" placeholder="https://…" oninput="slotChanged()" />
+            <img class="slot-thumb" id="thumb_shoe" />
+          </div>
+          <div class="slot-box">
+            <label>Bag</label>
+            <input type="text" id="slot_bag" placeholder="https://…" oninput="slotChanged()" />
+            <img class="slot-thumb" id="thumb_bag" />
+          </div>
+        </div>
+      </div>
+
+      <button class="btn-build" onclick="buildCanvas()">Build T-pose Canvas</button>
+
+      <div class="field">
+        <label>T-pose preview</label>
+        <div class="canvas-wrap" id="canvasWrap">
+          <div class="canvas-empty" id="canvasEmpty">Build the canvas first</div>
+          <canvas id="tposeCanvas" style="display:none;"></canvas>
+        </div>
+      </div>
+
+      <hr />
+
+      <button class="btn-generate" id="btnGenerate" onclick="generate()" disabled>
+        Generate Outfit Image
+      </button>
+
+    </div>
+  </div>
+
+  <!-- RIGHT: Results -->
+  <div class="result-panel">
+
+    <div>
+      <div class="section-label">Status</div>
+      <div class="status-row">
+        <div class="dot" id="statusDot"></div>
+        <span id="statusText">Idle</span>
+      </div>
+    </div>
+
+    <div class="comparison" id="comparison">
+      <div class="section-label">Input vs Output</div>
+      <div class="comp-row">
+        <div class="comp-col">
+          <div class="section-label">T-pose (input)</div>
+          <canvas id="compCanvas"></canvas>
+        </div>
+        <div class="comp-col">
+          <div class="section-label">Generated outfit (output)</div>
+          <img id="compResult" src="" alt="Generated outfit" />
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Response JSON</div>
+      <div class="data-box" id="dataBox"></div>
+    </div>
+
+    <div>
+      <div class="section-label">Generated Outfit Image</div>
+      <div class="image-box" id="imageBox">
+        <img id="outfitImg" src="" alt="Generated outfit" />
+        <div class="image-meta" id="imageMeta"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  let gender = "MALE";
+  let canvasReady = false;
+
+  // ── Slot helpers ──────────────────────────────────────────────────────────
+
+  const SLOTS = ["base", "mid", "outer", "bottom", "shoe", "bag"];
+
+  function setGender(g) {
+    gender = g;
+    document.getElementById("genderMale").classList.toggle("active", g === "MALE");
+    document.getElementById("genderFemale").classList.toggle("active", g === "FEMALE");
+  }
+
+  function slotChanged() {
+    SLOTS.forEach(slot => {
+      const url = document.getElementById(`slot_${slot}`).value.trim();
+      const thumb = document.getElementById(`thumb_${slot}`);
+      if (url) {
+        thumb.src = url;
+        thumb.style.display = "block";
+        thumb.onerror = () => { thumb.style.opacity = "0.3"; };
+        thumb.onload = () => { thumb.style.opacity = "1"; };
+      } else {
+        thumb.style.display = "none";
+      }
+    });
+  }
+
+  function getSlotUrl(slot) {
+    return document.getElementById(`slot_${slot}`).value.trim() || null;
+  }
+
+  // ── Canvas T-pose compositing ────────────────────────────────────────────
+
+  // Mirrors the BODY_POSITIONS and DRAW_ORDER from OutfitPreviewCanvas.tsx
+  const BODY_POSITIONS = {
+    torso:     [100, 120, 306, 383],
+    base:      [-20,  30, 306, 383],
+    mid:       [100,  30, 306, 383],
+    outer:     [250,  30, 306, 383],
+    legs:      [140, 360, 234, 370],
+    feet:      [140, 680, 234,  87],
+    rightHand: [320, 500,  72, 132],
+  };
+  const GARMENT_SCALE = {
+    torso: 0.8, base: 0.8, mid: 0.8, outer: 0.8,
+    legs: 0.8, feet: 1.3, rightHand: 2,
+  };
+
+  function proxyUrl(src) {
+    const base = document.getElementById("serverUrl").value.trim().replace(/\/$/, "");
+    // Route through the Python server so crossOrigin works without CORS issues
+    return `${base}/api/proxy-image?url=${encodeURIComponent(src)}`;
+  }
+
+  function loadImg(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = proxyUrl(src);
+    });
+  }
+
+  function getVisibleBounds(img) {
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth || img.width;
+    c.height = img.naturalHeight || img.height;
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    try {
+      const { data, width, height } = ctx.getImageData(0, 0, c.width, c.height);
+      let minX = width, minY = height, maxX = 0, maxY = 0;
+      for (let y = 0; y < height; y++)
+        for (let x = 0; x < width; x++)
+          if (data[(y * width + x) * 4 + 3] > 8) {
+            minX = Math.min(minX, x); minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+          }
+      if (minX <= maxX) return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+    } catch(e) {}
+    return { x: 0, y: 0, width: c.width, height: c.height };
+  }
+
+  function drawContained(ctx, img, tx, ty, tw, th) {
+    const b = getVisibleBounds(img);
+    const scale = Math.min(tw / b.width, th / b.height);
+    const dw = b.width * scale, dh = b.height * scale;
+    ctx.drawImage(img, b.x, b.y, b.width, b.height,
+      tx + (tw - dw) / 2, ty + (th - dh) / 2, dw, dh);
+  }
+
+  async function buildCanvas() {
+    const canvas = document.getElementById("tposeCanvas");
+    const W = 500, H = 780;
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#f8f9fb";
+    ctx.fillRect(0, 0, W, H);
+
+    const slotMap = {
+      bottom:    { part: "legs",      url: getSlotUrl("bottom") },
+      shoe:      { part: "feet",      url: getSlotUrl("shoe") },
+      bag:       { part: "rightHand", url: getSlotUrl("bag") },
+    };
+    const topLayers = [
+      { part: "base",  url: getSlotUrl("base") },
+      { part: "mid",   url: getSlotUrl("mid") },
+      { part: "outer", url: getSlotUrl("outer") },
+    ];
+
+    const DRAW_ORDER = ["legs", "feet", "rightHand"];
+
+    // Load non-top slots
+    for (const key of DRAW_ORDER) {
+      const entry = Object.values(slotMap).find(s => s.part === key);
+      if (!entry?.url) continue;
+      const pos = BODY_POSITIONS[key];
+      if (!pos) continue;
+      try {
+        const img = await loadImg(entry.url);
+        const [x, y, w, h] = pos;
+        const s = GARMENT_SCALE[key] ?? 1;
+        drawContained(ctx, img, x - (w * s - w) / 2, y - (h * s - h) / 2, w * s, h * s);
+      } catch(e) {}
+    }
+
+    // Load top layers BASE → MID → OUTER
+    for (const layer of topLayers) {
+      if (!layer.url) continue;
+      const pos = BODY_POSITIONS[layer.part];
+      if (!pos) continue;
+      try {
+        const img = await loadImg(layer.url);
+        const [x, y, w, h] = pos;
+        const s = GARMENT_SCALE[layer.part] ?? 0.8;
+        drawContained(ctx, img, x - (w * s - w) / 2, y - (h * s - h) / 2, w * s, h * s);
+      } catch(e) {}
+    }
+
+    // Show canvas
+    document.getElementById("canvasEmpty").style.display = "none";
+    canvas.style.display = "block";
+    canvasReady = true;
+    document.getElementById("btnGenerate").disabled = false;
+    setStatus("green", "Canvas ready — click Generate");
+
+    // Mirror to comparison panel left side
+    const compCanvas = document.getElementById("compCanvas");
+    compCanvas.width = W;
+    compCanvas.height = H;
+    compCanvas.getContext("2d").drawImage(canvas, 0, 0);
+  }
+
+  // ── REST generate ─────────────────────────────────────────────────────────
+
+  async function generate() {
+    if (!canvasReady) { alert("Build the canvas first."); return; }
+
+    const base = document.getElementById("serverUrl").value.trim().replace(/\/$/, "");
+    const canvas = document.getElementById("tposeCanvas");
+
+    document.getElementById("btnGenerate").disabled = true;
+    document.getElementById("dataBox").className = "data-box";
+    document.getElementById("imageBox").className = "image-box";
+    document.getElementById("comparison").className = "comparison";
+    setStatus("yellow", "Uploading canvas and generating — 30–90 s…");
+
+    try {
+      const blob = await new Promise((resolve, reject) =>
+        canvas.toBlob(b => b ? resolve(b) : reject(new Error("toBlob failed")), "image/png")
+      );
+
+      const form = new FormData();
+      form.append("image", blob, "outfit.png");
+      form.append("gender", gender);
+
+      const res = await fetch(`${base}/api/tailor/generate`, { method: "POST", body: form });
+      const data = await res.json();
+
+      const dataBox = document.getElementById("dataBox");
+      dataBox.textContent = JSON.stringify(data, null, 2);
+      dataBox.className = "data-box visible";
+
+      if (data.success && data.image_url) {
+        const img = document.getElementById("outfitImg");
+        img.src = data.image_url;
+        img.onload = () => {
+          document.getElementById("imageBox").className = "image-box visible";
+          document.getElementById("imageMeta").textContent =
+            `Gender: ${data.gender} · S3: ${data.s3_key}`;
+
+          // Show comparison
+          document.getElementById("compResult").src = data.image_url;
+          document.getElementById("comparison").className = "comparison visible";
+        };
+        setStatus("green", "Done");
+      } else {
+        setStatus("red", data.detail || data.error || "Generation failed");
+      }
+    } catch(e) {
+      setStatus("red", `Error: ${e.message}`);
+    } finally {
+      document.getElementById("btnGenerate").disabled = false;
+    }
+  }
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+
+  function setStatus(color, text) {
+    document.getElementById("statusDot").className = `dot ${color}`;
+    document.getElementById("statusText").textContent = text;
+  }
+</script>
+</body>
+</html>

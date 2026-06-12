@@ -141,6 +141,7 @@ def legal_ask(request: LegalAskRequest):
             bucket_slug=request.bucket_slug,
             year=request.year,
             limit=max(request.top_k_context, request.limit),
+            include_full_text=True,
         )
         if not rows:
             return {"query": request.query, "answer": "No relevant legal documents found.", "citations": []}

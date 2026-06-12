@@ -220,7 +220,7 @@ def call_get_hitl_status():
     response = requests.get(f"http://{BASE_URL}/hitl-status")
     return response.json()
 
-def call_chat_stream(user_input, session_id=None, auto_approve=False):
+def call_chat_stream(user_input, session_id=None, auto_approve=False, **extra_fields):
     """
     Connects to the /chat-stream WebSocket endpoint and streams GPT response in real-time.
     Supports HITL (Human-in-the-Loop) approval flow.
@@ -229,6 +229,8 @@ def call_chat_stream(user_input, session_id=None, auto_approve=False):
         user_input (str): User input to send to the chatbot.
         session_id (str, optional): Existing session ID. If None, the server will create one.
         auto_approve (bool): If True, automatically approve all HITL requests.
+        **extra_fields: Additional payload fields (e.g. weather, location, skin_analysis,
+                        sitemap_context) forwarded directly to the server.
 
     Yields:
         str: A partial chunk of the chatbot response.
@@ -242,7 +244,8 @@ def call_chat_stream(user_input, session_id=None, auto_approve=False):
             "type": "chat",
             "user_input": user_input,
             "session_id": session_id,
-            "user_history_select": ""
+            "user_history_select": "",
+            **extra_fields,
         }
         ws.send(json.dumps(init_payload))
 

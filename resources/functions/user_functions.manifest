@@ -21,11 +21,15 @@
           },
           "content_types": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Optional filter by content type: case, statute, scelibrary"
           }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       }
     }
   },
@@ -43,11 +47,17 @@
           },
           "summary_type": {
             "type": "string",
-            "enum": ["brief", "detailed", "legal-analysis"],
+            "enum": [
+              "brief",
+              "detailed",
+              "legal-analysis"
+            ],
             "description": "Type of summary: brief (2-3 paragraphs), detailed (full breakdown), legal-analysis (includes ratio decidendi and obiter dicta)"
           }
         },
-        "required": ["case_identifier"]
+        "required": [
+          "case_identifier"
+        ]
       }
     }
   },
@@ -68,7 +78,9 @@
             "description": "Optional context about the user's specific situation"
           }
         },
-        "required": ["legal_issue"]
+        "required": [
+          "legal_issue"
+        ]
       }
     }
   },
@@ -89,7 +101,9 @@
             "description": "Optional display filename for the document"
           }
         },
-        "required": ["s3_key"]
+        "required": [
+          "s3_key"
+        ]
       }
     }
   },
@@ -111,11 +125,19 @@
           },
           "skin_type": {
             "type": "string",
-            "enum": ["oily", "dry", "sensitive", "combination", "general"],
+            "enum": [
+              "oily",
+              "dry",
+              "sensitive",
+              "combination",
+              "general"
+            ],
             "description": "User's skin type for personalized ingredient verdicts. Defaults to 'general'."
           }
         },
-        "required": ["back_s3_key"]
+        "required": [
+          "back_s3_key"
+        ]
       }
     }
   },
@@ -133,7 +155,9 @@
           },
           "product_a_ingredients": {
             "type": "array",
-            "items": { "type": "object" },
+            "items": {
+              "type": "object"
+            },
             "description": "Ingredients array from the first product's scan result"
           },
           "product_b_name": {
@@ -142,16 +166,29 @@
           },
           "product_b_ingredients": {
             "type": "array",
-            "items": { "type": "object" },
+            "items": {
+              "type": "object"
+            },
             "description": "Ingredients array from the second product's scan result"
           },
           "skin_type": {
             "type": "string",
-            "enum": ["oily", "dry", "sensitive", "combination", "general"],
+            "enum": [
+              "oily",
+              "dry",
+              "sensitive",
+              "combination",
+              "general"
+            ],
             "description": "User's skin type for personalized conflict assessment. Defaults to 'general'."
           }
         },
-        "required": ["product_a_name", "product_a_ingredients", "product_b_name", "product_b_ingredients"]
+        "required": [
+          "product_a_name",
+          "product_a_ingredients",
+          "product_b_name",
+          "product_b_ingredients"
+        ]
       }
     }
   },
@@ -165,35 +202,328 @@
         "properties": {
           "document_type": {
             "type": "string",
-            "enum": ["affidavit_of_loss", "demand_letter", "power_of_attorney", "authorization_letter", "promissory_note", "lease_contract"],
+            "enum": [
+              "affidavit_of_loss",
+              "demand_letter",
+              "power_of_attorney",
+              "authorization_letter",
+              "promissory_note",
+              "lease_contract"
+            ],
             "description": "Type of legal document to generate"
           },
-          "affiant_name": { "type": "string", "description": "For affidavit_of_loss: full name of affiant" },
-          "item_lost": { "type": "string", "description": "For affidavit_of_loss: description of lost item" },
-          "date_lost": { "type": "string", "description": "For affidavit_of_loss: date when item was lost" },
-          "circumstances": { "type": "string", "description": "For affidavit_of_loss: how the item was lost" },
-          "sender_name": { "type": "string", "description": "For demand_letter: sender full name" },
-          "recipient_name": { "type": "string", "description": "For demand_letter: recipient full name" },
-          "amount": { "type": "string", "description": "For demand_letter/promissory_note: amount in PHP" },
-          "reason": { "type": "string", "description": "For demand_letter: reason for demand" },
-          "deadline_days": { "type": "integer", "description": "For demand_letter: days to comply" },
-          "principal_name": { "type": "string", "description": "For power_of_attorney: principal (grantor) name" },
-          "attorney_name": { "type": "string", "description": "For power_of_attorney: attorney-in-fact name" },
-          "powers_granted": { "type": "string", "description": "For power_of_attorney: powers being granted" },
-          "authorizer_name": { "type": "string", "description": "For authorization_letter: authorizer full name" },
-          "authorized_person": { "type": "string", "description": "For authorization_letter: authorized person's name" },
-          "purpose": { "type": "string", "description": "For authorization_letter: purpose of authorization" },
-          "borrower_name": { "type": "string", "description": "For promissory_note: borrower full name" },
-          "lender_name": { "type": "string", "description": "For promissory_note: lender full name" },
-          "principal_amount": { "type": "string", "description": "For promissory_note: loan amount" },
-          "due_date": { "type": "string", "description": "For promissory_note: payment due date" },
-          "lessor_name": { "type": "string", "description": "For lease_contract: landlord full name" },
-          "lessee_name": { "type": "string", "description": "For lease_contract: tenant full name" },
-          "property_address": { "type": "string", "description": "For lease_contract: property address" },
-          "monthly_rent": { "type": "string", "description": "For lease_contract: monthly rent amount" },
-          "lease_term": { "type": "string", "description": "For lease_contract: lease duration (e.g. '1 year')" }
+          "affiant_name": {
+            "type": "string",
+            "description": "For affidavit_of_loss: full name of affiant"
+          },
+          "item_lost": {
+            "type": "string",
+            "description": "For affidavit_of_loss: description of lost item"
+          },
+          "date_lost": {
+            "type": "string",
+            "description": "For affidavit_of_loss: date when item was lost"
+          },
+          "circumstances": {
+            "type": "string",
+            "description": "For affidavit_of_loss: how the item was lost"
+          },
+          "sender_name": {
+            "type": "string",
+            "description": "For demand_letter: sender full name"
+          },
+          "recipient_name": {
+            "type": "string",
+            "description": "For demand_letter: recipient full name"
+          },
+          "amount": {
+            "type": "string",
+            "description": "For demand_letter/promissory_note: amount in PHP"
+          },
+          "reason": {
+            "type": "string",
+            "description": "For demand_letter: reason for demand"
+          },
+          "deadline_days": {
+            "type": "integer",
+            "description": "For demand_letter: days to comply"
+          },
+          "principal_name": {
+            "type": "string",
+            "description": "For power_of_attorney: principal (grantor) name"
+          },
+          "attorney_name": {
+            "type": "string",
+            "description": "For power_of_attorney: attorney-in-fact name"
+          },
+          "powers_granted": {
+            "type": "string",
+            "description": "For power_of_attorney: powers being granted"
+          },
+          "authorizer_name": {
+            "type": "string",
+            "description": "For authorization_letter: authorizer full name"
+          },
+          "authorized_person": {
+            "type": "string",
+            "description": "For authorization_letter: authorized person's name"
+          },
+          "purpose": {
+            "type": "string",
+            "description": "For authorization_letter: purpose of authorization"
+          },
+          "borrower_name": {
+            "type": "string",
+            "description": "For promissory_note: borrower full name"
+          },
+          "lender_name": {
+            "type": "string",
+            "description": "For promissory_note: lender full name"
+          },
+          "principal_amount": {
+            "type": "string",
+            "description": "For promissory_note: loan amount"
+          },
+          "due_date": {
+            "type": "string",
+            "description": "For promissory_note: payment due date"
+          },
+          "lessor_name": {
+            "type": "string",
+            "description": "For lease_contract: landlord full name"
+          },
+          "lessee_name": {
+            "type": "string",
+            "description": "For lease_contract: tenant full name"
+          },
+          "property_address": {
+            "type": "string",
+            "description": "For lease_contract: property address"
+          },
+          "monthly_rent": {
+            "type": "string",
+            "description": "For lease_contract: monthly rent amount"
+          },
+          "lease_term": {
+            "type": "string",
+            "description": "For lease_contract: lease duration (e.g. '1 year')"
+          }
         },
-        "required": ["document_type"]
+        "required": [
+          "document_type"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "stylist",
+    "function": {
+      "name": "navigate_app",
+      "description": "Navigate the user to a specific page in the app. Call this ONLY when the user explicitly asks to go somewhere (not for outfit or cosmetics requests). Pick the exact target_url from the sitemap table in your instructions. Do not invent URLs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target_url": {
+            "type": "string",
+            "description": "The exact URL path from the sitemap table, e.g. '/ai-recommendation-fashion'. Must match a route in the table exactly."
+          }
+        },
+        "required": [
+          "target_url"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "stylist",
+    "function": {
+      "name": "get_outfits_by_category",
+      "description": "Fetch outfits from the catalogue filtered by a specific category and gender. Use this when the user selects a category (e.g. 'Casual', 'Formal', 'Streetwear'). Returns all matching outfits directly — no AI selection, no weather.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Outfit category to filter by — pass the value exactly as received (e.g. 'Casual', 'Formal', 'Streetwear', 'Business', 'Athleisure')."
+          },
+          "gender": {
+            "type": "string",
+            "enum": ["MALE", "FEMALE"],
+            "description": "User's gender for filtering outfits. Required — ask the user if not known."
+          }
+        },
+        "required": ["category", "gender"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "garment",
+    "function": {
+      "name": "recommend_garments",
+      "description": "Recommend garments for a given event, weather, and gender. Call this when the user asks what to wear, needs outfit suggestions, or uses the [garment] prefix. Fetches live weather via Open-Meteo and a real garment catalogue to produce personalized, weather-aware outfit recommendations as JSON with reasons.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gender": {
+            "type": "string",
+            "enum": [
+              "MALE",
+              "FEMALE"
+            ],
+            "description": "User's gender for filtering garments. Required — ask the user if not stated."
+          },
+          "event_type": {
+            "type": "string",
+            "description": "Type of event or occasion described in natural language — e.g. 'formal dinner', 'casual day out', 'beach outing'. Used as context for the AI selection prompt. Use 'category' for structured API filtering instead."
+          },
+          "event_date": {
+            "type": "string",
+            "description": "Event date in YYYY-MM-DD format. Defaults to today if not provided."
+          },
+          "location": {
+            "type": "string",
+            "description": "User's location as a city name (e.g. 'Cebu City', 'BGC Taguig'), landmark, or 'lat,lon' coordinates. Defaults to Manila if not provided."
+          },
+          "sets": {
+            "type": "integer",
+            "description": "Number of distinct outfit sets to recommend. Defaults to 1. Maximum is 3. Each set has a unique vibe tied to local fashion trends. Infer from user prompt — e.g. 'give me 2 outfits' → sets=2."
+          },
+          "weather_json": {
+            "type": "string",
+            "description": "Pre-fetched weather data from the frontend as a JSON string. When the message contains [FRONTEND_WEATHER:{...}], extract that exact JSON string and pass it here verbatim. The function will skip internal weather fetching and use this data directly."
+          },
+          "category": {
+            "type": "string",
+            "description": "Outfit category to filter by, matching the outfit's metaData.category. Infer from the event or vibe the user describes — e.g. 'Formal', 'Casual', 'Streetwear', 'Smart Casual', 'Business', 'Party', 'Athleisure'. Omit if the user has no clear style preference."
+          },
+          "silhouette": {
+            "type": "string",
+            "description": "Outfit silhouette to filter by, matching metaData.silhouette. Use when the user expresses a fit or cut preference — e.g. 'Structured', 'Relaxed', 'Fitted', 'Oversized', 'Tailored'. Omit if unspecified."
+          },
+          "garment_type": {
+            "type": "string",
+            "description": "Specific garment type to include, matching metaData.garmentType — e.g. 'Jacket', 'Pants', 'Dress', 'TShirt', 'Shoes', 'Skirt'. Use when the user asks for an outfit built around a particular piece. Omit if not mentioned."
+          },
+          "tags": {
+            "type": "string",
+            "description": "Descriptive tag to narrow results, matching metaData.tags — e.g. 'wide leg pants', 'all white', 'monochrome', 'floral'. Use only when the user mentions a very specific descriptor. Omit if not applicable."
+          }
+        },
+        "required": [
+          "gender"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "maps",
+    "function": {
+      "name": "search_nearby_places",
+      "description": "Search for nearby places (restaurants, cafes, hospitals, ATMs, etc.) using Google Places API. Use when the user asks about places near their location or uses the [maps] prefix. Automatically routes between Nearby Search and Text Search based on query intent.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lat": {
+            "type": "number",
+            "description": "User's latitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided â€” it will be ignored."
+          },
+          "lng": {
+            "type": "number",
+            "description": "User's longitude. Extract from [USER_LOCATION:{...}] ONLY when searching near the user's current position. Omit (or pass 0) when location_name is provided â€” it will be ignored."
+          },
+          "query": {
+            "type": "string",
+            "description": "What to search for, e.g. 'restaurant', 'coffee shop', 'ATM', 'hospital'. Infer from the user's message."
+          },
+          "radius": {
+            "type": "integer",
+            "description": "Search radius in meters. Default is 1500. Override if user specifies distance e.g. 'within 2km' -> 2000."
+          },
+          "location_name": {
+            "type": "string",
+            "description": "Named location(s) to search AT instead of the user's GPS. Single: 'La Union'. Multiple (comma-separated): 'SM Baguio, La Union, Vigan City'. REQUIRED when the user names a destination (e.g. 'meeting in La Union', 'going to Baguio'). When set, GPS lat/lng is ignored â€” the place is geocoded automatically."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "stylist",
+    "function": {
+      "name": "get_cosmetics_by_skin_type",
+      "description": "Fetch cosmetic product recommendations by skin type. Use this when the user selects or states their skin type (e.g. 'Dry', 'Oily', 'Combination', 'Normal', 'Sensitive'). Returns a skin_type signal — mirror-api resolves the matching products directly.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skin_type": {
+            "type": "string",
+            "enum": ["DRY", "OILY", "COMBINATION", "NORMAL", "SENSITIVE"],
+            "description": "User's skin type — pass the value exactly as received. Valid values: DRY, OILY, COMBINATION, NORMAL, SENSITIVE."
+          }
+        },
+        "required": ["skin_type"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "cosmetics",
+    "function": {
+      "name": "recommend_cosmetics",
+      "description": "Recommend a personalised skincare routine from the cosmetics catalogue based on a skin analysis result. Call this when the user asks for product recommendations, skincare advice, or uses the [cosmetics] prefix. Parses skin analysis scores to determine skin type and concerns, then curates routine sets from a live catalogue.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skin_analysis_json": {
+            "type": "string",
+            "description": "Skin analysis result as a JSON string. When the message contains [SKIN_ANALYSIS:{...}], extract that exact JSON string and pass it here verbatim. The function derives skin type and concerns from the scores automatically."
+          },
+          "sets": {
+            "type": "integer",
+            "description": "Number of distinct skincare routines to recommend. Defaults to 1. Maximum is 3. Each routine targets a different vibe or concern. Infer from user prompt — e.g. \"give me 2 routines\" -> sets=2."
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "tailor",
+    "function": {
+      "name": "generate_outfit_image",
+      "description": "Generate a premium ghost mannequin outfit photograph from individual garment images. Call this immediately when the user wants to visualize selected garments as a complete outfit. Uses AI image generation to composite the garments onto an invisible mannequin with professional studio lighting.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "garment_image_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of image URLs for the selected garment items (top, bottom, shoes, etc.). Extract from [GARMENT_IMAGES:[...]] annotation in the message."
+          },
+          "gender": {
+            "type": "string",
+            "enum": [
+              "MALE",
+              "FEMALE"
+            ],
+            "description": "Mannequin gender for the generated outfit photo. Extract from [GENDER:MALE] or [GENDER:FEMALE] annotation in the message. Defaults to MALE."
+          }
+        },
+        "required": [
+          "garment_image_urls",
+          "gender"
+        ]
       }
     }
   }

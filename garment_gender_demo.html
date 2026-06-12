@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Garment AI + Gender Update Demo</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0c0c10;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 14px 20px;
+      background: #111118;
+      border-bottom: 1px solid #22222e;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px; padding: 2px 8px; border-radius: 99px;
+      font-weight: 600; letter-spacing: .4px;
+    }
+    .badge-garment { background: #2a1a40; color: #c084fc; }
+
+    #gender-badge {
+      font-size: 11px; padding: 3px 10px; border-radius: 99px;
+      font-weight: 600; letter-spacing: .4px;
+      background: #1a1a24; color: #475569;
+      border: 1px solid #252535;
+      transition: background .3s, color .3s, border-color .3s;
+    }
+    #gender-badge.known-male   { background: #0f2a3a; color: #7dd3fc; border-color: #1e4a6a; }
+    #gender-badge.known-female { background: #2a0f2a; color: #f0abfc; border-color: #6a1e6a; }
+
+    #status {
+      margin-left: auto; font-size: 12px; color: #64748b;
+      display: flex; align-items: center; gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #ef4444; transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    .config-bar {
+      padding: 8px 20px; background: #0e0e14;
+      border-bottom: 1px solid #1a1a24;
+      display: flex; align-items: center; gap: 16px;
+      font-size: 13px; color: #94a3b8; flex-shrink: 0; flex-wrap: wrap;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 6px;
+      padding: 4px 10px; font-size: 13px; width: 200px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #a855f7; }
+    #user-id-input { width: 240px; }
+    .toggle-switch { position: relative; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; background: #252535;
+      border-radius: 20px; cursor: pointer; transition: background .2s;
+    }
+    .slider::before {
+      content: ""; position: absolute;
+      width: 14px; height: 14px; left: 3px; top: 3px;
+      background: #fff; border-radius: 50%; transition: transform .2s;
+    }
+    .toggle-switch input:checked + .slider { background: #9333ea; }
+    .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    #messages {
+      flex: 1; overflow-y: auto;
+      padding: 24px 20px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #252535; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 800px; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px; font-weight: 600;
+      letter-spacing: .5px; text-transform: uppercase; color: #475569;
+    }
+    .bubble {
+      padding: 12px 16px; border-radius: 12px;
+      line-height: 1.65; font-size: 14px; max-width: 100%;
+    }
+    .msg.user .bubble { background: #2a1a40; color: #e9d5ff; border-bottom-right-radius: 4px; }
+    .msg.assistant .bubble {
+      background: #111118; color: #e2e8f0;
+      border-bottom-left-radius: 4px; border: 1px solid #22222e;
+    }
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
+    .bubble p { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble em { color: #a78bfa; }
+    .bubble a { color: #a855f7; }
+    .bubble img {
+      max-width: 110px; max-height: 110px;
+      border-radius: 8px; object-fit: cover;
+      margin: 5px 4px 4px 0; border: 1px solid #22222e;
+      vertical-align: middle;
+    }
+    .bubble code {
+      background: #1a1a24; padding: 1px 5px;
+      border-radius: 3px; font-size: 12px;
+    }
+
+    .msg-system {
+      align-self: center;
+      font-size: 11px; color: #475569;
+      padding: 3px 10px;
+      background: #111118;
+      border: 1px solid #1a1a24;
+      border-radius: 99px;
+      max-width: 90%;
+      text-align: center;
+    }
+
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px; background: #475569;
+      border-radius: 50%; animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-7px); }
+    }
+
+    #outfit-panel {
+      width: 310px; flex-shrink: 0;
+      border-left: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 12px 16px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: .6px; text-transform: uppercase; color: #475569;
+      border-bottom: 1px solid #1a1a24;
+      flex-shrink: 0;
+    }
+
+    /* Gender Update panel */
+    #gender-panel {
+      margin: 12px 12px 0;
+      border: 1px solid #252535;
+      border-radius: 10px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .gender-panel-header {
+      padding: 8px 12px;
+      background: #111118;
+      font-size: 10px; font-weight: 700;
+      letter-spacing: .5px; text-transform: uppercase;
+      color: #475569;
+      border-bottom: 1px solid #1a1a24;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .gender-panel-header .help-tip {
+      font-weight: 400; text-transform: none; letter-spacing: 0;
+      color: #334155; font-size: 10px;
+    }
+    .gender-panel-body { padding: 10px 12px; background: #0e0e14; }
+
+    .gender-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    }
+    .gender-label { font-size: 11px; color: #64748b; width: 70px; flex-shrink: 0; }
+    .gender-value {
+      font-size: 12px; font-weight: 600;
+      padding: 2px 10px; border-radius: 99px;
+      background: #1a1a24; color: #475569;
+      border: 1px solid #252535;
+      transition: background .4s, color .4s, border-color .4s;
+    }
+    .gender-value.male   { background: #0f2a3a; color: #7dd3fc; border-color: #1e4a6a; }
+    .gender-value.female { background: #2a0f2a; color: #f0abfc; border-color: #6a1e6a; }
+
+    #gender-log {
+      margin-top: 6px;
+      max-height: 72px; overflow-y: auto;
+      font-size: 10px; color: #334155; line-height: 1.6;
+    }
+    #gender-log::-webkit-scrollbar { width: 3px; }
+    #gender-log::-webkit-scrollbar-thumb { background: #252535; }
+    .gender-log-entry {
+      padding: 1px 0;
+      border-bottom: 1px solid #1a1a24;
+    }
+    .gender-log-entry:last-child { border-bottom: none; }
+    .gender-log-entry .ts { color: #1e3a50; }
+    .gender-log-entry .val { font-weight: 600; }
+    .gender-log-entry .val.male   { color: #7dd3fc; }
+    .gender-log-entry .val.female { color: #f0abfc; }
+
+    .gender-raw {
+      margin-top: 8px; padding: 6px 8px;
+      background: #111118; border: 1px solid #1a1a24; border-radius: 6px;
+      font-size: 10px; color: #334155; font-family: monospace;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .gender-raw .label { color: #475569; display: block; margin-bottom: 2px; }
+
+    #set-tabs {
+      display: flex; gap: 0;
+      border-bottom: 1px solid #1a1a24;
+      background: #0e0e14;
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    #set-tabs::-webkit-scrollbar { display: none; }
+    .set-tab {
+      padding: 9px 16px;
+      font-size: 12px; font-weight: 600;
+      color: #475569; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .set-tab.active { color: #c084fc; border-bottom-color: #9333ea; }
+    .set-tab:hover:not(.active) { color: #94a3b8; }
+
+    #panel-body { flex: 1; overflow-y: auto; }
+    #panel-body::-webkit-scrollbar { width: 4px; }
+    #panel-body::-webkit-scrollbar-thumb { background: #252535; }
+
+    #weather-block {
+      margin: 12px 12px 0;
+      padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      display: none;
+    }
+    .w-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+    .w-temp { font-size: 22px; font-weight: 700; color: #e2e8f0; }
+    .w-desc { font-size: 13px; color: #7dd3fc; font-weight: 600; text-transform: capitalize; }
+    .w-location { font-size: 11px; color: #475569; margin-top: 2px; }
+    .w-note { font-size: 11px; color: #64748b; margin-top: 6px; padding-top: 6px; border-top: 1px solid #22222e; }
+
+    #vibe-note {
+      margin: 10px 12px 0;
+      padding: 8px 12px;
+      background: #1a1028; border: 1px solid #3b1f5a; border-radius: 8px;
+      font-size: 11px; color: #c084fc; line-height: 1.5;
+      display: none;
+    }
+
+    #outfit-hero-block {
+      margin: 10px 12px 0;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px; overflow: hidden;
+      display: none;
+    }
+    #outfit-hero-block .hero-img {
+      width: 100%; max-height: 280px;
+      object-fit: contain; display: block; background: #1a1a24;
+    }
+    #outfit-hero-block .hero-body { padding: 10px 12px 12px; }
+    #outfit-hero-block .hero-name {
+      font-size: 13px; font-weight: 700; color: #e2e8f0; line-height: 1.4; margin-bottom: 4px;
+    }
+    #outfit-hero-block .hero-desc { font-size: 11px; color: #94a3b8; line-height: 1.5; margin-bottom: 6px; }
+    #outfit-hero-block .hero-reason {
+      font-size: 11px; color: #c084fc; line-height: 1.5;
+      padding-top: 6px; border-top: 1px solid #22222e;
+    }
+    .garments-label {
+      margin: 10px 12px 0; font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px; color: #475569;
+    }
+
+    #outfit-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+
+    .outfit-empty {
+      padding: 32px 16px; color: #475569; font-size: 12px;
+      text-align: center; line-height: 1.7;
+    }
+    .outfit-empty .empty-icon { font-size: 36px; margin-bottom: 10px; display: block; }
+
+    .garment-card {
+      background: #111118; border: 1px solid #22222e;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color .2s, transform .15s;
+    }
+    .garment-card:hover { border-color: #7e22ce; transform: translateY(-1px); }
+    .garment-card .card-img {
+      width: 100%; height: 160px;
+      object-fit: cover; display: block; background: #1a1a24;
+    }
+    .card-img-placeholder {
+      width: 100%; height: 160px;
+      background: linear-gradient(135deg, #1a1a24, #22222e);
+      display: none; align-items: center; justify-content: center; font-size: 40px;
+    }
+    .card-body { padding: 9px 12px 11px; }
+    .card-slot {
+      font-size: 10px; font-weight: 700; letter-spacing: .4px;
+      text-transform: uppercase; color: #9333ea; margin-bottom: 4px;
+    }
+    .card-name { font-size: 12px; font-weight: 600; color: #e2e8f0; line-height: 1.4; margin-bottom: 4px; }
+    .card-reason { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+
+    #tips-block {
+      margin: 4px 12px 12px;
+      padding: 10px 14px;
+      background: #111118; border: 1px solid #22222e; border-radius: 10px;
+      font-size: 11px; display: none;
+    }
+    .tips-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .5px; color: #9333ea; margin-bottom: 6px;
+    }
+    #tips-list { padding-left: 16px; }
+    #tips-list li { margin: 3px 0; color: #94a3b8; line-height: 1.5; }
+
+    #toast {
+      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: #1a1028; border: 1px solid #7e22ce; border-radius: 8px;
+      padding: 10px 18px; font-size: 13px; font-weight: 600;
+      color: #c084fc; pointer-events: none;
+      opacity: 0; transition: opacity .25s, transform .25s;
+      z-index: 100; white-space: nowrap;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    .prompt-chips { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+    .prompt-chip {
+      display: block; width: 100%;
+      background: #1a1028; border: 1px solid #3b1f5a;
+      color: #c084fc; border-radius: 8px;
+      padding: 8px 12px; font-size: 12px; line-height: 1.4;
+      text-align: left; cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+      font-family: inherit;
+    }
+    .prompt-chip:hover { background: #2a1a40; border-color: #7e22ce; color: #e9d5ff; }
+
+    .input-area {
+      padding: 16px 20px; border-top: 1px solid #1a1a24;
+      background: #0e0e14;
+      display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+    }
+    #chat-input {
+      flex: 1; background: #1a1a24; border: 1px solid #252535;
+      color: #e2e8f0; border-radius: 10px; padding: 10px 14px;
+      font-size: 14px; resize: none; min-height: 42px; max-height: 160px;
+      line-height: 1.5; font-family: inherit;
+    }
+    #chat-input:focus { outline: none; border-color: #9333ea; }
+    #chat-input::placeholder { color: #475569; }
+    #send-btn {
+      background: #9333ea; border: none; color: #fff;
+      border-radius: 10px; padding: 10px 20px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background .15s; white-space: nowrap;
+    }
+    #send-btn:hover { background: #7e22ce; }
+    #send-btn:disabled { background: #1a1a24; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🧥 Garment AI + Gender Update</h1>
+  <span class="badge badge-garment">✦ Stylist Mode</span>
+  <span id="gender-badge">⚧ Gender: unknown</span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>
+    Server: <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <label>
+    User ID:
+    <input type="text" id="user-id-input" placeholder="e.g. user_abc123 (from mirror-api)" />
+  </label>
+  <label>
+    <span class="toggle-switch">
+      <input type="checkbox" id="garment-toggle" checked />
+      <span class="slider"></span>
+    </span>
+    Garment persona
+  </label>
+</div>
+
+<div class="main">
+
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">Stylist AI</span>
+      <div class="bubble">
+        Hi! I'm your <strong>AI Personal Stylist</strong>. Tell me what you're dressing for and I'll recommend outfits — checking live weather automatically.<br><br>
+        When I recommend garments, chat-wonder emits a <code>[GENDER_UPDATE]</code> block. Watch the gender panel on the right update live.<br><br>
+        <strong>Try one of these:</strong>
+        <div class="prompt-chips">
+          <button class="prompt-chip" onclick="fillPrompt(this)">Beach day in Cebu. I'm a woman.</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Job interview in BGC today. I'm a male.</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Casual weekend brunch near me. I'm a female.</button>
+          <button class="prompt-chip" onclick="fillPrompt(this)">Formal wedding guest outfit in Davao next Saturday. I'm a guy.</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="outfit-panel">
+    <div class="panel-header">Mirror Ecosystem</div>
+
+    <div id="gender-panel">
+      <div class="gender-panel-header">
+        Gender Update
+        <span class="help-tip">chat-wonder → mirror-api</span>
+      </div>
+      <div class="gender-panel-body">
+        <div class="gender-row">
+          <span class="gender-label">Detected:</span>
+          <span class="gender-value" id="gv-session">unknown</span>
+        </div>
+        <div class="gender-row">
+          <span class="gender-label">User ID:</span>
+          <span class="gender-value" id="gv-userid" style="font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis">—</span>
+        </div>
+        <div class="gender-raw">
+          <span class="label">Last block received:</span>
+          <span id="gender-raw-value">none</span>
+        </div>
+        <div id="gender-log"></div>
+      </div>
+    </div>
+
+    <div class="panel-header" style="margin-top:8px">Outfit Picks</div>
+    <div id="set-tabs"></div>
+
+    <div id="panel-body">
+      <div id="weather-block">
+        <div class="w-row">
+          <span class="w-temp" id="w-temp">—</span>
+          <span class="w-desc" id="w-desc"></span>
+        </div>
+        <div class="w-location" id="w-location"></div>
+        <div class="w-note" id="w-note"></div>
+      </div>
+
+      <div id="vibe-note"></div>
+
+      <div id="outfit-hero-block">
+        <img class="hero-img" id="hero-img" src="" alt="" loading="lazy" onerror="this.style.display='none'" />
+        <div class="hero-body">
+          <div class="hero-name" id="hero-name"></div>
+          <div class="hero-desc" id="hero-desc"></div>
+          <div class="hero-reason" id="hero-reason"></div>
+        </div>
+      </div>
+
+      <div class="garments-label" id="garments-label" style="display:none">Pieces</div>
+
+      <div id="outfit-list">
+        <div class="outfit-empty">
+          <span class="empty-icon">🧥</span>
+          Ask me what to wear and your outfit picks will appear here.
+        </div>
+      </div>
+
+      <div id="tips-block">
+        <div class="tips-title">✦ Styling Tips</div>
+        <ul id="tips-list"></ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="input-area">
+  <textarea id="chat-input" rows="1"
+    placeholder='e.g. "Outfit for a wedding in Cebu Saturday — I&apos;m a woman."'></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const RAINY_CODES = new Set([51,53,55,61,63,65,80,81,82,95,96,99]);
+  const WMO = {
+    0:"clear sky",1:"mainly clear",2:"partly cloudy",3:"overcast",
+    45:"foggy",48:"icy fog",
+    51:"light drizzle",53:"moderate drizzle",55:"heavy drizzle",
+    61:"light rain",63:"moderate rain",65:"heavy rain",
+    71:"light snow",73:"moderate snow",75:"heavy snow",
+    80:"rain showers",81:"moderate showers",82:"heavy showers",
+    95:"thunderstorm",96:"thunderstorm with hail",99:"severe thunderstorm",
+  };
+
+  let sessionId = null, ws = null;
+  let currentBubble = null, currentRaw = "", isStreaming = false;
+  let _sets = [], _weatherData = null;
+  let _currentGender = null, _toastTimer = null;
+
+  async function fetchWeather() {
+    let lat = 14.5995, lon = 120.9842;
+    try {
+      const pos = await new Promise((res, rej) =>
+        navigator.geolocation.getCurrentPosition(res, rej, { timeout: 6000 }));
+      lat = pos.coords.latitude; lon = pos.coords.longitude;
+    } catch {}
+    try {
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        `&current=temperature_2m,weathercode,precipitation,relative_humidity_2m&timezone=auto`;
+      const data = await (await fetch(url)).json();
+      const cur = data.current || {};
+      const wmo = cur.weathercode ?? 0;
+      const temp = cur.temperature_2m ?? null;
+      const precip = cur.precipitation ?? 0;
+      return {
+        estimated: false, date: new Date().toISOString().split("T")[0],
+        temperature_c: temp, weathercode: wmo,
+        description: WMO[wmo] ?? "unknown conditions",
+        precipitation_mm: precip,
+        is_rainy: RAINY_CODES.has(wmo) || precip > 1,
+        is_hot: (temp ?? 0) >= 32, is_cold: (temp ?? 99) <= 20,
+        lat, lon,
+      };
+    } catch { return null; }
+  }
+
+  function handleGenderUpdate(rawBlock) {
+    const gender = rawBlock.slice("[GENDER_UPDATE]".length).trim().toUpperCase();
+    if (gender !== "MALE" && gender !== "FEMALE") {
+      console.warn("[GENDER_UPDATE] unrecognised value:", gender);
+      return;
+    }
+    const userId = $("user-id-input").value.trim() || "—";
+    const prev = _currentGender;
+    _currentGender = gender;
+
+    const badge = $("gender-badge");
+    badge.textContent = `⚧ Gender: ${gender}`;
+    badge.className = gender === "MALE" ? "known-male" : "known-female";
+
+    const gvSession = $("gv-session");
+    gvSession.textContent = gender;
+    gvSession.className = "gender-value " + gender.toLowerCase();
+
+    $("gv-userid").textContent = userId;
+    $("gender-raw-value").textContent = rawBlock;
+
+    const log = $("gender-log");
+    const ts = new Date().toLocaleTimeString();
+    const changeNote = prev && prev !== gender ? ` (was ${prev})` : "";
+    const entry = document.createElement("div");
+    entry.className = "gender-log-entry";
+    entry.innerHTML =
+      `<span class="ts">[${ts}]</span> ` +
+      `<span class="val ${gender.toLowerCase()}">${gender}</span>` +
+      `<span style="color:#334155"> → user <em style="color:#475569">${escHtml(userId)}</em>${changeNote}</span>`;
+    log.insertBefore(entry, log.firstChild);
+
+    const action = prev ? (prev !== gender ? "updated" : "confirmed") : "detected";
+    appendSystem(
+      `⚧ Gender ${action}: <strong style="color:${gender === "MALE" ? "#7dd3fc" : "#f0abfc"}">${gender}</strong>` +
+      ` — mirror-api would call <code>UserRepository.update("${escHtml(userId)}", { gender: "${gender}" })</code>`
+    );
+    showToast(`⚧ Gender ${action}: ${gender}`);
+    console.log("[GENDER_UPDATE]", { gender, userId, prev });
+  }
+
+  function showToast(msg) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
+  }
+
+  $("chat-input").addEventListener("input", () => {
+    const el = $("chat-input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  $("user-id-input").addEventListener("input", () => {
+    $("gv-userid").textContent = $("user-id-input").value.trim() || "—";
+  });
+
+  $("server-url").addEventListener("change", connect);
+
+  async function connect() {
+    setStatus("connecting", "Connecting…");
+    try {
+      sessionId = (await (await fetch(`http://${$("server-url").value}/session-id`)).json()).session_id;
+    } catch { setStatus("error", "Cannot reach server"); return; }
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://${$("server-url").value}/chat-stream`);
+    ws.onopen  = () => { setStatus("ok", "Connected"); $("send-btn").disabled = false; };
+    ws.onclose = () => { setStatus("error", "Disconnected"); $("send-btn").disabled = true; };
+    ws.onerror = () => setStatus("error", "WebSocket error");
+    ws.onmessage = ({ data }) => { console.log("[ws]", data); handleChunk(data); };
+  }
+
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      if (currentBubble && currentRaw) currentBubble.innerHTML = marked.parse(currentRaw);
+      currentBubble = null; currentRaw = "";
+      isStreaming = false; $("send-btn").disabled = false;
+      removeTyping(); return;
+    }
+    if (chunk === "[DONE]") return;
+
+    if (chunk.startsWith("[GENDER_UPDATE]")) { handleGenderUpdate(chunk); return; }
+    if (chunk.startsWith("[GARMENT_DATA]")) {
+      try { renderGarmentData(JSON.parse(chunk.slice(14))); }
+      catch(e) { console.error("[GARMENT_DATA]", e); }
+      return;
+    }
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false; $("send-btn").disabled = false; removeTyping(); return;
+    }
+    if (chunk.startsWith("[Tool]")) { appendSystem(escHtml(chunk)); return; }
+    if (chunk.startsWith("[Sources]")) return;
+
+    if (!currentBubble) currentBubble = createAssistantBubble();
+    removeTyping();
+    currentRaw += chunk;
+    currentBubble.textContent = currentRaw;
+    scrollBottom();
+  }
+
+  function renderGarmentData(data) {
+    if (!data.success || !data.sets) return;
+    const w = data.weather || {};
+    renderWeather(buildWeatherDisplay({ ...w, weathercode: w.weathercode ?? 0 }, data.location));
+    renderTips(data.styling_tips || []);
+    _sets = data.sets.map(s => ({
+      vibeNote: s.trend_note || "",
+      reason: s.reason || "",
+      outfitName: s.outfit_name || "",
+      outfitDescription: s.outfit_description || "",
+      outfitImageUrl: s.outfit_imageUrl || "",
+      garments: s.recommendations || [],
+    }));
+    const bar = $("set-tabs");
+    bar.innerHTML = "";
+    if (_sets.length > 1) {
+      bar.style.display = "flex";
+      _sets.forEach((_, i) => {
+        const tab = document.createElement("div");
+        tab.className = "set-tab" + (i === 0 ? " active" : "");
+        tab.textContent = `Set ${i + 1}`;
+        tab.addEventListener("click", () => showSet(i));
+        bar.appendChild(tab);
+      });
+    } else {
+      bar.style.display = "none";
+    }
+    showSet(0);
+  }
+
+  function showSet(idx) {
+    document.querySelectorAll(".set-tab").forEach((t, i) =>
+      t.className = "set-tab" + (i === idx ? " active" : ""));
+    const set = _sets[idx];
+    if (!set) return;
+
+    const vn = $("vibe-note");
+    if (set.vibeNote) { vn.textContent = `✦ ${set.vibeNote}`; vn.style.display = "block"; }
+    else { vn.style.display = "none"; }
+
+    const heroBlock = $("outfit-hero-block");
+    if (set.outfitImageUrl || set.outfitName) {
+      const img = $("hero-img");
+      img.src = set.outfitImageUrl || "";
+      img.style.display = set.outfitImageUrl ? "block" : "none";
+      $("hero-name").textContent = set.outfitName || "";
+      $("hero-desc").textContent = set.outfitDescription || "";
+      const reasonEl = $("hero-reason");
+      if (set.reason) { reasonEl.textContent = `✦ ${set.reason}`; reasonEl.style.display = "block"; }
+      else { reasonEl.style.display = "none"; }
+      heroBlock.style.display = "block";
+    } else {
+      heroBlock.style.display = "none";
+    }
+
+    const garments = set.garments || [];
+    $("garments-label").style.display = garments.length ? "block" : "none";
+    const list = $("outfit-list");
+    list.innerHTML = "";
+    if (!garments.length) return;
+
+    const slotEmoji = {
+      UpperGarment:"👔", LowerGarment:"👖", FootGarment:"👟",
+      Earrings:"💎", NeckAccessory:"📿", HeadGarment:"🧢",
+      Glasses:"🕶", LeftHandAccessory:"⌚", RightHandAccessory:"💍",
+    };
+    garments.forEach(g => {
+      const slot = Array.isArray(g.fittingSlot) ? g.fittingSlot[0] : (g.fittingSlot || "");
+      const garmentType = Array.isArray(g.garmentType) ? g.garmentType[0] : (g.garmentType || "");
+      const label = garmentType || slot.replace(/([A-Z])/g, " $1").trim();
+      const card = document.createElement("div");
+      card.className = "garment-card";
+      card.innerHTML = `
+        <img class="card-img" src="${escAttr(g.imageUrl || "")}" alt="${escAttr(g.name || "Garment")}" loading="lazy"
+          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
+        <div class="card-img-placeholder" style="display:none">${slotEmoji[slot] || "🧥"}</div>
+        <div class="card-body">
+          ${label ? `<div class="card-slot">${escHtml(label)}</div>` : ""}
+          <div class="card-name">${escHtml(g.name || "Garment")}</div>
+          ${g.description ? `<div class="card-reason">${escHtml(g.description)}</div>` : ""}
+        </div>`;
+      list.appendChild(card);
+    });
+  }
+
+  async function send() {
+    const text = $("chat-input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+    const garmentOn = $("garment-toggle").checked;
+    const userId = $("user-id-input").value.trim();
+    const userInput = garmentOn
+      ? (text.toLowerCase().startsWith("[garment]") ? text : `[garment] ${text}`)
+      : text;
+
+    appendUserMsg(text);
+    $("chat-input").value = ""; $("chat-input").style.height = "auto";
+    $("send-btn").disabled = true; isStreaming = true;
+    appendTyping(); resetOutfitPanel();
+
+    _weatherData = null;
+    if (garmentOn) {
+      setStatus("ok", "Fetching weather…");
+      _weatherData = await fetchWeather();
+      setStatus("ok", "Connected");
+    }
+
+    const payload = {
+      type: "chat",
+      session_id: sessionId,
+      user_input: userInput,
+      ...(userId ? { user_id: userId } : {}),
+    };
+    if (_weatherData) payload.weather = _weatherData;
+
+    console.log("[send]", { ...payload, user_input: payload.user_input.slice(0, 80) });
+    ws.send(JSON.stringify(payload));
+  }
+
+  function fillPrompt(btn) {
+    const input = $("chat-input");
+    input.value = btn.textContent.trim();
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    input.focus();
+    $("garment-toggle").checked = true;
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("chat-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  function buildWeatherDisplay(w, location) {
+    const conds = [
+      { test: w => w.weathercode >= 95,             label: "⛈ Stormy",  note: "Opt for waterproof layers." },
+      { test: w => RAINY_CODES.has(w.weathercode),  label: "🌧 Rainy",  note: "Carry a compact umbrella." },
+      { test: w => [45,48].includes(w.weathercode), label: "🌫 Foggy",  note: "Layer up — fog feels cooler." },
+      { test: w => w.is_hot,                        label: "☀ Sunny",  note: "Light fabrics recommended." },
+      { test: w => [2,3].includes(w.weathercode),   label: "🌥 Cloudy", note: "Comfortable layering weather." },
+      { test: w => w.is_cold,                       label: "🌬 Cool",   note: "Layering is key." },
+    ];
+    const match = conds.find(c => c.test(w));
+    return {
+      temp: w.temperature_c != null ? `${w.temperature_c.toFixed(1)}°C` : null,
+      condition: match?.label || (w.description ? `🌤 ${w.description}` : ""),
+      note: match?.note || "",
+      location: location || null,
+    };
+  }
+
+  function renderWeather(w) {
+    const wb = $("weather-block");
+    if (w.temp || w.condition) {
+      $("w-temp").textContent = w.temp || "—";
+      $("w-desc").textContent = w.condition || "";
+      $("w-location").textContent = w.location || "";
+      $("w-note").textContent = w.note || "";
+      wb.style.display = "block";
+    } else { wb.style.display = "none"; }
+  }
+
+  function renderTips(tips) {
+    const tb = $("tips-block");
+    if (tips.length) {
+      $("tips-list").innerHTML = tips.map(t => `<li>${escHtml(t)}</li>`).join("");
+      tb.style.display = "block";
+    } else { tb.style.display = "none"; }
+  }
+
+  function resetOutfitPanel() {
+    _sets = []; _weatherData = null;
+    $("set-tabs").innerHTML = "";
+    $("set-tabs").style.display = "none";
+    $("weather-block").style.display = "none";
+    $("vibe-note").style.display = "none";
+    $("outfit-hero-block").style.display = "none";
+    $("garments-label").style.display = "none";
+    $("tips-block").style.display = "none";
+    $("outfit-list").innerHTML = `<div class="outfit-empty">
+      <span class="empty-icon">⏳</span>Checking weather and browsing the catalogue…</div>`;
+  }
+
+  function appendUserMsg(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = `<span class="msg-label">You</span><div class="bubble">${escHtml(text)}</div>`;
+    $("messages").appendChild(div); scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">Stylist AI</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant"; wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">Stylist AI</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap); scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.className = "msg-system";
+    div.innerHTML = html;
+    $("messages").appendChild(div); scrollBottom();
+  }
+
+  function scrollBottom() { const el = $("messages"); el.scrollTop = el.scrollHeight; }
+  function escHtml(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function escAttr(s) { return String(s).replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+  function setStatus(state, label) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  connect();
+</script>
+</body>
+</html>
