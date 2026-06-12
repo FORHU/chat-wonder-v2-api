@@ -1642,15 +1642,18 @@ def get_outfits_by_category(
     if not all_outfits:
         return {"success": False, "error": f"No outfits found for category: {category}"}
 
+    import random
     filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
     if not filtered:
         filtered = all_outfits
+
+    random.shuffle(filtered)
 
     return {
         "success": True,
         "gender": gender_upper,
         "category": category,
-        "ids": [o["id"] for o in filtered],
+        "ids": [o["id"] for o in filtered[:4]],
     }
 
 
