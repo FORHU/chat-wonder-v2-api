@@ -463,7 +463,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["get_outfits_by_category", "recommend_garments", "get_cosmetics_by_skin_type", "recommend_cosmetics", "search_nearby_places", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
+        stylist_whitelist = ["get_outfits_by_category", "get_cosmetics_by_skin_type", "recommend_cosmetics", "search_nearby_places", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -955,7 +955,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
         if func_name == "get_outfits_by_category" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
-                state.last_garment_result = result
+                state.last_outfit_ids_result = result.get("ids", [])
         if func_name in ("recommend_cosmetics", "get_cosmetics_by_skin_type") and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -1914,7 +1914,7 @@ def chat(request: ChatRequest):
         except Exception:
             state.last_nav_result = {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": final_text}
     if persona == "stylist":
-        if state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+        if state.last_outfit_ids_result and not (state.last_nav_result or {}).get("target_url"):
             state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
         elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
             state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
@@ -1928,7 +1928,8 @@ def chat(request: ChatRequest):
         "response": final_text,
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
-        "garment_sets": state.last_garment_result if persona in ("garment", "stylist") and state.last_garment_result else None,
+        "outfit_ids": state.last_outfit_ids_result if persona == "stylist" and state.last_outfit_ids_result else None,
+        "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
         "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "stylist") and state.last_cosmetics_result else None,
         "places_results": state.last_maps_result if persona in ("maps", "stylist") and state.last_maps_result else None,
         "nav_result": state.last_nav_result if persona in ("nav", "stylist") and state.last_nav_result else None,
@@ -2405,13 +2406,15 @@ async def chat_stream(websocket: WebSocket):
                 if persona == "stylist":
                     if state.last_tailor_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                    elif state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+                    elif state.last_outfit_ids_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                     elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                     elif state.last_maps_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/map", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                if persona in ("garment", "stylist") and state.last_garment_result:
+                if persona == "stylist" and state.last_outfit_ids_result:
+                    await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
+                if persona == "garment" and state.last_garment_result:
                     await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
                 if _garment_gender in ("MALE", "FEMALE"):
