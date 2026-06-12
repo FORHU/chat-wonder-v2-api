@@ -1899,6 +1899,110 @@ def recommend_garments(
         return {"success": False, "error": str(e)}
 
 
+def search_outfits_by_category(
+    gender: str,
+    meta_categories: str,
+    location: dict = None,
+    weather: dict = None,
+    sets: int = 3,
+) -> dict:
+    """Filter outfits by metacategory + gender, use LLM to select UUIDs, return ids only.
+
+    Designed for structured signals from mirror-api where the user has already chosen
+    a greater category (casual/formal/outdoor) and its metacategories. Skips the outer
+    Miraj persona LLM — only the selection LLM runs, against a pre-filtered catalogue.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {"success": False, "error": "gender must be MALE or FEMALE."}
+
+    n_sets = max(1, min(4, sets or 3))
+
+    # Resolve location → lat/lon
+    lat, lon = _DEFAULT_LAT, _DEFAULT_LON
+    location_label = "Manila, Philippines"
+    if location:
+        _lat = location.get("lat") or location.get("latitude")
+        _lon = location.get("lon") or location.get("longitude")
+        _city = location.get("city") or location.get("name")
+        if _lat is not None and _lon is not None:
+            lat, lon = float(_lat), float(_lon)
+            location_label = _city or "your current location"
+        elif _city:
+            lat, lon = _geocode_location(_city)
+            location_label = _city
+
+    # Resolve weather — use provided dict or fetch live
+    resolved_weather = weather or _fetch_weather(lat, lon, date.today().strftime("%Y-%m-%d"))
+
+    # Fetch outfits filtered by metacategory + gender
+    outfits = _fetch_outfits(meta_gender=gender_upper, meta_category=meta_categories or None)
+    if not outfits:
+        return {"success": False, "error": "No outfits found for the given categories."}
+
+    # Slim catalogue — only what the LLM needs for selection
+    slim = [
+        {"id": o["id"], "name": o.get("name", ""), "description": o.get("description", "")}
+        for o in outfits
+    ]
+
+    # Build weather context string
+    weather_parts = []
+    if resolved_weather:
+        temp = resolved_weather.get("temperature_2m")
+        if temp is not None:
+            weather_parts.append(f"{temp}°C")
+        if resolved_weather.get("is_rainy"):
+            weather_parts.append("rainy")
+        elif resolved_weather.get("is_hot"):
+            weather_parts.append("hot")
+        elif resolved_weather.get("is_cold"):
+            weather_parts.append("cold")
+    weather_ctx = f"Weather: {', '.join(weather_parts)}" if weather_parts else ""
+
+    system_prompt = (
+        f"You are a fashion stylist. Select exactly {n_sets} distinct outfit IDs from the catalogue "
+        f"that best suit the gender, weather, and location. "
+        f'Return JSON: {{"ids": ["<id1>", ...]}}. '
+        f"Only use IDs that appear in the catalogue. No explanation."
+    )
+    user_prompt = (
+        f"Gender: {gender_upper}\n"
+        f"Location: {location_label}\n"
+        f"{weather_ctx}\n\n"
+        f"Outfit catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct outfit IDs."
+    )
+
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+        ids = result.get("ids", [])
+        valid_ids = {o["id"] for o in outfits}
+        ids = [i for i in ids if i in valid_ids][:n_sets]
+        return {"success": True, "ids": ids, "gender": gender_upper}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dict:
     """Generate a ghost mannequin outfit photograph from individual garment images using GPT image generation."""
     import base64
