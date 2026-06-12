@@ -1646,39 +1646,11 @@ def get_outfits_by_category(
     if not filtered:
         filtered = all_outfits
 
-    sets = [
-        {
-            "set_number": i + 1,
-            "outfit_id": o["id"],
-            "outfit_name": o.get("name", ""),
-            "outfit_description": o.get("description", ""),
-            "outfit_imageUrl": o.get("imageUrl", ""),
-            "vibe": category,
-            "reason": f"{category} outfit",
-            "recommendations": [
-                {
-                    "id": g["garment"]["id"],
-                    "name": g["garment"]["name"],
-                    "description": g["garment"].get("description", ""),
-                    "imageUrl": g["garment"].get("imageUrl", ""),
-                    "fittingSlot": g["garment"].get("fittingSlot", []),
-                    "garmentType": g["garment"].get("garmentType", []),
-                    "category": g["garment"].get("category", []),
-                    "layerLevel": g["garment"].get("layerLevel", ""),
-                    "silhouette": g["garment"].get("silhouette", ""),
-                }
-                for g in o.get("items", [])
-                if g.get("garment")
-            ],
-        }
-        for i, o in enumerate(filtered)
-    ]
-
     return {
         "success": True,
         "gender": gender_upper,
         "category": category,
-        "sets": sets,
+        "ids": [o["id"] for o in filtered],
     }
 
 
