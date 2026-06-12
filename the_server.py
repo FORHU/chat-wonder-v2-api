@@ -1838,7 +1838,7 @@ def chat(request: ChatRequest):
     if persona == "stylist" and request.category:
         _meta = request.category.get("meta", "")
         _gender = request.gender or state.confirmed_gender or "MALE"
-        _sets = max(1, min(4, request.sets or 3))
+        _sets = max(1, min(4, request.sets or 4))
         _outfit_result = search_outfits_by_category(
             gender=_gender,
             meta_categories=_meta,
@@ -2330,7 +2330,7 @@ async def chat_stream(websocket: WebSocket):
             if persona == "stylist" and data.get("category"):
                 _meta = data["category"].get("meta", "")
                 _gender = (data.get("gender") or "").strip().upper() or state.confirmed_gender or "MALE"
-                _sets = max(1, min(4, data.get("sets") or 3))
+                _sets = max(1, min(4, data.get("sets") or 4))
                 _outfit_result = search_outfits_by_category(
                     gender=_gender,
                     meta_categories=_meta,

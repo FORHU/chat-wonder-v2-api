@@ -570,7 +570,7 @@
         status:        outfitIds.length ? "✓ [OUTFIT_IDS] received" : "⚠ no [OUTFIT_IDS] frame",
       });
 
-      setStatus(outfitIds.length ? `OK — ${outfitIds.length} UUID(s) in ${(totalMs/1000).toFixed(2)}s` : "Stream ended but no [OUTFIT_IDS] frame.", outfitIds.length ? "ok" : "error");
+      setStatus(outfitIds.length ? `OK — ${outfitIds.length} UUID(s) in ${(totalMs/1000).toFixed(2)}s` : "[OUTFIT_IDS] frame received but empty — outfits API unreachable or returned no results.", outfitIds.length ? "ok" : "error");
     } catch(e) {
       console.error(e);
       setStatus("Error: " + e.message, "error");
