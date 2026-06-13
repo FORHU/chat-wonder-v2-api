@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>New Cosmetics Search — Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #e5e5e5; min-height: 100vh; padding: 32px; }
+
+    h1 { font-size: 18px; font-weight: 600; color: #fff; margin-bottom: 6px; }
+    .subtitle { font-size: 12px; color: #555; margin-bottom: 28px; }
+
+    section { margin-bottom: 28px; }
+    .section-label { font-size: 11px; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    label { font-size: 12px; color: #888; display: block; margin-bottom: 4px; }
+    input, select {
+      background: #1a1a1a; border: 1px solid #333; color: #e5e5e5;
+      padding: 8px 12px; border-radius: 6px; font-size: 13px; outline: none;
+    }
+    input:focus, select:focus { border-color: #555; }
+    input[type="text"], input[type="number"] { width: 180px; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      padding: 5px 14px; border-radius: 20px; font-size: 13px; cursor: pointer;
+      border: 1px solid #333; background: #1a1a1a; color: #aaa; transition: all 0.12s;
+      user-select: none;
+    }
+    .chip:hover { border-color: #555; color: #ddd; }
+    .chip.active { background: #fff; color: #000; border-color: #fff; }
+    .chip.skin-type.active { background: #f9a8d4; border-color: #f9a8d4; color: #000; }
+    .chip.concern.active   { background: #fde68a; border-color: #fde68a; color: #000; }
+
+    .btn-row { display: flex; gap: 10px; align-items: center; }
+    button {
+      padding: 9px 20px; background: #fff; color: #000; border: none; border-radius: 6px;
+      font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.12s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-ws    { background: #818cf8; color: #fff; }
+    .btn-clear { background: transparent; color: #555; border: 1px solid #333; font-weight: 400; }
+    .btn-clear:hover { color: #888; opacity: 1; border-color: #555; }
+
+    .status { font-size: 13px; color: #666; min-height: 20px; margin-bottom: 20px; }
+    .status.error   { color: #f87171; }
+    .status.ok      { color: #4ade80; }
+    .status.loading { color: #fbbf24; }
+
+    .meta {
+      font-size: 12px; color: #555; font-family: monospace;
+      background: #111; padding: 14px 16px; border-radius: 6px; border: 1px solid #1e1e1e;
+      margin-bottom: 20px; line-height: 1.8;
+    }
+    .meta span.k { color: #666; }
+    .meta span.v { color: #aaa; }
+
+    .timing { display: inline-flex; gap: 16px; margin-bottom: 20px; }
+    .timing-item {
+      background: #111; border: 1px solid #1e1e1e; border-radius: 6px;
+      padding: 10px 16px; text-align: center;
+    }
+    .timing-item .val { font-size: 22px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+    .timing-item .lbl { font-size: 11px; color: #555; margin-top: 2px; }
+
+    .uuid-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 24px; }
+    .uuid-row {
+      display: flex; align-items: center; gap: 10px;
+      background: #111; border: 1px solid #1e1e1e; border-radius: 6px;
+      padding: 10px 14px; font-family: monospace; font-size: 13px; color: #ccc;
+    }
+    .uuid-index { color: #444; font-size: 11px; width: 18px; flex-shrink: 0; }
+    .uuid-val   { flex: 1; word-break: break-all; }
+    .uuid-copy  {
+      font-size: 11px; color: #444; cursor: pointer; padding: 2px 6px;
+      border: 1px solid #2a2a2a; border-radius: 4px; background: #0f0f0f;
+    }
+    .uuid-copy:hover { color: #888; border-color: #444; }
+
+    .raw-toggle { font-size: 12px; color: #444; cursor: pointer; user-select: none; margin-top: 16px; }
+    .raw-toggle:hover { color: #777; }
+    .raw {
+      margin-top: 10px; background: #111; border: 1px solid #1e1e1e; border-radius: 6px;
+      padding: 16px; font-family: monospace; font-size: 11px; color: #555;
+      white-space: pre-wrap; word-break: break-all; max-height: 360px; overflow-y: auto;
+      display: none;
+    }
+    .raw.visible { display: block; }
+
+    .stream-log {
+      background: #0a0a0a; border: 1px solid #1e1e1e; border-radius: 6px;
+      padding: 14px; font-family: monospace; font-size: 11px; color: #555;
+      max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+      margin-bottom: 20px; display: none;
+    }
+    .stream-log.visible { display: block; }
+    .stream-log .frame-cosm { color: #f9a8d4; }
+    .stream-log .frame-end  { color: #818cf8; }
+    .stream-log .frame-err  { color: #f87171; }
+    .stream-log .frame-text { color: #666; }
+
+    .result-header { font-size: 13px; color: #888; margin-bottom: 12px; }
+    .result-header strong { color: #fff; }
+    .empty { color: #444; font-size: 13px; font-style: italic; padding: 16px 0; }
+  </style>
+</head>
+<body>
+
+<h1>New Cosmetics Search</h1>
+<p class="subtitle">Tests the structured <code>[stylist] + cosmetics</code> path — bypasses Miraj LLM, returns product IDs only.</p>
+
+<!-- Config -->
+<section>
+  <div class="section-label">Config</div>
+  <div class="row">
+    <div>
+      <label>API Base URL</label>
+      <input type="text" id="baseUrl" value="http://localhost:8000" style="width:220px" />
+    </div>
+    <div>
+      <label>Session ID <span style="color:#444">(auto-fetched)</span></label>
+      <input type="text" id="sessionId" placeholder="—" style="width:280px;color:#555" readonly />
+    </div>
+    <div style="padding-bottom:1px">
+      <button class="btn-clear" onclick="refreshSession()">↺ New Session</button>
+    </div>
+  </div>
+</section>
+
+<!-- Sets + City -->
+<section>
+  <div class="section-label">Request params</div>
+  <div class="row">
+    <div>
+      <label>Sets (1–6)</label>
+      <input type="number" id="sets" value="6" min="1" max="6" style="width:80px" />
+    </div>
+    <div>
+      <label>City (optional)</label>
+      <input type="text" id="city" placeholder="e.g. Manila" style="width:160px" />
+    </div>
+  </div>
+</section>
+
+<!-- Skin Type -->
+<section>
+  <div class="section-label">Skin Type</div>
+  <div class="chips" id="skinTypeChips"></div>
+</section>
+
+<!-- Concerns -->
+<section>
+  <div class="section-label">Concerns <span style="color:#444;font-weight:400;text-transform:none;letter-spacing:0">(optional — multi-select)</span></div>
+  <div class="chips" id="concernChips"></div>
+</section>
+
+<!-- Weather mock -->
+<section>
+  <div class="section-label">Weather context <span style="color:#444;font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></div>
+  <div class="chips" id="weatherChips">
+    <div class="chip active" data-weather="none" onclick="selectWeather('none')">None</div>
+    <div class="chip" data-weather="hot" onclick="selectWeather('hot')">Hot ☀️</div>
+    <div class="chip" data-weather="cold" onclick="selectWeather('cold')">Cold 🥶</div>
+    <div class="chip" data-weather="humid" onclick="selectWeather('humid')">Humid 💧</div>
+  </div>
+</section>
+
+<!-- Actions -->
+<section>
+  <div class="btn-row">
+    <button id="restBtn" onclick="runRest()">Run REST /chat</button>
+    <button id="wsBtn" class="btn-ws" onclick="runWs()">Run WebSocket /chat-stream</button>
+    <button class="btn-clear" onclick="clearResults()">Clear</button>
+  </div>
+</section>
+
+<div class="status" id="status">Ready.</div>
+
+<!-- Results -->
+<div id="timingRow" class="timing" style="display:none">
+  <div class="timing-item">
+    <div class="val" id="tTotal">—</div>
+    <div class="lbl">Total (s)</div>
+  </div>
+  <div class="timing-item" id="ttftWrap" style="display:none">
+    <div class="val" id="tTtft">—</div>
+    <div class="lbl">First frame (s)</div>
+  </div>
+  <div class="timing-item">
+    <div class="val" id="tCount">—</div>
+    <div class="lbl">IDs returned</div>
+  </div>
+</div>
+
+<div id="metaPanel" class="meta" style="display:none"></div>
+
+<div id="streamLogWrap">
+  <div class="raw-toggle" id="streamToggle" style="display:none" onclick="toggleStream()">▶ Show stream frames</div>
+  <div class="stream-log" id="streamLog"></div>
+</div>
+
+<div id="resultHeader" class="result-header" style="display:none"></div>
+<div class="uuid-list" id="uuidList"></div>
+
+<div class="raw-toggle" id="rawToggle" style="display:none" onclick="toggleRaw()">▶ Show raw response</div>
+<pre class="raw" id="raw"></pre>
+
+<script>
+  const SKIN_TYPES = ["NORMAL", "OILY", "DRY", "COMBINATION", "SENSITIVE"];
+  const CONCERNS   = ["acne-prone", "anti-aging", "brightening", "dark circles", "pore-minimizing", "soothing"];
+
+  const WEATHER_MOCKS = {
+    none:  null,
+    hot:   { temp: 34, city: "", humidity: 60 },
+    cold:  { temp: 10, city: "", humidity: 50 },
+    humid: { temp: 28, city: "", humidity: 85 },
+  };
+
+  let selectedSkinType = "NORMAL";
+  let selectedConcerns = new Set();
+  let activeWeather    = "none";
+  let rawVisible       = false;
+  let streamVisible    = false;
+  let sessionId        = null;
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+
+  function buildSkinTypeChips() {
+    const container = document.getElementById("skinTypeChips");
+    SKIN_TYPES.forEach(st => {
+      const el = document.createElement("div");
+      el.className = "chip skin-type" + (st === selectedSkinType ? " active" : "");
+      el.textContent = st;
+      el.onclick = () => {
+        selectedSkinType = st;
+        document.querySelectorAll(".chip.skin-type").forEach(c => c.classList.remove("active"));
+        el.classList.add("active");
+      };
+      container.appendChild(el);
+    });
+  }
+
+  function buildConcernChips() {
+    const container = document.getElementById("concernChips");
+    CONCERNS.forEach(c => {
+      const el = document.createElement("div");
+      el.className = "chip concern";
+      el.textContent = c;
+      el.onclick = () => {
+        if (selectedConcerns.has(c)) { selectedConcerns.delete(c); el.classList.remove("active"); }
+        else                          { selectedConcerns.add(c);    el.classList.add("active"); }
+      };
+      container.appendChild(el);
+    });
+  }
+
+  function selectWeather(w) {
+    activeWeather = w;
+    document.querySelectorAll("#weatherChips .chip").forEach(c => {
+      c.classList.toggle("active", c.dataset.weather === w);
+    });
+  }
+
+  // ── Session ───────────────────────────────────────────────────────────────
+
+  async function refreshSession() {
+    const base = document.getElementById("baseUrl").value.replace(/\/$/, "");
+    try {
+      const res  = await fetch(`${base}/session-id`);
+      const json = await res.json();
+      sessionId  = json.session_id;
+      document.getElementById("sessionId").value = sessionId;
+    } catch(e) {
+      sessionId = null;
+      document.getElementById("sessionId").value = "";
+      setStatus("Could not fetch session: " + e.message, "error");
+    }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  function setStatus(msg, cls = "") {
+    const el = document.getElementById("status");
+    el.textContent = msg;
+    el.className   = "status " + cls;
+  }
+
+  function buildPayload() {
+    const sets = Math.max(1, Math.min(6, parseInt(document.getElementById("sets").value) || 6));
+    const city  = document.getElementById("city").value.trim();
+    const payload = {
+      user_input:  "[stylist]",
+      session_id:  sessionId,
+      sets,
+      cosmetics: {
+        skin_type: selectedSkinType,
+        concerns:  [...selectedConcerns],
+      },
+    };
+    if (city) payload.location = { city };
+    const w = WEATHER_MOCKS[activeWeather];
+    if (w) {
+      payload.weather = { ...w };
+      if (city) payload.weather.city = city;
+    }
+    return payload;
+  }
+
+  function renderIDs(ids, mode) {
+    const header = document.getElementById("resultHeader");
+    const list   = document.getElementById("uuidList");
+    header.style.display = "block";
+    header.innerHTML = `<strong>${ids.length}</strong> product ID${ids.length !== 1 ? "s" : ""} returned via <strong>${mode}</strong>`;
+    list.innerHTML = "";
+    if (!ids.length) {
+      const el = document.createElement("div");
+      el.className = "empty";
+      el.textContent = "No IDs returned.";
+      list.appendChild(el);
+      return;
+    }
+    ids.forEach((id, i) => {
+      const row = document.createElement("div");
+      row.className = "uuid-row";
+      row.innerHTML = `
+        <span class="uuid-index">${i + 1}</span>
+        <span class="uuid-val">${id}</span>
+        <span class="uuid-copy" onclick="copyID('${id}', this)">copy</span>
+      `;
+      list.appendChild(row);
+    });
+  }
+
+  function showTiming(totalMs, count, ttftMs) {
+    document.getElementById("timingRow").style.display = "flex";
+    document.getElementById("tTotal").textContent = (totalMs / 1000).toFixed(2);
+    document.getElementById("tCount").textContent = count;
+    if (ttftMs != null) {
+      document.getElementById("ttftWrap").style.display = "block";
+      document.getElementById("tTtft").textContent = (ttftMs / 1000).toFixed(2);
+    } else {
+      document.getElementById("ttftWrap").style.display = "none";
+    }
+  }
+
+  function showMeta(obj) {
+    const el = document.getElementById("metaPanel");
+    el.style.display = "block";
+    el.innerHTML = Object.entries(obj).map(([k, v]) =>
+      `<span class="k">${k.padEnd(16)}</span> <span class="v">${v}</span>`
+    ).join("<br>");
+  }
+
+  function copyID(id, el) {
+    navigator.clipboard.writeText(id).then(() => {
+      el.textContent = "✓";
+      setTimeout(() => el.textContent = "copy", 1200);
+    });
+  }
+
+  function clearResults() {
+    document.getElementById("timingRow").style.display = "none";
+    document.getElementById("metaPanel").style.display = "none";
+    document.getElementById("resultHeader").style.display = "none";
+    document.getElementById("uuidList").innerHTML = "";
+    document.getElementById("rawToggle").style.display = "none";
+    document.getElementById("raw").textContent = "";
+    document.getElementById("raw").classList.remove("visible");
+    document.getElementById("streamToggle").style.display = "none";
+    document.getElementById("streamLog").innerHTML = "";
+    document.getElementById("streamLog").classList.remove("visible");
+    setStatus("Ready.");
+    rawVisible = false; streamVisible = false;
+  }
+
+  function appendStreamFrame(text, cls) {
+    const el = document.getElementById("streamLog");
+    const line = document.createElement("span");
+    line.className = cls;
+    line.textContent = text + "\n";
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function toggleRaw() {
+    rawVisible = !rawVisible;
+    document.getElementById("raw").classList.toggle("visible", rawVisible);
+    document.getElementById("rawToggle").textContent = rawVisible ? "▼ Hide raw response" : "▶ Show raw response";
+  }
+
+  function toggleStream() {
+    streamVisible = !streamVisible;
+    document.getElementById("streamLog").classList.toggle("visible", streamVisible);
+    document.getElementById("streamToggle").textContent = streamVisible ? "▼ Hide stream frames" : "▶ Show stream frames";
+  }
+
+  function setBtnsDisabled(v) {
+    document.getElementById("restBtn").disabled = v;
+    document.getElementById("wsBtn").disabled   = v;
+  }
+
+  // ── REST ──────────────────────────────────────────────────────────────────
+
+  async function runRest() {
+    if (!sessionId) await refreshSession();
+    if (!sessionId) return;
+
+    clearResults();
+    setBtnsDisabled(true);
+    setStatus("Sending REST request…", "loading");
+
+    const base    = document.getElementById("baseUrl").value.replace(/\/$/, "");
+    const payload = buildPayload();
+
+    console.group("[new-cosmetics-search] REST");
+    console.log("payload:", payload);
+
+    const t0 = Date.now();
+    try {
+      const res = await fetch(`${base}/chat`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(payload),
+      });
+      const totalMs = Date.now() - t0;
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt}`);
+      }
+
+      const data = await res.json();
+      console.log("response:", data);
+
+      document.getElementById("raw").textContent = JSON.stringify(data, null, 2);
+      document.getElementById("rawToggle").style.display = "block";
+
+      const ids = data.cosmetics_ids || [];
+      renderIDs(ids, "REST /chat");
+      showTiming(totalMs, ids.length, null);
+      showMeta({
+        endpoint:       "/chat (REST)",
+        skin_type:      selectedSkinType,
+        concerns:       [...selectedConcerns].join(", ") || "none",
+        sets:           payload.sets,
+        weather:        activeWeather,
+        session_id:     sessionId,
+        status:         ids.length ? "✓ cosmetics_ids received" : "⚠ no cosmetics_ids in response",
+      });
+
+      setStatus(
+        ids.length
+          ? `OK — ${ids.length} ID(s) in ${(totalMs / 1000).toFixed(2)}s`
+          : "Response OK but no cosmetics_ids.",
+        ids.length ? "ok" : "error"
+      );
+    } catch(e) {
+      console.error(e);
+      setStatus("Error: " + e.message, "error");
+    }
+
+    console.groupEnd();
+    setBtnsDisabled(false);
+  }
+
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+
+  async function runWs() {
+    if (!sessionId) await refreshSession();
+    if (!sessionId) return;
+
+    clearResults();
+    setBtnsDisabled(true);
+    setStatus("Opening WebSocket…", "loading");
+
+    document.getElementById("streamToggle").style.display = "block";
+    document.getElementById("streamLog").classList.add("visible");
+    streamVisible = true;
+
+    const base    = document.getElementById("baseUrl").value.replace(/\/$/, "");
+    const wsUrl   = base.replace(/^http/, "ws") + "/chat-stream";
+    const payload = buildPayload();
+
+    console.group("[new-cosmetics-search] WebSocket");
+    console.log("payload:", payload);
+
+    const t0 = Date.now();
+    let   ttft = null;
+    let   cosmIds = [];
+
+    try {
+      await new Promise((resolve, reject) => {
+        const ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          setStatus("Connected — sending…", "loading");
+          ws.send(JSON.stringify({ type: "chat", ...payload }));
+        };
+
+        ws.onmessage = (evt) => {
+          const msg = evt.data;
+          if (ttft === null) ttft = Date.now() - t0;
+
+          if (msg.startsWith("[COSMETICS_IDS]")) {
+            const raw = msg.slice("[COSMETICS_IDS]".length);
+            appendStreamFrame(msg, "frame-cosm");
+            try { cosmIds = JSON.parse(raw); } catch(e) {}
+          } else if (msg === "__END__" || msg === "[DONE]") {
+            appendStreamFrame(msg, "frame-end");
+            ws.close();
+          } else if (msg.startsWith("[Error]")) {
+            appendStreamFrame(msg, "frame-err");
+          } else {
+            appendStreamFrame(msg.slice(0, 120) + (msg.length > 120 ? "…" : ""), "frame-text");
+          }
+        };
+
+        ws.onclose = () => resolve();
+        ws.onerror = () => reject(new Error("WebSocket error — check console"));
+      });
+
+      const totalMs = Date.now() - t0;
+      console.log("cosmetics_ids:", cosmIds);
+
+      document.getElementById("raw").textContent = JSON.stringify({ cosmetics_ids: cosmIds }, null, 2);
+      document.getElementById("rawToggle").style.display = "block";
+
+      renderIDs(cosmIds, "WebSocket /chat-stream");
+      showTiming(totalMs, cosmIds.length, ttft);
+      showMeta({
+        endpoint:       "/chat-stream (WebSocket)",
+        skin_type:      selectedSkinType,
+        concerns:       [...selectedConcerns].join(", ") || "none",
+        sets:           payload.sets,
+        weather:        activeWeather,
+        session_id:     sessionId,
+        ttft:           ttft != null ? (ttft / 1000).toFixed(2) + "s" : "—",
+        status:         cosmIds.length ? "✓ [COSMETICS_IDS] received" : "⚠ no [COSMETICS_IDS] frame",
+      });
+
+      setStatus(
+        cosmIds.length
+          ? `OK — ${cosmIds.length} ID(s) in ${(totalMs / 1000).toFixed(2)}s`
+          : "[COSMETICS_IDS] frame received but empty — cosmetics API unreachable or returned no results.",
+        cosmIds.length ? "ok" : "error"
+      );
+    } catch(e) {
+      console.error(e);
+      setStatus("Error: " + e.message, "error");
+    }
+
+    console.groupEnd();
+    setBtnsDisabled(false);
+  }
+
+  // ── Startup ───────────────────────────────────────────────────────────────
+  buildSkinTypeChips();
+  buildConcernChips();
+  refreshSession();
+</script>
+</body>
+</html>

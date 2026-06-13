@@ -110,6 +110,7 @@ class ChatState:
         self.last_nav_result: dict = {}
         self.last_tailor_result: dict = {}
         self.last_outfit_ids_result: list = []
+        self.last_cosmetics_ids_result: list = []
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
         self.openai_client = None
@@ -260,6 +261,7 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     gender: Optional[str] = None
     category: Optional[dict] = None
+    cosmetics: Optional[dict] = None
     sets: Optional[int] = None
 
 class ApproveRequest(BaseModel):
@@ -1866,6 +1868,36 @@ def chat(request: ChatRequest):
             "nav_result": {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
         }
 
+    # Structured cosmetics search — bypass Miraj LLM when cosmetics field is provided
+    if persona == "stylist" and request.cosmetics:
+        _skin_type = request.cosmetics.get("skin_type", "")
+        _concerns  = request.cosmetics.get("concerns", [])
+        _sets = max(1, min(6, request.sets or 6))
+        _cosm_result = search_cosmetics_by_skin_type(
+            skin_type=_skin_type,
+            concerns=_concerns,
+            weather=request.weather or {},
+            location=request.location,
+            sets=_sets,
+        )
+        if _cosm_result.get("success"):
+            state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+            def _scl_cosm_search(skin_type=_skin_type, concerns=_concerns):
+                try:
+                    r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
+                    logging.info(f"[SCL_TRACE] search_cosmetics_by_skin_type skin_type={skin_type} concerns={concerns} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] search_cosmetics_by_skin_type failed: {_e}")
+            Thread(target=_scl_cosm_search, daemon=True).start()
+        else:
+            logging.warning(f"[stylist] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
+        logging.info("/chat [stylist/cosmetics-direct] %.2fs session=%s", time.time() - _t_start, session_id)
+        return {
+            "response": "",
+            "cosmetics_ids": state.last_cosmetics_ids_result,
+            "nav_result": {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
+        }
+
     # Normal path with optional HITL (legal, garment, cosmetics, maps, nav, stylist personas always auto-approve)
     _was_auto = _context.auto_approval
     if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist"):
@@ -1929,6 +1961,7 @@ def chat(request: ChatRequest):
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
         "outfit_ids": state.last_outfit_ids_result if persona == "stylist" and state.last_outfit_ids_result else None,
+        "cosmetics_ids": state.last_cosmetics_ids_result if persona == "stylist" and state.last_cosmetics_ids_result else None,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
         "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "stylist") and state.last_cosmetics_result else None,
         "places_results": state.last_maps_result if persona in ("maps", "stylist") and state.last_maps_result else None,
@@ -2360,6 +2393,37 @@ async def chat_stream(websocket: WebSocket):
                 _context.auto_approval = _was_auto
                 continue
 
+            # Structured cosmetics search — bypass streaming LLM when cosmetics field is provided
+            if persona == "stylist" and data.get("cosmetics"):
+                _skin_type = data["cosmetics"].get("skin_type", "")
+                _concerns  = data["cosmetics"].get("concerns", [])
+                _sets = max(1, min(6, data.get("sets") or 6))
+                _cosm_result = search_cosmetics_by_skin_type(
+                    skin_type=_skin_type,
+                    concerns=_concerns,
+                    weather=data.get("weather") or {},
+                    location=data.get("location"),
+                    sets=_sets,
+                )
+                if _cosm_result.get("success"):
+                    state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+                    def _scl_cosm_ws(skin_type=_skin_type, concerns=_concerns):
+                        try:
+                            r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
+                            logging.info(f"[SCL_TRACE] search_cosmetics_by_skin_type skin_type={skin_type} concerns={concerns} success={r.get('success')}")
+                        except Exception as _e:
+                            logging.warning(f"[SCL_TRACE] search_cosmetics_by_skin_type failed: {_e}")
+                    Thread(target=_scl_cosm_ws, daemon=True).start()
+                else:
+                    logging.warning(f"[stylist/ws] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
+                state.prompt.append(user_input)
+                state.generated.append("")
+                _context.sessions[session_id] = state
+                await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
+                await websocket.send_text(_context.__END__)
+                _context.auto_approval = _was_auto
+                continue
+
             try:
                 async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
                     if chunk.startswith("__HITL__"):
@@ -2414,6 +2478,8 @@ async def chat_stream(websocket: WebSocket):
                         state.last_nav_result = {"target_url": "/map", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                 if persona == "stylist" and state.last_outfit_ids_result:
                     await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
+                if persona == "stylist" and state.last_cosmetics_ids_result:
+                    await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
                 if persona == "garment" and state.last_garment_result:
                     await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()

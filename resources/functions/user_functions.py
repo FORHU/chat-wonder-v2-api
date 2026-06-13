@@ -977,6 +977,108 @@ def get_cosmetics_by_skin_type(skin_type: str) -> dict:
     }
 
 
+def search_cosmetics_by_skin_type(
+    skin_type: str,
+    concerns: list = None,
+    weather: dict = None,
+    location: dict = None,
+    sets: int = 6,
+) -> dict:
+    """Filter cosmetics catalogue by skin type + concerns, use LLM to select product IDs, return ids only.
+
+    Designed for structured signals from mirror-api where the user's skin analysis has been
+    completed. Skips the outer Miraj persona LLM — only the selection LLM runs.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    skin_upper = (skin_type or "").strip().upper()
+    if skin_upper not in _VALID_SKIN_TYPES:
+        return {
+            "success": False,
+            "error": (
+                f"Invalid skin type '{skin_type}'. "
+                f"Valid values are: {', '.join(sorted(_VALID_SKIN_TYPES))}."
+            ),
+        }
+
+    n_sets = max(1, min(6, sets or 6))
+    concern_list = [c for c in (concerns or []) if c]
+
+    # Fetch cosmetics catalogue filtered by skin type + concerns
+    products = _fetch_cosmetics_for_profile(skin_upper.lower(), concern_list)
+    if not products:
+        return {"success": False, "error": "No cosmetics found for the given skin type."}
+
+    # Slim catalogue — id, name, brand, type only; shuffle for variety
+    slim = [
+        {
+            "id": p["id"],
+            "name": p.get("name", ""),
+            "brand": p.get("brand", ""),
+            "type": p.get("type", ""),
+        }
+        for p in products
+        if p.get("id")
+    ][:80]
+
+    # Build concern context string
+    concern_ctx = f"Skin concerns: {', '.join(concern_list)}" if concern_list else ""
+
+    # Build weather context
+    weather_parts = []
+    if weather:
+        temp = weather.get("temp") or weather.get("temperature_2m")
+        humidity = weather.get("humidity")
+        city = weather.get("city") or weather.get("name") or (location or {}).get("city") or (location or {}).get("name", "")
+        if city:
+            weather_parts.append(f"Location: {city}")
+        if temp is not None:
+            weather_parts.append(f"Temperature: {temp}°C")
+        if humidity is not None:
+            weather_parts.append(f"Humidity: {humidity}%")
+    weather_ctx = f"Climate: {', '.join(weather_parts)}" if weather_parts else ""
+
+    system_prompt = (
+        f"You are a skincare advisor. Select exactly {n_sets} distinct cosmetic product IDs "
+        f"from the catalogue that best suit the skin type and concerns listed. "
+        f'Return JSON: {{"ids": ["<id1>", ...]}}. '
+        f"Only use IDs that appear in the catalogue. No explanation."
+    )
+    user_prompt = (
+        f"Skin type: {skin_upper}\n"
+        f"{concern_ctx}\n"
+        f"{weather_ctx}\n\n"
+        f"Cosmetics catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct product IDs."
+    )
+
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+        ids = result.get("ids", [])
+        valid_ids = {p["id"] for p in products if p.get("id")}
+        ids = [i for i in ids if i in valid_ids][:n_sets]
+        return {"success": True, "ids": ids, "skin_type": skin_upper}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1, weather_json: str = None, location_json: str = None) -> dict:
     """Fetch cosmetics catalogue and return AI-curated skincare routines based on skin analysis scores.
 
