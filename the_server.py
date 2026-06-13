@@ -261,7 +261,6 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     gender: Optional[str] = None
     category: Optional[dict] = None
-    cosmetics: Optional[dict] = None
     sets: Optional[int] = None
 
 class ApproveRequest(BaseModel):
@@ -465,7 +464,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["get_outfits_by_category", "get_cosmetics_by_skin_type", "recommend_cosmetics", "search_nearby_places", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
+        stylist_whitelist = ["get_outfits_by_category", "get_cosmetics_by_skin_type", "search_nearby_places", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -1869,13 +1868,14 @@ def chat(request: ChatRequest):
         }
 
     # Structured cosmetics search — bypass Miraj LLM when cosmetics field is provided
-    if persona == "stylist" and request.cosmetics:
-        _skin_type = request.cosmetics.get("skin_type", "")
-        _concerns  = request.cosmetics.get("concerns", [])
+    if persona == "stylist" and request.skin_analysis:
+        _skin_type = (request.skin_analysis.get("skinType") or "").strip().upper()
+        _concerns  = request.skin_analysis.get("concerns", [])
         _sets = max(1, min(6, request.sets or 6))
         _cosm_result = search_cosmetics_by_skin_type(
             skin_type=_skin_type,
             concerns=_concerns,
+            skin_analysis=request.skin_analysis,
             weather=request.weather or {},
             location=request.location,
             sets=_sets,
@@ -2394,13 +2394,14 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             # Structured cosmetics search — bypass streaming LLM when cosmetics field is provided
-            if persona == "stylist" and data.get("cosmetics"):
-                _skin_type = data["cosmetics"].get("skin_type", "")
-                _concerns  = data["cosmetics"].get("concerns", [])
+            if persona == "stylist" and data.get("skin_analysis"):
+                _skin_type = (data["skin_analysis"].get("skinType") or "").strip().upper()
+                _concerns  = data["skin_analysis"].get("concerns", [])
                 _sets = max(1, min(6, data.get("sets") or 6))
                 _cosm_result = search_cosmetics_by_skin_type(
                     skin_type=_skin_type,
                     concerns=_concerns,
+                    skin_analysis=data.get("skin_analysis"),
                     weather=data.get("weather") or {},
                     location=data.get("location"),
                     sets=_sets,

@@ -980,6 +980,7 @@ def get_cosmetics_by_skin_type(skin_type: str) -> dict:
 def search_cosmetics_by_skin_type(
     skin_type: str,
     concerns: list = None,
+    skin_analysis: dict = None,
     weather: dict = None,
     location: dict = None,
     sets: int = 6,
@@ -988,6 +989,7 @@ def search_cosmetics_by_skin_type(
 
     Designed for structured signals from mirror-api where the user's skin analysis has been
     completed. Skips the outer Miraj persona LLM — only the selection LLM runs.
+    skin_analysis is the full object from mirror-api and drives the LLM selection context.
     """
     from openai import OpenAI
 
@@ -1013,7 +1015,7 @@ def search_cosmetics_by_skin_type(
     if not products:
         return {"success": False, "error": "No cosmetics found for the given skin type."}
 
-    # Slim catalogue — id, name, brand, type only; shuffle for variety
+    # Slim catalogue — id, name, brand, type only
     slim = [
         {
             "id": p["id"],
@@ -1025,8 +1027,24 @@ def search_cosmetics_by_skin_type(
         if p.get("id")
     ][:80]
 
-    # Build concern context string
-    concern_ctx = f"Skin concerns: {', '.join(concern_list)}" if concern_list else ""
+    # Build skin analysis context from the full skin_analysis object
+    skin_ctx_parts = [f"Skin type: {skin_upper}"]
+    if skin_analysis:
+        hydration = skin_analysis.get("hydrationPct")
+        oiliness  = skin_analysis.get("oilinessPct")
+        skin_age  = skin_analysis.get("skinAge")
+        skin_tone = skin_analysis.get("skinTone")
+        if hydration is not None:
+            skin_ctx_parts.append(f"Hydration: {hydration}%")
+        if oiliness is not None:
+            skin_ctx_parts.append(f"Oiliness: {oiliness}%")
+        if skin_age is not None:
+            skin_ctx_parts.append(f"Skin age: {skin_age}")
+        if skin_tone:
+            skin_ctx_parts.append(f"Skin tone: {skin_tone}")
+    if concern_list:
+        skin_ctx_parts.append(f"Concerns: {', '.join(concern_list)}")
+    skin_ctx = "\n".join(skin_ctx_parts)
 
     # Build weather context
     weather_parts = []
@@ -1044,13 +1062,12 @@ def search_cosmetics_by_skin_type(
 
     system_prompt = (
         f"You are a skincare advisor. Select exactly {n_sets} distinct cosmetic product IDs "
-        f"from the catalogue that best suit the skin type and concerns listed. "
+        f"from the catalogue that best match the user's skin analysis. "
         f'Return JSON: {{"ids": ["<id1>", ...]}}. '
         f"Only use IDs that appear in the catalogue. No explanation."
     )
     user_prompt = (
-        f"Skin type: {skin_upper}\n"
-        f"{concern_ctx}\n"
+        f"Skin analysis:\n{skin_ctx}\n"
         f"{weather_ctx}\n\n"
         f"Cosmetics catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
         f"Select {n_sets} distinct product IDs."
