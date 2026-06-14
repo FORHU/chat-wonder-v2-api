@@ -1063,8 +1063,8 @@ def search_cosmetics_by_skin_type(
     system_prompt = (
         f"You are a skincare advisor. Select exactly {n_sets} distinct cosmetic product IDs "
         f"from the catalogue that best match the user's skin analysis. "
-        f'Return JSON: {{"ids": ["<id1>", ...]}}. '
-        f"Only use IDs that appear in the catalogue. No explanation."
+        f'Return JSON: {{"ids": ["<id1>", ...], "reply": "<one sentence explaining why these products suit the user>"}}. '
+        f"Only use IDs that appear in the catalogue."
     )
     user_prompt = (
         f"Skin analysis:\n{skin_ctx}\n"
@@ -1089,7 +1089,8 @@ def search_cosmetics_by_skin_type(
         ids = result.get("ids", [])
         valid_ids = {p["id"] for p in products if p.get("id")}
         ids = [i for i in ids if i in valid_ids][:n_sets]
-        return {"success": True, "ids": ids, "skin_type": skin_upper}
+        reply = result.get("reply", "")
+        return {"success": True, "ids": ids, "reply": reply, "skin_type": skin_upper}
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"Failed to parse AI response: {e}"}
     except Exception as e:
@@ -2066,8 +2067,8 @@ def search_outfits_by_category(
     system_prompt = (
         f"You are a fashion stylist. Select exactly {n_sets} distinct outfit IDs from the catalogue "
         f"that best suit the gender, weather, and location. "
-        f'Return JSON: {{"ids": ["<id1>", ...]}}. '
-        f"Only use IDs that appear in the catalogue. No explanation."
+        f'Return JSON: {{"ids": ["<id1>", ...], "reply": "<one sentence explaining why these outfits suit the user>"}}. '
+        f"Only use IDs that appear in the catalogue."
     )
     user_prompt = (
         f"Gender: {gender_upper}\n"
@@ -2093,7 +2094,8 @@ def search_outfits_by_category(
         ids = result.get("ids", [])
         valid_ids = {o["id"] for o in outfits}
         ids = [i for i in ids if i in valid_ids][:n_sets]
-        return {"success": True, "ids": ids, "gender": gender_upper}
+        reply = result.get("reply", "")
+        return {"success": True, "ids": ids, "reply": reply, "gender": gender_upper}
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"Failed to parse AI response: {e}"}
     except Exception as e:

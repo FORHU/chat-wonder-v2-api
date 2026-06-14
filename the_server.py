@@ -1847,8 +1847,10 @@ def chat(request: ChatRequest):
             weather=request.weather,
             sets=_sets,
         )
+        _outfit_reply = ""
         if _outfit_result.get("success"):
             state.last_outfit_ids_result = _outfit_result.get("ids", [])
+            _outfit_reply = _outfit_result.get("reply", "")
             if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
                 state.confirmed_gender = _outfit_result["gender"].upper()
             def _scl_outfit_search(gender=_gender, meta=_meta):
@@ -1862,7 +1864,7 @@ def chat(request: ChatRequest):
             logging.warning(f"[stylist] search_outfits_by_category failed: {_outfit_result.get('error')}")
         logging.info("/chat [stylist/direct] %.2fs session=%s", time.time() - _t_start, session_id)
         return {
-            "response": "",
+            "response": _outfit_reply,
             "outfit_ids": state.last_outfit_ids_result,
             "nav_result": {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
         }
@@ -1880,8 +1882,10 @@ def chat(request: ChatRequest):
             location=request.location,
             sets=_sets,
         )
+        _cosm_reply = ""
         if _cosm_result.get("success"):
             state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+            _cosm_reply = _cosm_result.get("reply", "")
             def _scl_cosm_search(skin_type=_skin_type, concerns=_concerns):
                 try:
                     r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
@@ -1893,7 +1897,7 @@ def chat(request: ChatRequest):
             logging.warning(f"[stylist] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
         logging.info("/chat [stylist/cosmetics-direct] %.2fs session=%s", time.time() - _t_start, session_id)
         return {
-            "response": "",
+            "response": _cosm_reply,
             "cosmetics_ids": state.last_cosmetics_ids_result,
             "nav_result": {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
         }
@@ -1963,7 +1967,7 @@ def chat(request: ChatRequest):
         "outfit_ids": state.last_outfit_ids_result if persona == "stylist" and state.last_outfit_ids_result else None,
         "cosmetics_ids": state.last_cosmetics_ids_result if persona == "stylist" and state.last_cosmetics_ids_result else None,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
-        "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "stylist") and state.last_cosmetics_result else None,
+        "cosmetics_sets": state.last_cosmetics_result if persona == "cosmetics" and state.last_cosmetics_result else None,
         "places_results": state.last_maps_result if persona in ("maps", "stylist") and state.last_maps_result else None,
         "nav_result": state.last_nav_result if persona in ("nav", "stylist") and state.last_nav_result else None,
         "tailor_result": state.last_tailor_result if persona == "tailor" and state.last_tailor_result else None,
@@ -2372,8 +2376,10 @@ async def chat_stream(websocket: WebSocket):
                     weather=data.get("weather"),
                     sets=_sets,
                 )
+                _outfit_reply_ws = ""
                 if _outfit_result.get("success"):
                     state.last_outfit_ids_result = _outfit_result.get("ids", [])
+                    _outfit_reply_ws = _outfit_result.get("reply", "")
                     if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
                         state.confirmed_gender = _outfit_result["gender"].upper()
                     def _scl_ws(gender=_gender, meta=_meta):
@@ -2386,8 +2392,10 @@ async def chat_stream(websocket: WebSocket):
                 else:
                     logging.warning(f"[stylist/ws] search_outfits_by_category failed: {_outfit_result.get('error')}")
                 state.prompt.append(user_input)
-                state.generated.append("")
+                state.generated.append(_outfit_reply_ws)
                 _context.sessions[session_id] = state
+                if _outfit_reply_ws:
+                    await websocket.send_text(_outfit_reply_ws)
                 await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
                 await websocket.send_text(_context.__END__)
                 _context.auto_approval = _was_auto
@@ -2406,8 +2414,10 @@ async def chat_stream(websocket: WebSocket):
                     location=data.get("location"),
                     sets=_sets,
                 )
+                _cosm_reply_ws = ""
                 if _cosm_result.get("success"):
                     state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+                    _cosm_reply_ws = _cosm_result.get("reply", "")
                     def _scl_cosm_ws(skin_type=_skin_type, concerns=_concerns):
                         try:
                             r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
@@ -2418,8 +2428,10 @@ async def chat_stream(websocket: WebSocket):
                 else:
                     logging.warning(f"[stylist/ws] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
                 state.prompt.append(user_input)
-                state.generated.append("")
+                state.generated.append(_cosm_reply_ws)
                 _context.sessions[session_id] = state
+                if _cosm_reply_ws:
+                    await websocket.send_text(_cosm_reply_ws)
                 await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
                 await websocket.send_text(_context.__END__)
                 _context.auto_approval = _was_auto
@@ -2486,7 +2498,7 @@ async def chat_stream(websocket: WebSocket):
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
                 if _garment_gender in ("MALE", "FEMALE"):
                     await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
-                if persona in ("cosmetics", "stylist") and state.last_cosmetics_result:
+                if persona == "cosmetics" and state.last_cosmetics_result:
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
                 if persona in ("maps", "stylist") and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
