@@ -109,6 +109,8 @@ class ChatState:
         self.last_maps_result: list = []
         self.last_nav_result: dict = {}
         self.last_tailor_result: dict = {}
+        self.last_outfit_ids_result: list = []
+        self.last_cosmetics_ids_result: list = []
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
         self.openai_client = None
@@ -257,6 +259,11 @@ class ChatRequest(BaseModel):
     location: Optional[dict] = None
     sitemap_context: Optional[list] = None
     user_id: Optional[str] = None
+    gender: Optional[str] = None
+    category: Optional[dict] = None
+    sets: Optional[int] = None
+    fsets: Optional[int] = None
+    csets: Optional[int] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -459,7 +466,7 @@ def process_persona(user_input: str):
     elif user_input.lower().startswith("[stylist]"):
         persona = "stylist"
         user_input = user_input[9:].strip()
-        stylist_whitelist = ["get_outfits_by_category", "recommend_garments", "get_cosmetics_by_skin_type", "recommend_cosmetics", "search_nearby_places", "navigate_app", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
+        stylist_whitelist = ["get_outfits_by_category", "get_cosmetics_by_skin_type", "search_nearby_places", "scan_cosmetic", "match_cosmetics", "generate_outfit_image"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in stylist_whitelist]
         addendum_override = (
             "You are Miraj, a personal AI stylist for the Mirror app. "
@@ -951,20 +958,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
         if func_name == "get_outfits_by_category" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
-                state.last_garment_result = result
-                _g = result.get("gender", "").upper()
-                if _g in ("MALE", "FEMALE"):
-                    state.confirmed_gender = _g
-            _bg_gender = func_args.get("gender", "")
-            _bg_category = func_args.get("category", "")
-            if _bg_gender:
-                def _scl_garments(gender=_bg_gender, category=_bg_category):
-                    try:
-                        r = globals()["recommend_garments"](gender=gender, category=category or None, sets=1)
-                        logging.info(f"[SCL_TRACE] recommend_garments gender={gender} category={category} success={r.get('success')}")
-                    except Exception as _e:
-                        logging.warning(f"[SCL_TRACE] recommend_garments failed: {_e}")
-                Thread(target=_scl_garments, daemon=True).start()
+                state.last_outfit_ids_result = result.get("ids", [])
         if func_name in ("recommend_cosmetics", "get_cosmetics_by_skin_type") and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -1578,23 +1572,6 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.")
         await asyncio.sleep(0)
 
-        _implicit_nav = {
-            "get_outfits_by_category": "/ai-recommendation-fashion",
-            "recommend_cosmetics": "/ai-recommendation-cosmetic",
-            "get_cosmetics_by_skin_type": "/ai-recommendation-cosmetic",
-            "search_nearby_places": "/map",
-        }
-        _tool = function_call["name"]
-        if _tool in _implicit_nav:
-            yield f'[NAV_DATA]{json.dumps({"target_url": _implicit_nav[_tool]})}'
-        elif _tool == "navigate_app":
-            try:
-                _target = json.loads(function_call["arguments"]).get("target_url")
-                if _target:
-                    yield f'[NAV_DATA]{json.dumps({"target_url": _target})}'
-            except Exception:
-                pass
-
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
 
         _tool_start = time.time()
@@ -1860,6 +1837,133 @@ def chat(request: ChatRequest):
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
+    # Combined outfit + cosmetics search — both triggers present, run in parallel
+    if persona == "stylist" and request.category and request.skin_analysis:
+        from concurrent.futures import ThreadPoolExecutor
+        _meta      = request.category.get("meta", "")
+        _gender    = request.gender or state.confirmed_gender or "MALE"
+        _fsets     = max(1, min(4, request.fsets or 4))
+        _skin_type = (request.skin_analysis.get("skinType") or "").strip().upper()
+        _concerns  = request.skin_analysis.get("concerns", [])
+        _csets     = max(1, min(6, request.csets or 6))
+
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _f_outfit = _pool.submit(search_outfits_by_category,
+                gender=_gender, meta_categories=_meta,
+                location=request.location, weather=request.weather, sets=_fsets)
+            _f_cosm = _pool.submit(search_cosmetics_by_skin_type,
+                skin_type=_skin_type, concerns=_concerns,
+                skin_analysis=request.skin_analysis,
+                weather=request.weather or {}, location=request.location, sets=_csets)
+            _outfit_result = _f_outfit.result()
+            _cosm_result   = _f_cosm.result()
+
+        _outfit_reply = ""
+        if _outfit_result.get("success"):
+            state.last_outfit_ids_result = _outfit_result.get("ids", [])
+            _outfit_reply = _outfit_result.get("reply", "")
+            if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
+                state.confirmed_gender = _outfit_result["gender"].upper()
+            def _scl_comb_outfit(gender=_gender, meta=_meta):
+                try:
+                    r = search_outfits_by_category(gender=gender, meta_categories=meta, sets=1)
+                    logging.info(f"[SCL_TRACE] combined/search_outfits_by_category gender={gender} meta={meta} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] combined/search_outfits_by_category failed: {_e}")
+            Thread(target=_scl_comb_outfit, daemon=True).start()
+        else:
+            logging.warning(f"[stylist/combined] search_outfits_by_category failed: {_outfit_result.get('error')}")
+
+        _cosm_reply = ""
+        if _cosm_result.get("success"):
+            state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+            _cosm_reply = _cosm_result.get("reply", "")
+            def _scl_comb_cosm(skin_type=_skin_type, concerns=_concerns):
+                try:
+                    r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
+                    logging.info(f"[SCL_TRACE] combined/search_cosmetics_by_skin_type skin_type={skin_type} concerns={concerns} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] combined/search_cosmetics_by_skin_type failed: {_e}")
+            Thread(target=_scl_comb_cosm, daemon=True).start()
+        else:
+            logging.warning(f"[stylist/combined] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
+
+        logging.info("/chat [stylist/combined] %.2fs session=%s", time.time() - _t_start, session_id)
+        return {
+            "outfit_reply": _outfit_reply,
+            "cosmetics_reply": _cosm_reply,
+            "outfit_ids": state.last_outfit_ids_result,
+            "cosmetics_ids": state.last_cosmetics_ids_result,
+            "nav_result": None,
+        }
+
+    # Structured outfit search — bypass Miraj LLM when category is provided
+    if persona == "stylist" and request.category:
+        _meta = request.category.get("meta", "")
+        _gender = request.gender or state.confirmed_gender or "MALE"
+        _sets = max(1, min(4, request.fsets or request.sets or 4))
+        _outfit_result = search_outfits_by_category(
+            gender=_gender,
+            meta_categories=_meta,
+            location=request.location,
+            weather=request.weather,
+            sets=_sets,
+        )
+        _outfit_reply = ""
+        if _outfit_result.get("success"):
+            state.last_outfit_ids_result = _outfit_result.get("ids", [])
+            _outfit_reply = _outfit_result.get("reply", "")
+            if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
+                state.confirmed_gender = _outfit_result["gender"].upper()
+            def _scl_outfit_search(gender=_gender, meta=_meta):
+                try:
+                    r = search_outfits_by_category(gender=gender, meta_categories=meta, sets=1)
+                    logging.info(f"[SCL_TRACE] search_outfits_by_category gender={gender} meta={meta} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] search_outfits_by_category failed: {_e}")
+            Thread(target=_scl_outfit_search, daemon=True).start()
+        else:
+            logging.warning(f"[stylist] search_outfits_by_category failed: {_outfit_result.get('error')}")
+        logging.info("/chat [stylist/direct] %.2fs session=%s", time.time() - _t_start, session_id)
+        return {
+            "response": _outfit_reply,
+            "outfit_ids": state.last_outfit_ids_result,
+            "nav_result": {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
+        }
+
+    # Structured cosmetics search — bypass Miraj LLM when cosmetics field is provided
+    if persona == "stylist" and request.skin_analysis:
+        _skin_type = (request.skin_analysis.get("skinType") or "").strip().upper()
+        _concerns  = request.skin_analysis.get("concerns", [])
+        _sets = max(1, min(6, request.csets or request.sets or 6))
+        _cosm_result = search_cosmetics_by_skin_type(
+            skin_type=_skin_type,
+            concerns=_concerns,
+            skin_analysis=request.skin_analysis,
+            weather=request.weather or {},
+            location=request.location,
+            sets=_sets,
+        )
+        _cosm_reply = ""
+        if _cosm_result.get("success"):
+            state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+            _cosm_reply = _cosm_result.get("reply", "")
+            def _scl_cosm_search(skin_type=_skin_type, concerns=_concerns):
+                try:
+                    r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
+                    logging.info(f"[SCL_TRACE] search_cosmetics_by_skin_type skin_type={skin_type} concerns={concerns} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] search_cosmetics_by_skin_type failed: {_e}")
+            Thread(target=_scl_cosm_search, daemon=True).start()
+        else:
+            logging.warning(f"[stylist] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
+        logging.info("/chat [stylist/cosmetics-direct] %.2fs session=%s", time.time() - _t_start, session_id)
+        return {
+            "response": _cosm_reply,
+            "cosmetics_ids": state.last_cosmetics_ids_result,
+            "nav_result": {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
+        }
+
     # Normal path with optional HITL (legal, garment, cosmetics, maps, nav, stylist personas always auto-approve)
     _was_auto = _context.auto_approval
     if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist"):
@@ -1908,7 +2012,7 @@ def chat(request: ChatRequest):
         except Exception:
             state.last_nav_result = {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": final_text}
     if persona == "stylist":
-        if state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+        if state.last_outfit_ids_result and not (state.last_nav_result or {}).get("target_url"):
             state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
         elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
             state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
@@ -1922,10 +2026,12 @@ def chat(request: ChatRequest):
         "response": final_text,
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
-        "garment_sets": state.last_garment_result if persona in ("garment", "stylist") and state.last_garment_result else None,
-        "cosmetics_sets": state.last_cosmetics_result if persona in ("cosmetics", "stylist") and state.last_cosmetics_result else None,
-        "places_results": state.last_maps_result if persona in ("maps", "stylist") and state.last_maps_result else None,
-        "nav_result": state.last_nav_result if persona in ("nav", "stylist") and state.last_nav_result else None,
+        "outfit_ids": state.last_outfit_ids_result if persona == "stylist" and state.last_outfit_ids_result else None,
+        "cosmetics_ids": state.last_cosmetics_ids_result if persona == "stylist" and state.last_cosmetics_ids_result else None,
+        "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
+        "cosmetics_sets": state.last_cosmetics_result if persona == "cosmetics" and state.last_cosmetics_result else None,
+        "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
+        "nav_result": state.last_nav_result if persona == "nav" and state.last_nav_result else None,
         "tailor_result": state.last_tailor_result if persona == "tailor" and state.last_tailor_result else None,
     }
 
@@ -2320,6 +2426,141 @@ async def chat_stream(websocket: WebSocket):
                     _context.auto_approval = _was_auto
                 continue
 
+            # Combined outfit + cosmetics search — both triggers present, run in parallel
+            if persona == "stylist" and data.get("category") and data.get("skin_analysis"):
+                _meta      = data["category"].get("meta", "")
+                _gender    = (data.get("gender") or "").strip().upper() or state.confirmed_gender or "MALE"
+                _fsets     = max(1, min(4, data.get("fsets") or 4))
+                _skin_type = (data["skin_analysis"].get("skinType") or "").strip().upper()
+                _concerns  = data["skin_analysis"].get("concerns", [])
+                _csets     = max(1, min(6, data.get("csets") or 6))
+
+                _outfit_result, _cosm_result = await asyncio.gather(
+                    asyncio.to_thread(lambda: search_outfits_by_category(
+                        gender=_gender, meta_categories=_meta,
+                        location=data.get("location"), weather=data.get("weather"), sets=_fsets)),
+                    asyncio.to_thread(lambda: search_cosmetics_by_skin_type(
+                        skin_type=_skin_type, concerns=_concerns,
+                        skin_analysis=data.get("skin_analysis"),
+                        weather=data.get("weather") or {}, location=data.get("location"), sets=_csets)),
+                )
+
+                _outfit_reply_ws = ""
+                if _outfit_result.get("success"):
+                    state.last_outfit_ids_result = _outfit_result.get("ids", [])
+                    _outfit_reply_ws = _outfit_result.get("reply", "")
+                    if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
+                        state.confirmed_gender = _outfit_result["gender"].upper()
+                    def _scl_comb_outfit_ws(gender=_gender, meta=_meta):
+                        try:
+                            r = search_outfits_by_category(gender=gender, meta_categories=meta, sets=1)
+                            logging.info(f"[SCL_TRACE] combined/search_outfits_by_category gender={gender} meta={meta} success={r.get('success')}")
+                        except Exception as _e:
+                            logging.warning(f"[SCL_TRACE] combined/search_outfits_by_category failed: {_e}")
+                    Thread(target=_scl_comb_outfit_ws, daemon=True).start()
+                else:
+                    logging.warning(f"[stylist/ws/combined] search_outfits_by_category failed: {_outfit_result.get('error')}")
+
+                _cosm_reply_ws = ""
+                if _cosm_result.get("success"):
+                    state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+                    _cosm_reply_ws = _cosm_result.get("reply", "")
+                    def _scl_comb_cosm_ws(skin_type=_skin_type, concerns=_concerns):
+                        try:
+                            r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
+                            logging.info(f"[SCL_TRACE] combined/search_cosmetics_by_skin_type skin_type={skin_type} concerns={concerns} success={r.get('success')}")
+                        except Exception as _e:
+                            logging.warning(f"[SCL_TRACE] combined/search_cosmetics_by_skin_type failed: {_e}")
+                    Thread(target=_scl_comb_cosm_ws, daemon=True).start()
+                else:
+                    logging.warning(f"[stylist/ws/combined] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
+
+                state.prompt.append(user_input)
+                state.generated.append(f"{_outfit_reply_ws} | {_cosm_reply_ws}".strip(" |"))
+                _context.sessions[session_id] = state
+                if _outfit_reply_ws:
+                    await websocket.send_text(f"[OUTFIT_REPLY]{_outfit_reply_ws}")
+                await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
+                if _cosm_reply_ws:
+                    await websocket.send_text(f"[COSMETICS_REPLY]{_cosm_reply_ws}")
+                await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
+                await websocket.send_text(_context.__END__)
+                _context.auto_approval = _was_auto
+                continue
+
+            # Structured outfit search — bypass streaming LLM when category is provided
+            if persona == "stylist" and data.get("category"):
+                _meta = data["category"].get("meta", "")
+                _gender = (data.get("gender") or "").strip().upper() or state.confirmed_gender or "MALE"
+                _sets = max(1, min(4, data.get("fsets") or data.get("sets") or 4))
+                _outfit_result = search_outfits_by_category(
+                    gender=_gender,
+                    meta_categories=_meta,
+                    location=data.get("location"),
+                    weather=data.get("weather"),
+                    sets=_sets,
+                )
+                _outfit_reply_ws = ""
+                if _outfit_result.get("success"):
+                    state.last_outfit_ids_result = _outfit_result.get("ids", [])
+                    _outfit_reply_ws = _outfit_result.get("reply", "")
+                    if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
+                        state.confirmed_gender = _outfit_result["gender"].upper()
+                    def _scl_ws(gender=_gender, meta=_meta):
+                        try:
+                            r = search_outfits_by_category(gender=gender, meta_categories=meta, sets=1)
+                            logging.info(f"[SCL_TRACE] search_outfits_by_category gender={gender} meta={meta} success={r.get('success')}")
+                        except Exception as _e:
+                            logging.warning(f"[SCL_TRACE] search_outfits_by_category failed: {_e}")
+                    Thread(target=_scl_ws, daemon=True).start()
+                else:
+                    logging.warning(f"[stylist/ws] search_outfits_by_category failed: {_outfit_result.get('error')}")
+                state.prompt.append(user_input)
+                state.generated.append(_outfit_reply_ws)
+                _context.sessions[session_id] = state
+                if _outfit_reply_ws:
+                    await websocket.send_text(_outfit_reply_ws)
+                await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
+                await websocket.send_text(_context.__END__)
+                _context.auto_approval = _was_auto
+                continue
+
+            # Structured cosmetics search — bypass streaming LLM when cosmetics field is provided
+            if persona == "stylist" and data.get("skin_analysis"):
+                _skin_type = (data["skin_analysis"].get("skinType") or "").strip().upper()
+                _concerns  = data["skin_analysis"].get("concerns", [])
+                _sets = max(1, min(6, data.get("csets") or data.get("sets") or 6))
+                _cosm_result = search_cosmetics_by_skin_type(
+                    skin_type=_skin_type,
+                    concerns=_concerns,
+                    skin_analysis=data.get("skin_analysis"),
+                    weather=data.get("weather") or {},
+                    location=data.get("location"),
+                    sets=_sets,
+                )
+                _cosm_reply_ws = ""
+                if _cosm_result.get("success"):
+                    state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+                    _cosm_reply_ws = _cosm_result.get("reply", "")
+                    def _scl_cosm_ws(skin_type=_skin_type, concerns=_concerns):
+                        try:
+                            r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
+                            logging.info(f"[SCL_TRACE] search_cosmetics_by_skin_type skin_type={skin_type} concerns={concerns} success={r.get('success')}")
+                        except Exception as _e:
+                            logging.warning(f"[SCL_TRACE] search_cosmetics_by_skin_type failed: {_e}")
+                    Thread(target=_scl_cosm_ws, daemon=True).start()
+                else:
+                    logging.warning(f"[stylist/ws] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
+                state.prompt.append(user_input)
+                state.generated.append(_cosm_reply_ws)
+                _context.sessions[session_id] = state
+                if _cosm_reply_ws:
+                    await websocket.send_text(_cosm_reply_ws)
+                await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
+                await websocket.send_text(_context.__END__)
+                _context.auto_approval = _was_auto
+                continue
+
             try:
                 async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
                     if chunk.startswith("__HITL__"):
@@ -2366,25 +2607,28 @@ async def chat_stream(websocket: WebSocket):
                 if persona == "stylist":
                     if state.last_tailor_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                    elif state.last_garment_result and not (state.last_nav_result or {}).get("target_url"):
+                    elif state.last_outfit_ids_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                     elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
                     elif state.last_maps_result and not (state.last_nav_result or {}).get("target_url"):
                         state.last_nav_result = {"target_url": "/map", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                if persona in ("garment", "stylist") and state.last_garment_result:
+                if persona == "stylist" and state.last_outfit_ids_result:
+                    await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
+                if persona == "stylist" and state.last_cosmetics_ids_result:
+                    await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
+                if persona == "garment" and state.last_garment_result:
                     await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
                 if _garment_gender in ("MALE", "FEMALE"):
                     await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
-                if persona in ("cosmetics", "stylist") and state.last_cosmetics_result:
+                if persona == "cosmetics" and state.last_cosmetics_result:
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
-                if persona in ("maps", "stylist") and state.last_maps_result:
+                if persona == "maps" and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
-                if persona in ("tailor", "stylist") and state.last_tailor_result:
+                if persona == "tailor" and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
-                if persona == "stylist" and state.last_nav_result:
-                    await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
+                # nav emission disabled for stylist — front end handles navigation
                 _ws_t_end = time.time()
                 ttft = (_ws_t_first_chunk - _ws_t_start) if _ws_t_first_chunk else 0
                 logging.info(

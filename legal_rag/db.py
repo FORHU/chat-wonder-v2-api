@@ -91,6 +91,10 @@ class LegalDatabase:
                 cur.execute(SCHEMA_SQL)
                 cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash TEXT")
                 cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS formatted_markdown TEXT")
+                # Sync sequences in case data was imported with explicit IDs
+                cur.execute("SELECT setval('ingestion_runs_id_seq', COALESCE((SELECT MAX(id) FROM ingestion_runs), 0) + 1, false)")
+                cur.execute("SELECT setval('documents_id_seq', COALESCE((SELECT MAX(id) FROM documents), 0) + 1, false)")
+                cur.execute("SELECT setval('document_chunks_id_seq', COALESCE((SELECT MAX(id) FROM document_chunks), 0) + 1, false)")
             conn.commit()
 
     def set_formatted_markdown(self, document_id: int, markdown: str) -> None:
@@ -122,6 +126,9 @@ class LegalDatabase:
     def create_ingestion_run(self, source_type: str, source_ref: str) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT setval('ingestion_runs_id_seq', COALESCE((SELECT MAX(id) FROM ingestion_runs), 0) + 1, false)"
+                )
                 cur.execute(
                     """
                     INSERT INTO ingestion_runs(source_type, source_ref, status)

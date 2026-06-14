@@ -977,6 +977,126 @@ def get_cosmetics_by_skin_type(skin_type: str) -> dict:
     }
 
 
+def search_cosmetics_by_skin_type(
+    skin_type: str,
+    concerns: list = None,
+    skin_analysis: dict = None,
+    weather: dict = None,
+    location: dict = None,
+    sets: int = 6,
+) -> dict:
+    """Filter cosmetics catalogue by skin type + concerns, use LLM to select product IDs, return ids only.
+
+    Designed for structured signals from mirror-api where the user's skin analysis has been
+    completed. Skips the outer Miraj persona LLM — only the selection LLM runs.
+    skin_analysis is the full object from mirror-api and drives the LLM selection context.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    skin_upper = (skin_type or "").strip().upper()
+    if skin_upper not in _VALID_SKIN_TYPES:
+        return {
+            "success": False,
+            "error": (
+                f"Invalid skin type '{skin_type}'. "
+                f"Valid values are: {', '.join(sorted(_VALID_SKIN_TYPES))}."
+            ),
+        }
+
+    n_sets = max(1, min(6, sets or 6))
+    concern_list = [c for c in (concerns or []) if c]
+
+    # Fetch cosmetics catalogue filtered by skin type + concerns
+    products = _fetch_cosmetics_for_profile(skin_upper.lower(), concern_list)
+    if not products:
+        return {"success": False, "error": "No cosmetics found for the given skin type."}
+
+    # Slim catalogue — id, name, brand, type only
+    slim = [
+        {
+            "id": p["id"],
+            "name": p.get("name", ""),
+            "brand": p.get("brand", ""),
+            "type": p.get("type", ""),
+        }
+        for p in products
+        if p.get("id")
+    ][:80]
+
+    # Build skin analysis context from the full skin_analysis object
+    skin_ctx_parts = [f"Skin type: {skin_upper}"]
+    if skin_analysis:
+        hydration = skin_analysis.get("hydrationPct")
+        oiliness  = skin_analysis.get("oilinessPct")
+        skin_age  = skin_analysis.get("skinAge")
+        skin_tone = skin_analysis.get("skinTone")
+        if hydration is not None:
+            skin_ctx_parts.append(f"Hydration: {hydration}%")
+        if oiliness is not None:
+            skin_ctx_parts.append(f"Oiliness: {oiliness}%")
+        if skin_age is not None:
+            skin_ctx_parts.append(f"Skin age: {skin_age}")
+        if skin_tone:
+            skin_ctx_parts.append(f"Skin tone: {skin_tone}")
+    if concern_list:
+        skin_ctx_parts.append(f"Concerns: {', '.join(concern_list)}")
+    skin_ctx = "\n".join(skin_ctx_parts)
+
+    # Build weather context
+    weather_parts = []
+    if weather:
+        temp = weather.get("temp") or weather.get("temperature_2m")
+        humidity = weather.get("humidity")
+        city = weather.get("city") or weather.get("name") or (location or {}).get("city") or (location or {}).get("name", "")
+        if city:
+            weather_parts.append(f"Location: {city}")
+        if temp is not None:
+            weather_parts.append(f"Temperature: {temp}°C")
+        if humidity is not None:
+            weather_parts.append(f"Humidity: {humidity}%")
+    weather_ctx = f"Climate: {', '.join(weather_parts)}" if weather_parts else ""
+
+    system_prompt = (
+        f"You are a skincare advisor. Select exactly {n_sets} distinct cosmetic product IDs "
+        f"from the catalogue that best match the user's skin analysis. "
+        f'Return JSON: {{"ids": ["<id1>", ...], "reply": "<one sentence explaining why these products suit the user>"}}. '
+        f"Only use IDs that appear in the catalogue."
+    )
+    user_prompt = (
+        f"Skin analysis:\n{skin_ctx}\n"
+        f"{weather_ctx}\n\n"
+        f"Cosmetics catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct product IDs."
+    )
+
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+        ids = result.get("ids", [])
+        valid_ids = {p["id"] for p in products if p.get("id")}
+        ids = [i for i in ids if i in valid_ids][:n_sets]
+        reply = result.get("reply", "")
+        return {"success": True, "ids": ids, "reply": reply, "skin_type": skin_upper}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1, weather_json: str = None, location_json: str = None) -> dict:
     """Fetch cosmetics catalogue and return AI-curated skincare routines based on skin analysis scores.
 
@@ -1642,43 +1762,18 @@ def get_outfits_by_category(
     if not all_outfits:
         return {"success": False, "error": f"No outfits found for category: {category}"}
 
+    import random
     filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
     if not filtered:
         filtered = all_outfits
 
-    sets = [
-        {
-            "set_number": i + 1,
-            "outfit_id": o["id"],
-            "outfit_name": o.get("name", ""),
-            "outfit_description": o.get("description", ""),
-            "outfit_imageUrl": o.get("imageUrl", ""),
-            "vibe": category,
-            "reason": f"{category} outfit",
-            "recommendations": [
-                {
-                    "id": g["garment"]["id"],
-                    "name": g["garment"]["name"],
-                    "description": g["garment"].get("description", ""),
-                    "imageUrl": g["garment"].get("imageUrl", ""),
-                    "fittingSlot": g["garment"].get("fittingSlot", []),
-                    "garmentType": g["garment"].get("garmentType", []),
-                    "category": g["garment"].get("category", []),
-                    "layerLevel": g["garment"].get("layerLevel", ""),
-                    "silhouette": g["garment"].get("silhouette", ""),
-                }
-                for g in o.get("items", [])
-                if g.get("garment")
-            ],
-        }
-        for i, o in enumerate(filtered)
-    ]
+    random.shuffle(filtered)
 
     return {
         "success": True,
         "gender": gender_upper,
         "category": category,
-        "sets": sets,
+        "ids": [o["id"] for o in filtered[:4]],
     }
 
 
@@ -1893,6 +1988,120 @@ def recommend_garments(
             "sets_requested": n_sets,
             **result,
         }
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def search_outfits_by_category(
+    gender: str,
+    meta_categories: str,
+    location: dict = None,
+    weather: dict = None,
+    sets: int = 4,
+) -> dict:
+    """Filter outfits by metacategory + gender, use LLM to select UUIDs, return ids only.
+
+    Designed for structured signals from mirror-api where the user has already chosen
+    a greater category (casual/formal/outdoor) and its metacategories. Skips the outer
+    Miraj persona LLM — only the selection LLM runs, against a pre-filtered catalogue.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {"success": False, "error": "gender must be MALE or FEMALE."}
+
+    n_sets = max(1, min(4, sets or 4))
+
+    # Resolve location → lat/lon
+    lat, lon = _DEFAULT_LAT, _DEFAULT_LON
+    location_label = "Manila, Philippines"
+    if location:
+        _lat = location.get("lat") or location.get("latitude")
+        _lon = location.get("lon") or location.get("longitude")
+        _city = location.get("city") or location.get("name")
+        if _lat is not None and _lon is not None:
+            lat, lon = float(_lat), float(_lon)
+            location_label = _city or "your current location"
+        elif _city:
+            lat, lon = _geocode_location(_city)
+            location_label = _city
+
+    # Resolve weather — use provided dict or fetch live
+    resolved_weather = weather or _fetch_weather(lat, lon, date.today().strftime("%Y-%m-%d"))
+
+    # Fetch outfits filtered by metacategory + gender
+    outfits = _fetch_outfits(meta_gender=gender_upper, meta_category=meta_categories or None)
+    if not outfits:
+        return {"success": False, "error": "No outfits found for the given categories."}
+
+    # Post-process gender filter — guards against the full-catalogue fallback in _fetch_outfits
+    # which carries no gender filter. Mirrors the filter in get_outfits_by_category.
+    gender_filtered = [o for o in outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
+    if gender_filtered:
+        outfits = gender_filtered
+
+    # Slim catalogue — only what the LLM needs for selection
+    # Shuffle so repeated calls with the same query produce varied picks
+    import random
+    slim = [
+        {"id": o["id"], "name": o.get("name", ""), "description": o.get("description", "")}
+        for o in outfits
+    ]
+    random.shuffle(slim)
+
+    # Build weather context string
+    weather_parts = []
+    if resolved_weather:
+        temp = resolved_weather.get("temperature_2m")
+        if temp is not None:
+            weather_parts.append(f"{temp}°C")
+        if resolved_weather.get("is_rainy"):
+            weather_parts.append("rainy")
+        elif resolved_weather.get("is_hot"):
+            weather_parts.append("hot")
+        elif resolved_weather.get("is_cold"):
+            weather_parts.append("cold")
+    weather_ctx = f"Weather: {', '.join(weather_parts)}" if weather_parts else ""
+
+    system_prompt = (
+        f"You are a fashion stylist. Select exactly {n_sets} distinct outfit IDs from the catalogue "
+        f"that best suit the gender, weather, and location. "
+        f'Return JSON: {{"ids": ["<id1>", ...], "reply": "<one sentence explaining why these outfits suit the user>"}}. '
+        f"Only use IDs that appear in the catalogue."
+    )
+    user_prompt = (
+        f"Gender: {gender_upper}\n"
+        f"Location: {location_label}\n"
+        f"{weather_ctx}\n\n"
+        f"Outfit catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct outfit IDs."
+    )
+
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+        ids = result.get("ids", [])
+        valid_ids = {o["id"] for o in outfits}
+        ids = [i for i in ids if i in valid_ids][:n_sets]
+        reply = result.get("reply", "")
+        return {"success": True, "ids": ids, "reply": reply, "gender": gender_upper}
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"Failed to parse AI response: {e}"}
     except Exception as e:
