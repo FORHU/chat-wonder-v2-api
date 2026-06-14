@@ -1968,8 +1968,8 @@ def chat(request: ChatRequest):
         "cosmetics_ids": state.last_cosmetics_ids_result if persona == "stylist" and state.last_cosmetics_ids_result else None,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
         "cosmetics_sets": state.last_cosmetics_result if persona == "cosmetics" and state.last_cosmetics_result else None,
-        "places_results": state.last_maps_result if persona in ("maps", "stylist") and state.last_maps_result else None,
-        "nav_result": state.last_nav_result if persona in ("nav", "stylist") and state.last_nav_result else None,
+        "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
+        "nav_result": state.last_nav_result if persona == "nav" and state.last_nav_result else None,
         "tailor_result": state.last_tailor_result if persona == "tailor" and state.last_tailor_result else None,
     }
 
@@ -2500,9 +2500,9 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
                 if persona == "cosmetics" and state.last_cosmetics_result:
                     await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
-                if persona in ("maps", "stylist") and state.last_maps_result:
+                if persona == "maps" and state.last_maps_result:
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
-                if persona in ("tailor", "stylist") and state.last_tailor_result:
+                if persona == "tailor" and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
                 # nav emission disabled for stylist — front end handles navigation
                 _ws_t_end = time.time()

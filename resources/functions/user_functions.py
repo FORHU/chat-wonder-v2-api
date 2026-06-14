@@ -2041,6 +2041,12 @@ def search_outfits_by_category(
     if not outfits:
         return {"success": False, "error": "No outfits found for the given categories."}
 
+    # Post-process gender filter — guards against the full-catalogue fallback in _fetch_outfits
+    # which carries no gender filter. Mirrors the filter in get_outfits_by_category.
+    gender_filtered = [o for o in outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
+    if gender_filtered:
+        outfits = gender_filtered
+
     # Slim catalogue — only what the LLM needs for selection
     # Shuffle so repeated calls with the same query produce varied picks
     import random
