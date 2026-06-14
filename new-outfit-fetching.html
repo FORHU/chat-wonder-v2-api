@@ -124,6 +124,14 @@
     .result-header { font-size: 13px; color: #888; margin-bottom: 12px; }
     .result-header strong { color: #fff; }
 
+    /* Reply box */
+    .reply-box {
+      background: #111; border: 1px solid #2a2a2a; border-left: 3px solid #86efac;
+      border-radius: 6px; padding: 14px 16px; font-size: 14px; color: #d4d4d4;
+      line-height: 1.6; margin-bottom: 20px; display: none;
+    }
+    .reply-box.visible { display: block; }
+
     /* Empty state */
     .empty { color: #444; font-size: 13px; font-style: italic; padding: 16px 0; }
   </style>
@@ -235,6 +243,7 @@
 </div>
 
 <div id="resultHeader" class="result-header" style="display:none"></div>
+<div class="reply-box" id="replyBox"></div>
 <div class="uuid-list" id="uuidList"></div>
 
 <div class="raw-toggle" id="rawToggle" style="display:none" onclick="toggleRaw()">▶ Show raw response</div>
@@ -396,6 +405,8 @@
     document.getElementById("timingRow").style.display = "none";
     document.getElementById("metaPanel").style.display = "none";
     document.getElementById("resultHeader").style.display = "none";
+    document.getElementById("replyBox").textContent = "";
+    document.getElementById("replyBox").classList.remove("visible");
     document.getElementById("uuidList").innerHTML = "";
     document.getElementById("rawToggle").style.display = "none";
     document.getElementById("raw").textContent = "";
@@ -405,6 +416,13 @@
     document.getElementById("streamLog").classList.remove("visible");
     setStatus("Ready.");
     rawVisible = false; streamVisible = false;
+  }
+
+  function showReply(text) {
+    if (!text) return;
+    const el = document.getElementById("replyBox");
+    el.textContent = text;
+    el.classList.add("visible");
   }
 
   function appendStreamFrame(text, cls) {
@@ -470,6 +488,7 @@
       document.getElementById("rawToggle").style.display = "block";
 
       const ids = data.outfit_ids || [];
+      showReply(data.response || "");
       renderUUIDs(ids, "REST /chat");
       showTiming(totalMs, ids.length, null);
       showMeta({
@@ -517,6 +536,7 @@
     const t0 = Date.now();
     let   ttft = null;
     let   outfitIds = [];
+    let   replyText = "";
 
     try {
       await new Promise((resolve, reject) => {
@@ -542,6 +562,7 @@
           } else if (msg.startsWith("[Error]")) {
             appendStreamFrame(msg, "frame-err");
           } else {
+            replyText += msg;
             appendStreamFrame(msg.slice(0, 120) + (msg.length > 120 ? "…" : ""), "frame-text");
           }
         };
@@ -553,9 +574,10 @@
       const totalMs = Date.now() - t0;
       console.log("outfit_ids:", outfitIds);
 
-      document.getElementById("raw").textContent = JSON.stringify({ outfit_ids: outfitIds }, null, 2);
+      document.getElementById("raw").textContent = JSON.stringify({ response: replyText, outfit_ids: outfitIds }, null, 2);
       document.getElementById("rawToggle").style.display = "block";
 
+      showReply(replyText);
       renderUUIDs(outfitIds, "WebSocket /chat-stream");
       showTiming(totalMs, outfitIds.length, ttft);
       showMeta({
