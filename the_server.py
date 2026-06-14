@@ -262,6 +262,8 @@ class ChatRequest(BaseModel):
     gender: Optional[str] = None
     category: Optional[dict] = None
     sets: Optional[int] = None
+    fsets: Optional[int] = None
+    csets: Optional[int] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -1835,11 +1837,71 @@ def chat(request: ChatRequest):
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
+    # Combined outfit + cosmetics search — both triggers present, run in parallel
+    if persona == "stylist" and request.category and request.skin_analysis:
+        from concurrent.futures import ThreadPoolExecutor
+        _meta      = request.category.get("meta", "")
+        _gender    = request.gender or state.confirmed_gender or "MALE"
+        _fsets     = max(1, min(4, request.fsets or 4))
+        _skin_type = (request.skin_analysis.get("skinType") or "").strip().upper()
+        _concerns  = request.skin_analysis.get("concerns", [])
+        _csets     = max(1, min(6, request.csets or 6))
+
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _f_outfit = _pool.submit(search_outfits_by_category,
+                gender=_gender, meta_categories=_meta,
+                location=request.location, weather=request.weather, sets=_fsets)
+            _f_cosm = _pool.submit(search_cosmetics_by_skin_type,
+                skin_type=_skin_type, concerns=_concerns,
+                skin_analysis=request.skin_analysis,
+                weather=request.weather or {}, location=request.location, sets=_csets)
+            _outfit_result = _f_outfit.result()
+            _cosm_result   = _f_cosm.result()
+
+        _outfit_reply = ""
+        if _outfit_result.get("success"):
+            state.last_outfit_ids_result = _outfit_result.get("ids", [])
+            _outfit_reply = _outfit_result.get("reply", "")
+            if _outfit_result.get("gender", "").upper() in ("MALE", "FEMALE"):
+                state.confirmed_gender = _outfit_result["gender"].upper()
+            def _scl_comb_outfit(gender=_gender, meta=_meta):
+                try:
+                    r = search_outfits_by_category(gender=gender, meta_categories=meta, sets=1)
+                    logging.info(f"[SCL_TRACE] combined/search_outfits_by_category gender={gender} meta={meta} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] combined/search_outfits_by_category failed: {_e}")
+            Thread(target=_scl_comb_outfit, daemon=True).start()
+        else:
+            logging.warning(f"[stylist/combined] search_outfits_by_category failed: {_outfit_result.get('error')}")
+
+        _cosm_reply = ""
+        if _cosm_result.get("success"):
+            state.last_cosmetics_ids_result = _cosm_result.get("ids", [])
+            _cosm_reply = _cosm_result.get("reply", "")
+            def _scl_comb_cosm(skin_type=_skin_type, concerns=_concerns):
+                try:
+                    r = search_cosmetics_by_skin_type(skin_type=skin_type, concerns=concerns, sets=1)
+                    logging.info(f"[SCL_TRACE] combined/search_cosmetics_by_skin_type skin_type={skin_type} concerns={concerns} success={r.get('success')}")
+                except Exception as _e:
+                    logging.warning(f"[SCL_TRACE] combined/search_cosmetics_by_skin_type failed: {_e}")
+            Thread(target=_scl_comb_cosm, daemon=True).start()
+        else:
+            logging.warning(f"[stylist/combined] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
+
+        logging.info("/chat [stylist/combined] %.2fs session=%s", time.time() - _t_start, session_id)
+        return {
+            "outfit_reply": _outfit_reply,
+            "cosmetics_reply": _cosm_reply,
+            "outfit_ids": state.last_outfit_ids_result,
+            "cosmetics_ids": state.last_cosmetics_ids_result,
+            "nav_result": None,
+        }
+
     # Structured outfit search — bypass Miraj LLM when category is provided
     if persona == "stylist" and request.category:
         _meta = request.category.get("meta", "")
         _gender = request.gender or state.confirmed_gender or "MALE"
-        _sets = max(1, min(4, request.sets or 4))
+        _sets = max(1, min(4, request.fsets or request.sets or 4))
         _outfit_result = search_outfits_by_category(
             gender=_gender,
             meta_categories=_meta,
@@ -1873,7 +1935,7 @@ def chat(request: ChatRequest):
     if persona == "stylist" and request.skin_analysis:
         _skin_type = (request.skin_analysis.get("skinType") or "").strip().upper()
         _concerns  = request.skin_analysis.get("concerns", [])
-        _sets = max(1, min(6, request.sets or 6))
+        _sets = max(1, min(6, request.csets or request.sets or 6))
         _cosm_result = search_cosmetics_by_skin_type(
             skin_type=_skin_type,
             concerns=_concerns,
