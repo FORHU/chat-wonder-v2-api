@@ -48,7 +48,8 @@ class HybridRetriever:
         # snippet is chunk-level so we take MAX() — any chunk is fine as a preview.
         # full_text is only fetched when the caller needs it for LLM context (include_full_text=True),
         # avoiding large payload for plain conversational searches.
-        full_text_select = "MAX(d.full_text) AS full_text," if include_full_text else ""
+        full_text_inner = "d.full_text," if include_full_text else ""
+        full_text_select = "MAX(full_text) AS full_text," if include_full_text else ""
         sql = f"""
             WITH keyword AS (
                 SELECT
@@ -62,6 +63,7 @@ class HybridRetriever:
                     d.s3_json_path,
                     d.s3_manifest_path,
                     d.summary,
+                    {full_text_inner}
                     dc.chunk_text AS snippet,
                     COALESCE(
                         ts_rank_cd(
@@ -95,6 +97,7 @@ class HybridRetriever:
                     d.s3_json_path,
                     d.s3_manifest_path,
                     d.summary,
+                    {full_text_inner}
                     dc.chunk_text AS snippet,
                     0.0::float AS keyword_score,
                     (1 - (dc.embedding <=> %s::vector)) AS vector_score
