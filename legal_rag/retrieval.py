@@ -86,25 +86,27 @@ class HybridRetriever:
                 LIMIT %s
             ),
             vector AS (
-                SELECT
-                    d.id,
-                    d.title,
-                    d.case_no,
-                    d.bucket_slug,
-                    d.category,
-                    d.year,
-                    d.source_url,
-                    d.s3_json_path,
-                    d.s3_manifest_path,
-                    d.summary,
-                    {full_text_inner}
-                    dc.chunk_text AS snippet,
-                    0.0::float AS keyword_score,
-                    (1 - (dc.embedding <=> %s::vector)) AS vector_score
-                FROM documents d
-                JOIN document_chunks dc ON dc.document_id = d.id
-                WHERE dc.embedding IS NOT NULL {where_clause}
-                ORDER BY dc.embedding <=> %s::vector
+                SELECT * FROM (
+                    SELECT
+                        d.id,
+                        d.title,
+                        d.case_no,
+                        d.bucket_slug,
+                        d.category,
+                        d.year,
+                        d.source_url,
+                        d.s3_json_path,
+                        d.s3_manifest_path,
+                        d.summary,
+                        {full_text_inner}
+                        dc.chunk_text AS snippet,
+                        0.0::float AS keyword_score,
+                        (1 - (dc.embedding <=> %s::vector)) AS vector_score
+                    FROM documents d
+                    JOIN document_chunks dc ON dc.document_id = d.id
+                    WHERE dc.embedding IS NOT NULL {where_clause}
+                ) _vec
+                ORDER BY vector_score DESC
                 LIMIT %s
             ),
             merged AS (
@@ -131,16 +133,14 @@ class HybridRetriever:
         """
 
         keyword_params = [query, query, query, query, query, query, *filter_params, candidate_limit]
-        vector_params = [vector_literal, *filter_params, vector_literal, candidate_limit]
+        # vector_literal appears once: for the inner similarity expression.
+        # ORDER BY is on the computed vector_score column (not the raw operator) so
+        # PostgreSQL cannot use the HNSW index and falls back to an exact sequential
+        # scan — correct and fast for small corpora; avoids HNSW pre-filter blindness.
+        vector_params = [vector_literal, *filter_params, candidate_limit]
 
         with self.db.connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # When category/bucket filters are present, HNSW approximate search
-                # may miss filtered documents because default ef_search=40 only explores
-                # 40 candidates before applying the WHERE filter. Increase it so all
-                # indexed chunks are within the exploration window.
-                if filter_params:
-                    cur.execute("SET hnsw.ef_search = 400")
                 cur.execute(sql, [*keyword_params, *vector_params, limit])
                 rows = [dict(row) for row in cur.fetchall()]
         t_db = time.perf_counter()
