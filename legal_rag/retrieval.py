@@ -117,8 +117,7 @@ class HybridRetriever:
                 source_url, s3_json_path, s3_manifest_path, summary,
                 {full_text_select}
                 COALESCE(
-                    (ARRAY_AGG(snippet ORDER BY vector_score DESC NULLS LAST, keyword_score DESC NULLS LAST)
-                     FILTER (WHERE vector_score > 0))[1],
+                    MAX(CASE WHEN vector_score > 0 THEN snippet ELSE NULL END),
                     MAX(snippet)
                 ) AS snippet,
                 MAX(keyword_score) AS keyword_score,
