@@ -249,16 +249,36 @@ def search_legal(query: str, page: int = 1, limit: int = 5, content_types: list 
 
         t0 = time.perf_counter()
         category = content_types[0] if content_types else None
-        rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), category=category)
+        # Include full_text for statutes/laws so the LLM gets actual legal text, not just summaries
+        include_full_text = category in ("law", None)
+        rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), category=category, include_full_text=include_full_text)
         # If category filter returns no results, retry without it
         if category and (not rag_payload or not rag_payload.get("results")):
             _logger.info("search_legal category=%r returned 0 results, retrying unfiltered", category)
-            rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit))
+            rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), include_full_text=True)
         _logger.info("search_legal MISS query=%r total=%.0fms", query[:80], (time.perf_counter() - t0) * 1000)
         rag_results = rag_payload.get("results", []) if isinstance(rag_payload, dict) else []
 
+        MAX_TEXT_CHARS = 6000
         mapped = []
         for row in rag_results:
+            full_text = row.get("full_text") or ""
+            snippet = row.get("snippet") or ""
+            summary = row.get("summary") or ""
+            # Prefer the most relevant chunk (snippet from best-scoring vector match).
+            # For large documents, center an 6000-char window around the snippet's
+            # position in full_text so the LLM sees surrounding context.
+            if full_text and snippet and len(full_text) > MAX_TEXT_CHARS:
+                pos = full_text.find(snippet[:100])
+                if pos >= 0:
+                    start = max(0, pos - 1000)
+                    text = full_text[start:start + MAX_TEXT_CHARS]
+                else:
+                    text = full_text[:MAX_TEXT_CHARS]
+            elif full_text:
+                text = full_text[:MAX_TEXT_CHARS]
+            else:
+                text = summary or snippet
             mapped.append({
                 "id": str(row.get("id") or ""),
                 "item_id": str(row.get("id") or ""),
@@ -266,8 +286,8 @@ def search_legal(query: str, page: int = 1, limit: int = 5, content_types: list 
                 "type": row.get("category", "legal_document"),
                 "title": row.get("title"),
                 "url": row.get("source_url"),
-                "text": row.get("full_text") or row.get("summary") or row.get("snippet", ""),
-                "snippet": row.get("snippet", ""),
+                "text": text,
+                "snippet": snippet,
                 "metadata": {
                     "category": row.get("category"),
                     "bucket_slug": row.get("bucket_slug"),

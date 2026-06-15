@@ -48,7 +48,8 @@ class HybridRetriever:
         # snippet is chunk-level so we take MAX() — any chunk is fine as a preview.
         # full_text is only fetched when the caller needs it for LLM context (include_full_text=True),
         # avoiding large payload for plain conversational searches.
-        full_text_select = "MAX(d.full_text) AS full_text," if include_full_text else ""
+        full_text_inner = "d.full_text," if include_full_text else ""
+        full_text_select = "MAX(full_text) AS full_text," if include_full_text else ""
         sql = f"""
             WITH keyword AS (
                 SELECT
@@ -62,6 +63,7 @@ class HybridRetriever:
                     d.s3_json_path,
                     d.s3_manifest_path,
                     d.summary,
+                    {full_text_inner}
                     dc.chunk_text AS snippet,
                     COALESCE(
                         ts_rank_cd(
@@ -84,24 +86,27 @@ class HybridRetriever:
                 LIMIT %s
             ),
             vector AS (
-                SELECT
-                    d.id,
-                    d.title,
-                    d.case_no,
-                    d.bucket_slug,
-                    d.category,
-                    d.year,
-                    d.source_url,
-                    d.s3_json_path,
-                    d.s3_manifest_path,
-                    d.summary,
-                    dc.chunk_text AS snippet,
-                    0.0::float AS keyword_score,
-                    (1 - (dc.embedding <=> %s::vector)) AS vector_score
-                FROM documents d
-                JOIN document_chunks dc ON dc.document_id = d.id
-                WHERE dc.embedding IS NOT NULL {where_clause}
-                ORDER BY dc.embedding <=> %s::vector
+                SELECT * FROM (
+                    SELECT
+                        d.id,
+                        d.title,
+                        d.case_no,
+                        d.bucket_slug,
+                        d.category,
+                        d.year,
+                        d.source_url,
+                        d.s3_json_path,
+                        d.s3_manifest_path,
+                        d.summary,
+                        {full_text_inner}
+                        dc.chunk_text AS snippet,
+                        0.0::float AS keyword_score,
+                        (1 - (dc.embedding <=> %s::vector)) AS vector_score
+                    FROM documents d
+                    JOIN document_chunks dc ON dc.document_id = d.id
+                    WHERE dc.embedding IS NOT NULL {where_clause}
+                ) _vec
+                ORDER BY vector_score DESC
                 LIMIT %s
             ),
             merged AS (
@@ -113,7 +118,10 @@ class HybridRetriever:
                 id, title, case_no, bucket_slug, category, year,
                 source_url, s3_json_path, s3_manifest_path, summary,
                 {full_text_select}
-                MAX(snippet) AS snippet,
+                COALESCE(
+                    MAX(CASE WHEN vector_score > 0 THEN snippet ELSE NULL END),
+                    MAX(snippet)
+                ) AS snippet,
                 MAX(keyword_score) AS keyword_score,
                 MAX(vector_score) AS vector_score,
                 MAX(keyword_score) * 0.45 + MAX(vector_score) * 0.55 AS final_score
@@ -125,7 +133,11 @@ class HybridRetriever:
         """
 
         keyword_params = [query, query, query, query, query, query, *filter_params, candidate_limit]
-        vector_params = [vector_literal, *filter_params, vector_literal, candidate_limit]
+        # vector_literal appears once: for the inner similarity expression.
+        # ORDER BY is on the computed vector_score column (not the raw operator) so
+        # PostgreSQL cannot use the HNSW index and falls back to an exact sequential
+        # scan — correct and fast for small corpora; avoids HNSW pre-filter blindness.
+        vector_params = [vector_literal, *filter_params, candidate_limit]
 
         with self.db.connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
