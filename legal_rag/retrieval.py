@@ -135,6 +135,12 @@ class HybridRetriever:
 
         with self.db.connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # When category/bucket filters are present, HNSW approximate search
+                # may miss filtered documents because default ef_search=40 only explores
+                # 40 candidates before applying the WHERE filter. Increase it so all
+                # indexed chunks are within the exploration window.
+                if filter_params:
+                    cur.execute("SET hnsw.ef_search = 400")
                 cur.execute(sql, [*keyword_params, *vector_params, limit])
                 rows = [dict(row) for row in cur.fetchall()]
         t_db = time.perf_counter()
