@@ -113,7 +113,11 @@ class HybridRetriever:
                 id, title, case_no, bucket_slug, category, year,
                 source_url, s3_json_path, s3_manifest_path, summary,
                 {full_text_select}
-                MAX(snippet) AS snippet,
+                COALESCE(
+                    (ARRAY_AGG(snippet ORDER BY vector_score DESC NULLS LAST, keyword_score DESC NULLS LAST)
+                     FILTER (WHERE vector_score > 0))[1],
+                    MAX(snippet)
+                ) AS snippet,
                 MAX(keyword_score) AS keyword_score,
                 MAX(vector_score) AS vector_score,
                 MAX(keyword_score) * 0.45 + MAX(vector_score) * 0.55 AS final_score

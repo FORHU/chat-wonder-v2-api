@@ -122,10 +122,11 @@ def legal_search(
     bucket_slug: Optional[str] = None,
     year: Optional[int] = None,
     limit: int = 10,
+    include_full_text: bool = False,
 ):
     try:
         _, _, retriever, _ = _services()
-        rows = retriever.search(query=query, category=category, bucket_slug=bucket_slug, year=year, limit=limit)
+        rows = retriever.search(query=query, category=category, bucket_slug=bucket_slug, year=year, limit=limit, include_full_text=include_full_text)
         return {"query": query, "count": len(rows), "results": rows}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
