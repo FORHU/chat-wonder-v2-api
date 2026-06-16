@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException
 from openai import OpenAI
@@ -118,7 +118,7 @@ def list_legal_manifests(limit: int = 500, contains: Optional[str] = None):
 @router.get("/search")
 def legal_search(
     query: str,
-    category: Optional[str] = None,
+    category: Optional[Union[str, list]] = None,
     bucket_slug: Optional[str] = None,
     year: Optional[int] = None,
     limit: int = 10,

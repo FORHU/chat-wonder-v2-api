@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Any
+from typing import Any, Union
 
 from psycopg2.extras import RealDictCursor
 
@@ -18,7 +18,7 @@ class HybridRetriever:
     def search(
         self,
         query: str,
-        category=None,
+        category: Union[str, list, None] = None,
         bucket_slug=None,
         year=None,
         limit: int = 10,
@@ -32,8 +32,13 @@ class HybridRetriever:
         filters = []
         filter_params: list[Any] = []
         if category:
-            filters.append("d.category = %s")
-            filter_params.append(category)
+            if isinstance(category, list) and len(category) > 1:
+                filters.append("d.category = ANY(%s)")
+                filter_params.append(category)
+            else:
+                cat = category[0] if isinstance(category, list) else category
+                filters.append("d.category = %s")
+                filter_params.append(cat)
         if bucket_slug:
             filters.append("d.bucket_slug = %s")
             filter_params.append(bucket_slug)
