@@ -248,10 +248,11 @@ def search_legal(query: str, page: int = 1, limit: int = 5, content_types: list 
         from legal_rag.router import legal_search as legal_rag_search
 
         t0 = time.perf_counter()
-        category = content_types[0] if content_types else None
-        # Include full_text for statutes/laws so the LLM gets actual legal text, not just summaries
-        include_full_text = category in ("law", None)
-        rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), category=category, include_full_text=include_full_text)
+        # Pass the full list so retrieval can use ANY() for multi-type filtering.
+        # A single-element list falls back to an equality filter; None = unfiltered.
+        category = content_types if content_types else None
+        # Always fetch full text — case law holdings are as important as statute text.
+        rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), category=category, include_full_text=True)
         # If category filter returns no results, retry without it
         if category and (not rag_payload or not rag_payload.get("results")):
             _logger.info("search_legal category=%r returned 0 results, retrying unfiltered", category)
@@ -1760,9 +1761,41 @@ def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
 # Garment recommendation function
 # ---------------------------------------------------------------------------
 
+_HOT_THRESHOLD_C = 20.0
+_OUTER_LAYER_LEVELS = {"OUTER", "OUTERWEAR"}
+_OUTER_NAME_KEYWORDS = {"jacket", "coat", "parka", "trench", "anorak", "windbreaker", "overcoat", "blazer"}
+
+
+def _has_heavy_outerwear(outfit: dict) -> bool:
+    for item in outfit.get("items", []):
+        garment = item.get("garment", {})
+        layer = (garment.get("layerLevel") or "").strip().upper()
+        if layer in _OUTER_LAYER_LEVELS:
+            return True
+        name = (garment.get("name") or "").lower()
+        gtype_raw = garment.get("garmentType") or []
+        gtype = " ".join(gtype_raw if isinstance(gtype_raw, list) else [str(gtype_raw)]).lower()
+        if any(kw in name or kw in gtype for kw in _OUTER_NAME_KEYWORDS):
+            return True
+    return False
+
+
+def _parse_temp_c(weather_json_str: str):
+    try:
+        w = json.loads(weather_json_str)
+        for key in ("temp", "temperature_2m", "temperature_c", "feels_like"):
+            v = w.get(key)
+            if v is not None:
+                return float(v)
+    except Exception:
+        pass
+    return None
+
+
 def get_outfits_by_category(
     category: str,
     gender: str,
+    weather_json: str = None,
 ) -> dict:
     """Fetch outfits from the catalogue filtered by a specific category and gender. No AI selection — returns all matching outfits directly."""
     gender_upper = (gender or "").strip().upper()
@@ -1786,6 +1819,13 @@ def get_outfits_by_category(
     filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
     if not filtered:
         filtered = all_outfits
+
+    if weather_json:
+        temp_c = _parse_temp_c(weather_json)
+        if temp_c is not None and temp_c >= _HOT_THRESHOLD_C:
+            cool_only = [o for o in filtered if not _has_heavy_outerwear(o)]
+            if cool_only:
+                filtered = cool_only
 
     random.shuffle(filtered)
 
@@ -2067,6 +2107,19 @@ def search_outfits_by_category(
     if gender_filtered:
         outfits = gender_filtered
 
+    # Hot-weather pre-filter: strip heavy outerwear before the LLM sees the catalogue
+    _hot_temp = None
+    if resolved_weather:
+        for _k in ("temperature_2m", "temp", "temperature_c"):
+            _v = resolved_weather.get(_k)
+            if _v is not None:
+                _hot_temp = float(_v)
+                break
+    if _hot_temp is not None and _hot_temp >= _HOT_THRESHOLD_C:
+        cool_outfits = [o for o in outfits if not _has_heavy_outerwear(o)]
+        if cool_outfits:
+            outfits = cool_outfits
+
     # Slim catalogue — only what the LLM needs for selection
     # Shuffle so repeated calls with the same query produce varied picks
     import random
@@ -2084,7 +2137,7 @@ def search_outfits_by_category(
             weather_parts.append(f"{temp}°C")
         if resolved_weather.get("is_rainy"):
             weather_parts.append("rainy")
-        elif resolved_weather.get("is_hot"):
+        elif _hot_temp is not None and _hot_temp >= _HOT_THRESHOLD_C:
             weather_parts.append("hot")
         elif resolved_weather.get("is_cold"):
             weather_parts.append("cold")

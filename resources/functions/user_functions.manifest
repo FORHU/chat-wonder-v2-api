@@ -22,9 +22,10 @@
           "content_types": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "string",
+              "enum": ["law", "jurisprudence", "issuance"]
             },
-            "description": "Optional filter by content type: case, statute, scelibrary"
+            "description": "Filter by content type. Use 'law' for statutes, codes, and enacted laws (Republic Acts, Executive Orders, Civil Code, etc.). Use 'jurisprudence' for Supreme Court decisions and case law. Use 'issuance' for administrative orders and agency circulars. Omit to search all types. Pass multiple to cover both statutes and cases, e.g. [\"law\", \"jurisprudence\"]."
           }
         },
         "required": [
@@ -340,7 +341,7 @@
     "persona": "stylist",
     "function": {
       "name": "get_outfits_by_category",
-      "description": "Fetch outfits from the catalogue filtered by a specific category and gender. Use this when the user selects a category (e.g. 'Casual', 'Formal', 'Streetwear'). Returns all matching outfits directly — no AI selection, no weather.",
+      "description": "Fetch outfits from the catalogue filtered by a specific category and gender. Use this when the user selects a category (e.g. 'Casual', 'Formal', 'Streetwear'). Returns all matching outfits directly — no AI selection. Pass weather_json when available so hot-weather outerwear is excluded.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -352,6 +353,10 @@
             "type": "string",
             "enum": ["MALE", "FEMALE"],
             "description": "User's gender for filtering outfits. Required — ask the user if not known."
+          },
+          "weather_json": {
+            "type": "string",
+            "description": "Pass the [FRONTEND_WEATHER:{...}] JSON string exactly as received. Used to filter out weather-inappropriate outfits (e.g. heavy jackets when it's hot). Optional."
           }
         },
         "required": ["category", "gender"]
