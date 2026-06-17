@@ -4,6 +4,7 @@ from openai import OpenAI
 
 _embedding_cache: dict = {}
 _CACHE_TTL = 3600
+_MAX_CACHE_ENTRIES = 2000  # ~24MB cap; prevents OOM during bulk ingestion
 
 
 def _cache_key(text: str, model: str) -> str:
@@ -19,6 +20,9 @@ class EmbeddingService:
         self.model = model
 
     def embed_texts(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
+        global _embedding_cache
+        if len(_embedding_cache) > _MAX_CACHE_ENTRIES:
+            _embedding_cache = {}
         now = time.time()
         vectors: list[list[float]] = [None] * len(texts)
         uncached_indices = []
