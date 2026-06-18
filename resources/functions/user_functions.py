@@ -1028,7 +1028,7 @@ def search_cosmetics_by_skin_type(
             ),
         }
 
-    n_sets = max(1, min(6, sets or 6))
+    n_sets = max(1, min(8, sets or 6))
     concern_list = [c for c in (concerns or []) if c]
 
     # Fetch cosmetics catalogue filtered by skin type + concerns
@@ -1111,7 +1111,7 @@ def search_cosmetics_by_skin_type(
         valid_ids = {p["id"] for p in products if p.get("id")}
         ids = [i for i in ids if i in valid_ids][:n_sets]
         reply = result.get("reply", "")
-        return {"success": True, "ids": ids, "reply": reply, "skin_type": skin_upper}
+        return {"success": True, "ids": ids, "requested": n_sets, "reply": reply, "skin_type": skin_upper}
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"Failed to parse AI response: {e}"}
     except Exception as e:

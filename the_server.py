@@ -1938,7 +1938,7 @@ def chat(request: ChatRequest):
     if persona == "stylist" and request.skin_analysis:
         _skin_type = (request.skin_analysis.get("skinType") or "").strip().upper()
         _concerns  = request.skin_analysis.get("concerns", [])
-        _sets = max(1, min(6, request.csets or request.sets or 6))
+        _sets = max(1, min(8, request.csets or request.sets or 6))
         _cosm_result = search_cosmetics_by_skin_type(
             skin_type=_skin_type,
             concerns=_concerns,
