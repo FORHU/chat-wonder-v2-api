@@ -253,10 +253,15 @@ def search_legal(query: str, page: int = 1, limit: int = 5, content_types: list 
         category = content_types if content_types else None
         # Always fetch full text — case law holdings are as important as statute text.
         rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), category=category, include_full_text=True)
-        # If category filter returns no results, retry without it
+        # If category filter returns no results, retry without it. This means the
+        # requested content_types had no match — results below are NOT a verified
+        # category match, just whatever ranked highest corpus-wide. Flag this so the
+        # prompt can tell the model these results are ungrounded for this query.
+        category_filter_missed = False
         if category and (not rag_payload or not rag_payload.get("results")):
             _logger.info("search_legal category=%r returned 0 results, retrying unfiltered", category)
             rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), include_full_text=True)
+            category_filter_missed = True
         _logger.info("search_legal MISS query=%r total=%.0fms", query[:80], (time.perf_counter() - t0) * 1000)
         rag_results = rag_payload.get("results", []) if isinstance(rag_payload, dict) else []
 
@@ -308,7 +313,14 @@ def search_legal(query: str, page: int = 1, limit: int = 5, content_types: list 
             "results": paged,
             "search_type": "hybrid_rag",
             "cached": False,
+            "category_filter_missed": category_filter_missed,
         }
+        if category_filter_missed:
+            result["warning"] = (
+                "The requested content_types had no match for this query. These results are "
+                "an UNFILTERED fallback across the whole corpus, not a verified category match — "
+                "do not cite them as the controlling provision. Follow the abstention rule instead."
+            )
         _search_cache[cache_key] = {"timestamp": time.time(), "result": result.copy()}
         return result
     except Exception as e:
