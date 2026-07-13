@@ -1,7 +1,9 @@
 import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -18,6 +20,10 @@ def _env_int(name: str, default: int, minimum: int) -> int:
 
 LEGAL_INGEST_MAX_INDEX_CHARS = _env_int("LEGAL_INGEST_MAX_INDEX_CHARS", 400_000, 5_000)
 LEGAL_INGEST_MAX_CHUNKS_PER_DOC = _env_int("LEGAL_INGEST_MAX_CHUNKS_PER_DOC", 2048, 16)
+LEGAL_INGEST_MIN_INDEX_CHARS = 60
+# Unix-epoch placeholders and clearly out-of-range years are not trusted index metadata.
+_MIN_TRUSTED_YEAR = 1800
+_EPOCH_PLACEHOLDER_YEAR = 1970
 
 from .chunking import chunk_legal_text, normalize_text
 from .db import LegalDatabase
@@ -25,6 +31,161 @@ from .embeddings import EmbeddingService
 from .s3_client import S3CorpusClient
 
 logger = logging.getLogger(__name__)
+
+
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return len(value) == 0
+    return False
+
+
+def extract_normalized_title(record: dict[str, Any]) -> str:
+    return normalize_text(record.get("title") or record.get("case_title") or "")
+
+
+def extract_normalized_case_no(record: dict[str, Any]) -> str:
+    return normalize_text(
+        record.get("case_no") or record.get("case_number") or record.get("gr_number") or ""
+    )
+
+
+def is_invalid_year(year: int, *, reference_year: int | None = None) -> bool:
+    """Return True when a year should not be trusted as document metadata."""
+    current = reference_year if reference_year is not None else datetime.now(timezone.utc).year
+    if year == _EPOCH_PLACEHOLDER_YEAR:
+        return True
+    if year < _MIN_TRUSTED_YEAR or year > current + 1:
+        return True
+    return False
+
+
+def is_invalid_date_value(value: Any, *, reference_year: int | None = None) -> bool:
+    """Detect placeholder / malformed date-like values that must not pollute year."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        # Bare integers are treated as years when in a plausible digit range.
+        if value < 1000:
+            return True
+        return is_invalid_year(value, reference_year=reference_year)
+    if isinstance(value, float):
+        if not value.is_integer():
+            return True
+        return is_invalid_date_value(int(value), reference_year=reference_year)
+
+    text = str(value).strip()
+    if not text:
+        return True
+
+    # Explicit Unix-epoch timestamps / ISO dates landing on 1970-01-01.
+    lowered = text.lower()
+    if lowered.startswith("1970-01-01") or lowered in {"1970", "1970-01-01t00:00:00z", "0"}:
+        return True
+
+    year = extract_year_from_value(value, reference_year=reference_year)
+    return year is None
+
+
+def extract_year_from_value(value: Any, *, reference_year: int | None = None) -> int | None:
+    """Parse a year from record.year or record.date; return None for unusable values."""
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return None if is_invalid_year(value, reference_year=reference_year) else value
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        year = int(value)
+        return None if is_invalid_year(year, reference_year=reference_year) else year
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Prefer a leading 4-digit year (ISO dates, "YYYY-...", "YYYY").
+    match = re.search(r"(?<!\d)((?:18|19|20)\d{2})(?!\d)", text)
+    if not match:
+        # Fall back to any bare integer string.
+        if re.fullmatch(r"-?\d+", text):
+            try:
+                year = int(text)
+            except ValueError:
+                return None
+            return None if is_invalid_year(year, reference_year=reference_year) else year
+        return None
+
+    year = int(match.group(1))
+    return None if is_invalid_year(year, reference_year=reference_year) else year
+
+
+def extract_record_year(record: dict[str, Any], *, reference_year: int | None = None) -> int | None:
+    """Safer year extraction from record.year or record.date."""
+    for key in ("year", "date", "decision_date", "promulgation_date"):
+        if key not in record:
+            continue
+        year = extract_year_from_value(record.get(key), reference_year=reference_year)
+        if year is not None:
+            return year
+    return None
+
+
+def extract_stable_identity(record: dict[str, Any], *, s3_json_path: str = "") -> str:
+    """
+    Stable document identity for DB persistence (source_hash).
+
+    Prefer unique identifiers so distinct rows that share case_no/title/year do not collide.
+    Fall back to normalized case_no/title/trusted year, retaining s3_json_path in the weak
+    fallback so sparse records do not regress relative to the prior hash scheme.
+    """
+    for key in ("id", "doc_id", "uuid"):
+        value = record.get(key)
+        if not _is_blank(value):
+            return f"{key}:{str(value).strip().lower()}"
+
+    for key in ("url", "source_url"):
+        value = record.get(key)
+        if not _is_blank(value):
+            return f"{key}:{str(value).strip().lower()}"
+
+    slug = record.get("slug")
+    if not _is_blank(slug):
+        return f"slug:{str(slug).strip().lower()}"
+
+    case_no = extract_normalized_case_no(record).lower()
+    title = extract_normalized_title(record).lower()
+    year = extract_record_year(record)
+    year_part = str(year) if year is not None else ""
+    path = (s3_json_path or "").strip().lower()
+
+    if case_no and title:
+        return f"case_title_year:{case_no}|{title}|{year_part}|{path}"
+    if case_no:
+        return f"case_year:{case_no}|{year_part}|{path}"
+    if title:
+        return f"title_year:{title}|{year_part}|{path}"
+    if path:
+        return f"path:{path}"
+    return "unknown"
+
+
+def build_document_source_hash(
+    record: dict[str, Any],
+    *,
+    category: str,
+    bucket_slug: str,
+    s3_json_path: str = "",
+) -> str:
+    """SHA-256 source_hash from category/bucket + stable identity (not bare case_no/title)."""
+    identity = extract_stable_identity(record, s3_json_path=s3_json_path)
+    material = f"{category}|{bucket_slug}|{identity}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -269,42 +430,76 @@ class LegalCorpusIngestor:
         return []
 
     def _record_key(self, record: dict[str, Any], fallback: str) -> str:
-        for key in ("id", "doc_id", "case_no", "case_number", "slug", "url"):
+        # Prefer stable unique identifiers. case_no is last among them because many
+        # distinct documents in this corpus share the same case number.
+        for key in ("id", "doc_id", "uuid"):
             value = record.get(key)
-            if value:
+            if not _is_blank(value):
                 return str(value).strip().lower()
-        title = normalize_text(record.get("title") or record.get("case_title") or "")
-        year = str(record.get("year") or "")
+
+        for key in ("url", "source_url"):
+            value = record.get(key)
+            if not _is_blank(value):
+                return str(value).strip().lower()
+
+        slug = record.get("slug")
+        if not _is_blank(slug):
+            return str(slug).strip().lower()
+
+        for key in ("case_no", "case_number"):
+            value = record.get(key)
+            if not _is_blank(value):
+                return str(value).strip().lower()
+
+        title = extract_normalized_title(record)
+        year = extract_record_year(record)
         if title:
-            return f"{title.lower()}::{year}"
+            year_part = str(year) if year is not None else ""
+            return f"{title.lower()}::{year_part}"
         return fallback
+
+    @staticmethod
+    def _merge_field_value(old_value: Any, new_value: Any, prefer_new: bool) -> Any:
+        old_blank = _is_blank(old_value)
+        new_blank = _is_blank(new_value)
+        if new_blank:
+            return old_value
+        if old_blank:
+            return new_value
+        if prefer_new:
+            return new_value
+        return old_value
 
     def _merge_records(self, old: dict[str, Any], new: dict[str, Any], prefer_new: bool) -> dict[str, Any]:
         if not old:
             return dict(new)
         merged = dict(old)
-        for key, value in new.items():
-            if prefer_new or not merged.get(key):
-                merged[key] = value
+        keys = set(old) | set(new)
+        for key in keys:
+            if key not in new:
+                continue
+            merged[key] = self._merge_field_value(merged.get(key), new.get(key), prefer_new)
         return merged
 
     def _upsert_record(self, record: dict[str, Any], category: str, bucket_slug: str, manifest_key: str, stats: IngestionStats) -> None:
-        title = normalize_text(record.get("title") or record.get("case_title"))
-        case_no = normalize_text(record.get("case_no") or record.get("case_number") or record.get("gr_number"))
+        title = extract_normalized_title(record)
+        case_no = extract_normalized_case_no(record)
         summary = normalize_text(record.get("summary"))
         concise_summary = normalize_text(record.get("concise_summary"))
         full_text = normalize_text(record.get("full_text") or record.get("content") or record.get("text"))
         full_text_source = "full_text" if full_text else ("concise_summary" if concise_summary else "summary")
         index_text = full_text or concise_summary or summary
-        if len(index_text) < 60:
+
+        # Skip empty / useless rows; keep docs with useful text even when metadata is dirty.
+        if len(index_text) < LEGAL_INGEST_MIN_INDEX_CHARS:
+            stats.skipped_empty += 1
+            return
+        if not title and not case_no:
             stats.skipped_empty += 1
             return
 
-        year_value = record.get("year")
-        try:
-            year = int(year_value) if year_value is not None else None
-        except (ValueError, TypeError):
-            year = None
+        # Preserve raw metadata; never trust placeholder/malformed years for the indexed column.
+        year = extract_record_year(record)
 
         s3_json_path = record.get("_s3_path") or record.get("s3_json_path") or ""
         if not s3_json_path:
@@ -313,9 +508,12 @@ class LegalCorpusIngestor:
                     s3_json_path = record[candidate]
                     break
 
-        source_hash = hashlib.sha256(
-            f"{category}|{bucket_slug}|{case_no}|{title}|{year}|{s3_json_path}".encode("utf-8")
-        ).hexdigest()
+        source_hash = build_document_source_hash(
+            record,
+            category=category,
+            bucket_slug=bucket_slug,
+            s3_json_path=s3_json_path or "",
+        )
         content_hash = hashlib.sha256(index_text.encode("utf-8")).hexdigest()
 
         existing = self.db.get_document_hashes(source_hash)
@@ -324,6 +522,9 @@ class LegalCorpusIngestor:
             return
         if existing:
             stats.updated_changed += 1
+
+        # Always keep the original record payload (including dirty year/date) in metadata_json.
+        metadata_json = record.get("metadata") if isinstance(record.get("metadata"), dict) else record
 
         doc_id = self.db.upsert_document(
             {
@@ -336,7 +537,7 @@ class LegalCorpusIngestor:
                 "case_no": case_no or None,
                 "year": year,
                 "source_url": record.get("source_url") or record.get("url"),
-                "metadata_json": record.get("metadata") if isinstance(record.get("metadata"), dict) else record,
+                "metadata_json": metadata_json,
                 "summary": summary or None,
                 "concise_summary": concise_summary or None,
                 "full_text": full_text or None,

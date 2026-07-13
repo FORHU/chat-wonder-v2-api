@@ -9,6 +9,67 @@ from .embeddings import EmbeddingService
 
 logger = logging.getLogger(__name__)
 
+KEYWORD_WEIGHT = 0.45
+VECTOR_WEIGHT = 0.55
+
+
+def chunk_final_score(keyword_score: float, vector_score: float) -> float:
+    return float(keyword_score or 0) * KEYWORD_WEIGHT + float(vector_score or 0) * VECTOR_WEIGHT
+
+
+def select_best_chunk_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pick the highest-scoring chunk row for snippet selection (not lexicographic max text)."""
+    if not rows:
+        raise ValueError("rows must be non-empty")
+    return max(
+        rows,
+        key=lambda r: (
+            chunk_final_score(r.get("keyword_score", 0), r.get("vector_score", 0)),
+            float(r.get("vector_score") or 0),
+            float(r.get("keyword_score") or 0),
+        ),
+    )
+
+
+def aggregate_merged_hits(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """
+    Collapse chunk-level keyword/vector hits into document-level results.
+
+    Document scores use MAX(keyword) / MAX(vector) across hits; snippet comes from
+    the single best-scoring chunk for that document.
+    """
+    by_doc: dict[Any, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_doc.setdefault(row["id"], []).append(row)
+
+    results: list[dict[str, Any]] = []
+    for doc_rows in by_doc.values():
+        best = select_best_chunk_row(doc_rows)
+        keyword_score = max(float(r.get("keyword_score") or 0) for r in doc_rows)
+        vector_score = max(float(r.get("vector_score") or 0) for r in doc_rows)
+        result = {
+            "id": best["id"],
+            "title": best.get("title"),
+            "case_no": best.get("case_no"),
+            "bucket_slug": best.get("bucket_slug"),
+            "category": best.get("category"),
+            "year": best.get("year"),
+            "source_url": best.get("source_url"),
+            "s3_json_path": best.get("s3_json_path"),
+            "s3_manifest_path": best.get("s3_manifest_path"),
+            "summary": best.get("summary"),
+            "snippet": best.get("snippet"),
+            "keyword_score": keyword_score,
+            "vector_score": vector_score,
+            "final_score": chunk_final_score(keyword_score, vector_score),
+        }
+        if "full_text" in best:
+            result["full_text"] = best.get("full_text")
+        results.append(result)
+
+    results.sort(key=lambda r: r["final_score"], reverse=True)
+    return results[:limit]
+
 
 class HybridRetriever:
     def __init__(self, db: LegalDatabase, embeddings: EmbeddingService):
@@ -49,12 +110,11 @@ class HybridRetriever:
 
         candidate_limit = max(limit * 4, 20)
 
-        # Single round-trip: keyword and vector arms as CTEs, merged and ranked in one query.
-        # snippet is chunk-level so we take MAX() — any chunk is fine as a preview.
-        # full_text is only fetched when the caller needs it for LLM context (include_full_text=True),
-        # avoiding large payload for plain conversational searches.
+        # Single round-trip: keyword and vector arms as CTEs, then pick the best-scoring
+        # chunk per document for snippet (ROW_NUMBER), while aggregating doc-level scores.
         full_text_inner = "d.full_text," if include_full_text else ""
-        full_text_select = "MAX(full_text) AS full_text," if include_full_text else ""
+        full_text_best = "b.full_text," if include_full_text else ""
+        full_text_ranked = "full_text," if include_full_text else ""
         sql = f"""
             WITH keyword AS (
                 SELECT
@@ -118,22 +178,45 @@ class HybridRetriever:
                 SELECT * FROM keyword
                 UNION ALL
                 SELECT * FROM vector
+            ),
+            doc_scores AS (
+                SELECT
+                    id,
+                    MAX(keyword_score) AS keyword_score,
+                    MAX(vector_score) AS vector_score,
+                    MAX(keyword_score) * {KEYWORD_WEIGHT} + MAX(vector_score) * {VECTOR_WEIGHT} AS final_score
+                FROM merged
+                GROUP BY id
+            ),
+            best_chunk AS (
+                SELECT
+                    id, title, case_no, bucket_slug, category, year,
+                    source_url, s3_json_path, s3_manifest_path, summary,
+                    {full_text_ranked}
+                    snippet,
+                    keyword_score,
+                    vector_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY id
+                        ORDER BY
+                            (keyword_score * {KEYWORD_WEIGHT} + vector_score * {VECTOR_WEIGHT}) DESC,
+                            vector_score DESC,
+                            keyword_score DESC
+                    ) AS rn
+                FROM merged
             )
             SELECT
-                id, title, case_no, bucket_slug, category, year,
-                source_url, s3_json_path, s3_manifest_path, summary,
-                {full_text_select}
-                COALESCE(
-                    MAX(CASE WHEN vector_score > 0 THEN snippet ELSE NULL END),
-                    MAX(snippet)
-                ) AS snippet,
-                MAX(keyword_score) AS keyword_score,
-                MAX(vector_score) AS vector_score,
-                MAX(keyword_score) * 0.45 + MAX(vector_score) * 0.55 AS final_score
-            FROM merged
-            GROUP BY id, title, case_no, bucket_slug, category, year,
-                     source_url, s3_json_path, s3_manifest_path, summary
-            ORDER BY final_score DESC
+                b.id, b.title, b.case_no, b.bucket_slug, b.category, b.year,
+                b.source_url, b.s3_json_path, b.s3_manifest_path, b.summary,
+                {full_text_best}
+                b.snippet AS snippet,
+                s.keyword_score,
+                s.vector_score,
+                s.final_score
+            FROM best_chunk b
+            JOIN doc_scores s ON s.id = b.id
+            WHERE b.rn = 1
+            ORDER BY s.final_score DESC
             LIMIT %s
         """
 
