@@ -41,7 +41,6 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS idx_documents_fts ON documents USING GIN(to_tsvector('english', COALESCE(title,'') || ' ' || COALESCE(case_no,'') || ' ' || COALESCE(summary,'')));
 CREATE INDEX IF NOT EXISTS idx_documents_title_trgm ON documents USING GIN(title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_documents_case_no_trgm ON documents USING GIN(case_no gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_chunks_text_trgm ON document_chunks USING GIN(chunk_text gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS document_chunks (
     id BIGSERIAL PRIMARY KEY,
@@ -55,6 +54,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_chunks_document_id ON document_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_text_trgm ON document_chunks USING GIN(chunk_text gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding_hnsw
     ON document_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 
@@ -77,16 +77,25 @@ class LegalDatabase:
         self._pool = psycopg2.pool.ThreadedConnectionPool(2, 10, self.dsn)
 
     @contextmanager
-    def connect(self):
+    def connect(self, *, register_pgvector: bool = True):
+        """
+        Borrow a pooled connection.
+
+        register_pgvector must be False during schema bootstrap on a fresh DB:
+        register_vector() requires the vector type, which only exists after
+        CREATE EXTENSION vector runs inside ensure_schema().
+        """
         conn = self._pool.getconn()
-        register_vector(conn)
         try:
+            if register_pgvector:
+                register_vector(conn)
             yield conn
         finally:
             self._pool.putconn(conn)
 
     def ensure_schema(self) -> None:
-        with self.connect() as conn:
+        # Raw connection: do not register pgvector until the extension exists.
+        with self.connect(register_pgvector=False) as conn:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
                 cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash TEXT")
