@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Legal AI Chat</title>
+  <title>Legal AI Chat — juris.ph MCP</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -17,7 +17,6 @@
       flex-direction: column;
     }
 
-    /* ── Header ── */
     header {
       padding: 14px 20px;
       background: #16161a;
@@ -25,6 +24,7 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      flex-wrap: wrap;
     }
     header h1 { font-size: 16px; font-weight: 600; color: #fff; }
     .badge {
@@ -36,6 +36,7 @@
     }
     .badge-legal { background: #1e3a5f; color: #60a5fa; }
     .badge-general { background: #1a2a1a; color: #4ade80; }
+    .badge-mcp { background: #1a2e1a; color: #86efac; }
 
     #status {
       margin-left: auto;
@@ -53,7 +54,6 @@
     }
     #status-dot.ok { background: #22c55e; }
 
-    /* ── Config bar ── */
     .config-bar {
       padding: 8px 20px;
       background: #12121a;
@@ -63,6 +63,7 @@
       gap: 16px;
       font-size: 13px;
       color: #94a3b8;
+      flex-wrap: wrap;
     }
     .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
     .config-bar input[type=text] {
@@ -75,6 +76,11 @@
       width: 220px;
     }
     .config-bar input[type=text]:focus { outline: none; border-color: #60a5fa; }
+    #mcp-url {
+      font-size: 11px;
+      color: #64748b;
+      font-family: ui-monospace, monospace;
+    }
     .toggle-switch {
       position: relative; width: 36px; height: 20px;
     }
@@ -95,14 +101,41 @@
     .toggle-switch input:checked + .slider { background: #3b82f6; }
     .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
 
-    /* ── Main layout ── */
+    .samples {
+      padding: 10px 20px;
+      background: #0f0f14;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .samples span {
+      font-size: 11px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      font-weight: 700;
+      margin-right: 4px;
+    }
+    .chip {
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      color: #cbd5e1;
+      border-radius: 99px;
+      padding: 5px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .chip:hover { border-color: #3b82f6; background: #1e293b; }
+
     .main {
       flex: 1;
       display: flex;
       overflow: hidden;
     }
 
-    /* ── Messages ── */
     #messages {
       flex: 1;
       overflow-y: auto;
@@ -146,7 +179,6 @@
       border: 1px solid #2d2d3a;
     }
 
-    /* Markdown inside assistant bubble */
     .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
     .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
     .bubble p { margin: 6px 0; }
@@ -173,13 +205,11 @@
     .bubble pre { background: #0f172a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
     .bubble pre code { background: none; padding: 0; }
 
-    /* Citation links */
     .bubble a.legal-ref { font-size: 12px; border-radius: 4px; padding: 1px 6px; text-decoration: none; font-weight: 600; }
     .bubble a.legal-ref.law { background: #1e3a5f; color: #60a5fa; }
     .bubble a.legal-ref.jurisprudence { background: #2d1a40; color: #c084fc; }
     .bubble a:not(.legal-ref) { color: #60a5fa; }
 
-    /* Typing indicator */
     .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
     .typing span {
       width: 6px; height: 6px;
@@ -194,9 +224,8 @@
       40% { transform: translateY(-6px); }
     }
 
-    /* ── Sources sidebar ── */
     #sources-panel {
-      width: 280px;
+      width: 300px;
       border-left: 1px solid #1e1e2e;
       overflow-y: auto;
       background: #12121a;
@@ -256,7 +285,6 @@
       text-align: center;
     }
 
-    /* ── Input area ── */
     .input-area {
       padding: 16px 20px;
       border-top: 1px solid #1e1e2e;
@@ -301,7 +329,8 @@
 
 <header>
   <h1>Legal AI Chat</h1>
-  <span class="badge badge-legal" id="persona-badge">⚖ Legal Mode</span>
+  <span class="badge badge-legal" id="persona-badge">Legal Mode</span>
+  <span class="badge badge-mcp" id="mcp-badge">juris.ph MCP</span>
   <div id="status">
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
@@ -320,6 +349,15 @@
     </span>
     Legal persona
   </label>
+  <span id="mcp-url">MCP: …</span>
+</div>
+
+<div class="samples">
+  <span>Try</span>
+  <button type="button" class="chip" data-q="What is illegal dismissal under Philippine labor law?">Illegal dismissal</button>
+  <button type="button" class="chip" data-q="What does the Safe Spaces Act (RA 11313) cover?">Safe Spaces Act</button>
+  <button type="button" class="chip" data-q="Summarize due process requirements in administrative cases.">Due process</button>
+  <button type="button" class="chip" data-q="What are the penalties for cyberlibel under Philippine law?">Cyberlibel</button>
 </div>
 
 <div class="main">
@@ -327,16 +365,18 @@
     <div class="msg assistant">
       <span class="msg-label">Legal AI</span>
       <div class="bubble">
-        Hello! I'm your <strong>Philippine Legal AI Assistant</strong>. Ask me anything about Philippine law — cases, statutes, legal consequences, document drafting, or lawyer bookings.<br><br>
-        Toggle <em>Legal persona</em> above to activate structured ALAC analysis with cited sources (the tag is added automatically; same contract as law-ph).
+        Hello — this demo hits <strong>/chat-stream</strong> with the <code>[legal ai]</code> persona.<br><br>
+        Live sources are <strong>Supreme Court decisions</strong> and <strong>Republic Acts</strong> via
+        <strong>juris.ph MCP</strong> (not local RAG). Citations should be <code>https://juris.ph/…</code> links.<br><br>
+        Use a sample chip or ask your own question.
       </div>
     </div>
   </div>
 
   <div id="sources-panel">
-    <div class="sources-header">Sources</div>
+    <div class="sources-header">Sources (juris.ph)</div>
     <div id="sources-list">
-      <div id="sources-empty">Sources from legal searches will appear here.</div>
+      <div id="sources-empty">Sources from MCP searches will appear here.</div>
     </div>
   </div>
 </div>
@@ -353,43 +393,64 @@
   let currentBubble = null;
   let currentRaw = "";
   let isStreaming = false;
-  let legalLibraryUrl = "";
+  let jurisMcpUrl = "https://juris.ph/mcp";
 
-  // ── Auto-resize textarea ──
   $("input").addEventListener("input", () => {
     const el = $("input");
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   });
 
-  // ── Server URL change → reconnect ──
   $("server-url").addEventListener("change", connect);
 
-  // ── Legal toggle badge ──
   $("legal-toggle").addEventListener("change", () => {
     const on = $("legal-toggle").checked;
-    $("persona-badge").textContent = on ? "⚖ Legal Mode" : "💬 General";
+    $("persona-badge").textContent = on ? "Legal Mode" : "General";
     $("persona-badge").className = "badge " + (on ? "badge-legal" : "badge-general");
   });
 
-  // ── Init session then WebSocket ──
+  document.querySelectorAll(".chip").forEach(btn => {
+    btn.addEventListener("click", () => {
+      $("input").value = btn.dataset.q || "";
+      $("input").dispatchEvent(new Event("input"));
+      send();
+    });
+  });
+
   async function connect() {
-    const base = `http://${$("server-url").value}`;
+    const host = $("server-url").value.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    $("server-url").value = host;
+    const base = `http://${host}`;
     setStatus("connecting");
 
     try {
-      const [sessionRes, configRes] = await Promise.all([
+      const [sessionRes, configRes, healthRes] = await Promise.all([
         fetch(`${base}/session-id`),
         fetch(`${base}/config`),
+        fetch(`${base}/health`).catch(() => null),
       ]);
       sessionId = (await sessionRes.json()).session_id;
-      legalLibraryUrl = ((await configRes.json()).legal_library_url || "").replace(/\/$/, "");
+      const config = await configRes.json();
+      jurisMcpUrl = config.juris_mcp_url || jurisMcpUrl;
+      $("mcp-url").textContent = `MCP: ${jurisMcpUrl}`;
+
+      if (healthRes) {
+        const health = await healthRes.json();
+        const mcp = (health.checks && health.checks.juris_mcp) || {};
+        if (mcp.status === "ok") {
+          $("mcp-badge").textContent = `juris.ph OK (${mcp.latency_ms || "?"}ms)`;
+          $("mcp-badge").style.color = "#86efac";
+        } else if (mcp.status) {
+          $("mcp-badge").textContent = `juris.ph ${mcp.status}`;
+          $("mcp-badge").style.color = "#fbbf24";
+        }
+      }
     } catch (e) {
       setStatus("error", "Cannot reach server");
       return;
     }
 
-    const wsUrl = `ws://${$("server-url").value}/chat-stream`;
+    const wsUrl = `ws://${host}/chat-stream`;
     if (ws) ws.close();
     ws = new WebSocket(wsUrl);
 
@@ -408,9 +469,7 @@
     ws.onmessage = ({ data }) => handleChunk(data);
   }
 
-  // ── Chunk handler ──
   function handleChunk(chunk) {
-    // End of message
     if (chunk === "__END__") {
       if (currentBubble && currentRaw) {
         try {
@@ -429,7 +488,6 @@
       return;
     }
 
-    // Sources
     if (chunk.startsWith("[Sources] ")) {
       try {
         const sources = JSON.parse(chunk.slice(10));
@@ -438,51 +496,44 @@
       return;
     }
 
-    // HITL pending approval (not used in legal mode but handle gracefully)
     if (chunk.startsWith("{") && chunk.includes("pending_approval")) {
       try {
         const ev = JSON.parse(chunk);
         if (ev.status === "pending_approval") {
-          appendSystem(`⏳ Tool <strong>${ev.tool_name}</strong> needs approval. (HITL not active in legal mode)`);
+          appendSystem(`Tool <strong>${ev.tool_name}</strong> needs approval.`);
           return;
         }
       } catch {}
     }
 
-    // Tool execution notice
     if (chunk.startsWith("[Tool]")) {
-      appendSystem(chunk);
+      appendSystem(escHtml(chunk));
       return;
     }
 
-    // Error
     if (chunk.startsWith("[Error]")) {
-      appendSystem(`<span style="color:#f87171">${chunk}</span>`);
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
       isStreaming = false;
       $("send-btn").disabled = false;
       removeTyping();
       return;
     }
 
-    // Regular content — stream into bubble
     if (!currentBubble) {
       currentBubble = createAssistantBubble();
     }
     removeTyping();
     currentRaw += chunk;
-    // Live preview (raw text until __END__ for final markdown render)
     currentBubble.textContent = currentRaw;
     scrollBottom();
   }
 
-  // Canonical legal tag at demo boundary only (matches law-ph stream proxy).
   function withLegalTag(input) {
     const lower = input.toLowerCase();
     const stripped = lower.startsWith("[legal ai]") ? input.slice(10).trimStart() : input;
     return `[legal ai] ${stripped}`;
   }
 
-  // ── Send message ──
   function send() {
     const text = $("input").value.trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
@@ -506,7 +557,6 @@
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
 
-  // ── DOM helpers ──
   function appendUserMsg(text) {
     const div = document.createElement("div");
     div.className = "msg user";
@@ -527,7 +577,7 @@
   function appendTyping() {
     removeTyping();
     const wrap = document.createElement("div");
-    wrap.className = "msg assistant" ;
+    wrap.className = "msg assistant";
     wrap.id = "typing-wrap";
     wrap.innerHTML = `<span class="msg-label">Legal AI</span>
       <div class="bubble typing"><span></span><span></span><span></span></div>`;
@@ -542,7 +592,7 @@
 
   function appendSystem(html) {
     const div = document.createElement("div");
-    div.style.cssText = "font-size:12px;color:#475569;padding:4px 8px;align-self:center;";
+    div.style.cssText = "font-size:12px;color:#64748b;padding:4px 8px;align-self:center;";
     div.innerHTML = html;
     $("messages").appendChild(div);
     scrollBottom();
@@ -554,30 +604,28 @@
   }
 
   function escHtml(s) {
-    return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-  }
-
-  // ── Citation link styling + URL rewrite ──
-  function resolveCitationUrl(href) {
-    if (href && href.startsWith("/sources/")) {
-      const id = href.slice("/sources/".length);
-      return `${legalLibraryUrl}/${id}`;
-    }
-    return href;
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
   function applyLegalLinks(el) {
     el.querySelectorAll("a").forEach(a => {
-      a.href = resolveCitationUrl(a.getAttribute("href"));
+      const href = a.getAttribute("href") || "";
+      // Legacy /sources/{id} should not appear; leave as-is so you can spot bugs
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      const text = a.textContent;
-      if (text.endsWith(" Law")) { a.classList.add("legal-ref","law"); }
-      else if (text.endsWith(" Jurisprudence")) { a.classList.add("legal-ref","jurisprudence"); }
+      const text = a.textContent || "";
+      if (text.endsWith(" Law") || href.includes("republic") || href.includes("/ra/")) {
+        a.classList.add("legal-ref", "law");
+      } else if (text.endsWith(" Jurisprudence") || href.includes("/case/")) {
+        a.classList.add("legal-ref", "jurisprudence");
+      }
+      if (href.startsWith("/sources/")) {
+        a.style.outline = "1px solid #f87171";
+        a.title = "Legacy /sources/ link — expected juris.ph URL";
+      }
     });
   }
 
-  // ── Sources panel ──
   function renderSources(sources) {
     const list = $("sources-list");
     list.innerHTML = "";
@@ -587,22 +635,29 @@
     }
     sources.forEach(s => {
       const typeRaw = (s.category || s.type || "").toLowerCase();
-      const typeClass = typeRaw.includes("statute") || typeRaw.includes("law")
-        ? "law"
-        : typeRaw.includes("case") || typeRaw.includes("juris")
-        ? "jurisprudence"
-        : "default";
-      const typeLabel = typeClass === "law" ? "Law" : typeClass === "jurisprudence" ? "Jurisprudence" : typeRaw || "Document";
-      const snippet = s.snippet ? `<div class="s-snippet">${escHtml(s.snippet.slice(0,200))}</div>` : "";
-      const docId = s.item_id || s.id;
-      const libHref = docId ? `${legalLibraryUrl}/${docId}` : (s.source_url || "");
-      const link = libHref ? `<a href="${escHtml(libHref)}" target="_blank" rel="noopener noreferrer">View in library ↗</a>` : "";
+      const typeClass =
+        typeRaw.includes("republic") || typeRaw.includes("statute") || typeRaw.includes("law")
+          ? "law"
+          : typeRaw.includes("case") || typeRaw.includes("juris")
+          ? "jurisprudence"
+          : "default";
+      const typeLabel =
+        typeClass === "law" ? "Republic Act" :
+        typeClass === "jurisprudence" ? "Jurisprudence" :
+        typeRaw || "Document";
+      const snippet = s.snippet
+        ? `<div class="s-snippet">${escHtml(String(s.snippet).slice(0, 200))}</div>`
+        : "";
+      const href = s.source_url || s.url || "";
+      const link = href
+        ? `<a href="${escHtml(href)}" target="_blank" rel="noopener noreferrer">Open on juris.ph ↗</a>`
+        : "";
       const card = document.createElement("div");
       card.className = "source-card";
       card.innerHTML = `
         <span class="s-type ${typeClass}">${typeLabel}</span>
         <div class="s-title">${escHtml(s.title || "Untitled")}</div>
-        <div class="s-year">${s.year || ""}</div>
+        <div class="s-year">${escHtml(String(s.year || ""))}</div>
         ${snippet}
         ${link}
       `;
@@ -611,16 +666,14 @@
   }
 
   function clearSources() {
-    $("sources-list").innerHTML = '<div id="sources-empty">Searching…</div>';
+    $("sources-list").innerHTML = '<div id="sources-empty">Searching juris.ph…</div>';
   }
 
-  // ── Status ──
   function setStatus(state, label) {
     $("status-dot").className = state === "ok" ? "ok" : "";
     $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
   }
 
-  // ── Boot ──
   connect();
 </script>
 </body>
