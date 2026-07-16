@@ -31,3 +31,41 @@ A WebSocket emission block containing a JSON array of outfit UUID strings. Emitt
 
 **SCL Tracer**
 A background thread that fires a lightweight duplicate call after certain tool executions, for XAI compliance logging. Fires after `search_outfits_by_category` (structured path) and after `get_outfits_by_category` (LLM path).
+
+## Legal search
+
+**Legal Source**
+The sole live authority for legal retrieval in this product: the juris.ph MCP (`search_jurisprudence`, `search_republic_acts`, `get_case`, `get_republic_act`). Local Postgres/pgvector RAG is not used for live search.
+_Avoid_: hybrid RAG+MCP, dual corpus, Anycase DB for answers
+
+**In-Scope Legal Material**
+Philippine Supreme Court decisions and Republic Acts only. Requests about issuances, IRRs, ordinances, or other non-RA instruments are out of scope and must be declined clearly — not answered from model memory as if sourced.
+_Avoid_: Anycase issuance corpus, general “Philippine law” without an MCP hit
+
+**Legal Citation**
+A user-facing reference to a retrieved document, expressed as the juris.ph shareable page URL (optionally paired with the official PDF link). Not a local `/sources/{id}` library path.
+_Avoid_: numeric DB item_id, LEGAL_LIBRARY_URL sources links
+
+**Legal Tool**
+One of the four juris.ph MCP operations exposed to the `[legal ai]` persona: `search_jurisprudence`, `search_republic_acts`, `get_case`, `get_republic_act`. The model chooses among these directly; there is no umbrella `search_legal` / `summarize_legal_case` facade.
+_Avoid_: search_legal, summarize_legal_case, content_types mapper
+
+**Juris MCP Client**
+The in-process client the API uses to invoke juris.ph Legal Tools for the `[legal ai]` persona. There is no local legal RAG path.
+_Avoid_: Cursor-only MCP wiring, local pgvector legal search
+
+**Legal HTTP API**
+Removed. Live legal retrieval is available only through the `[legal ai]` chat persona and its Legal Tools. No public `/api/legal/*` or `/legal/*` search/ask/case/ingest surface.
+_Avoid_: /api/legal/search, /legal/ask, numeric case-by-id HTTP reads
+
+**Legal Retrieval Miss**
+A completed MCP search that returns no sufficiently relevant results. The persona must say nothing on-point was found — not invent holdings, not fall back to any local corpus.
+_Avoid_: hallucinated case law, local RAG fallback on empty hits
+
+**Holding Statement**
+Any claim about what a case or RA decides or requires. Before making a Holding Statement the model must have called `get_case` or `get_republic_act` for that document (structured record; full text only when quoting exact language or the user asks for the full document). Search digests alone are not enough.
+_Avoid_: citing from search digest only, always-on include_full_text
+
+**Legal Content Use**
+Live legal material from juris.ph / lawphil is used under a non-commercial (internal/research) posture with attribution via Legal Citations. Commercial redistribution is out of scope for this product decision.
+_Avoid_: assuming SaaS commercial license is settled

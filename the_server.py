@@ -33,16 +33,8 @@ from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
-from legal_rag.router import (
-    LegalAskRequest as RouterLegalAskRequest,
-    legal_ask as legal_rag_ask,
-    legal_search as legal_rag_search,
-    get_legal_document as legal_rag_get_document,
-    router as legal_rag_router,
-    get_cached_db as legal_rag_get_cached_db,
-)
-from legal_rag.markdown_format import format_document_combined, prepend_title_heading
 import s3_storage
+from juris_mcp.client import get_client as get_juris_mcp_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -75,15 +67,14 @@ if os.path.exists(user_env_path):
     dotenv.load_dotenv(user_env_path, override=True)
 
 _context.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-_context.embedding_model: str = os.getenv("LEGAL_EMBEDDING_MODEL", "text-embedding-3-small")
 _context.model: str = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-_context.legal_library_url: str = os.getenv("LEGAL_LIBRARY_URL", "").rstrip("/")
+_context.juris_mcp_url: str = os.getenv("JURIS_MCP_URL", "https://juris.ph/mcp").rstrip("/")
 _context.temperature: float = 1.0
 _context.informed: bool = True
 _context.show_clues: list = []
 _context.expertise: str = "General"
 _context.tone: str = "factual"
-_context.build_marker: str = os.getenv("APP_BUILD_MARKER", "legal-citation-guard-v1")
+_context.build_marker: str = os.getenv("APP_BUILD_MARKER", "juris-mcp-legal-v1")
 
 if os.path.exists("addendum.txt"):
     try:
@@ -145,8 +136,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(legal_rag_router)
-
 # ---------------------------------------------------------------------------
 # Glass-box trace broadcast (SCL — Supervised Cognitive Loop)
 # ---------------------------------------------------------------------------
@@ -319,41 +308,9 @@ async def startup_event():
     global _app_event_loop
     _app_event_loop = asyncio.get_event_loop()
     logging.info("Starting Chat Wonder v2...")
-    try:
-        from psycopg2 import pool as pg_pool
-        from urllib.parse import unquote
-        db_url = os.getenv("LEGAL_DATABASE_URL")
-        if db_url:
-            if "?schema=" in db_url:
-                db_url = db_url.split("?schema=")[0]
-            if db_url.startswith(("postgres://", "postgresql://")):
-                # URI format — urlparse mishandles passwords with encoded brackets/colons, so split manually.
-                # Safe because @ in passwords must be encoded as %40.
-                scheme_userinfo, hostinfo = db_url.rsplit("@", 1)
-                userinfo = scheme_userinfo.split("://", 1)[1]
-                db_user, db_pass_enc = userinfo.split(":", 1)
-                host_port, dbname = hostinfo.split("/", 1)
-                db_host, db_port = host_port.rsplit(":", 1)
-                _context.db_pool = pg_pool.SimpleConnectionPool(
-                    minconn=1, maxconn=10,
-                    host=db_host,
-                    port=int(db_port),
-                    dbname=dbname,
-                    user=unquote(db_user),
-                    password=unquote(db_pass_enc),
-                )
-            else:
-                # key=value DSN format (e.g. "host=... port=... dbname=... user=... password=...")
-                # psycopg2 accepts this natively and handles special characters without encoding.
-                _context.db_pool = pg_pool.SimpleConnectionPool(minconn=1, maxconn=10, dsn=db_url)
-            logging.info("DB connection pool created")
-        else:
-            logging.warning("LEGAL_DATABASE_URL not set")
-    except Exception as e:
-        logging.warning(f"DB pool creation failed: {e}")
     Thread(target=cleanup_sessions, daemon=True).start()
     _load_user_functions(overwrite_globals=True)
-    logging.info("Startup complete")
+    logging.info("Startup complete (legal source: juris.ph MCP at %s)", _context.juris_mcp_url)
 
 # ---------------------------------------------------------------------------
 # Session helpers
@@ -407,7 +364,12 @@ def process_persona(user_input: str):
     if user_input.lower().startswith("[legal ai]"):
         persona = "legal"
         user_input = user_input[10:].strip()
-        legal_whitelist = ["search_legal", "summarize_legal_case"]
+        legal_whitelist = [
+            "search_jurisprudence",
+            "search_republic_acts",
+            "get_case",
+            "get_republic_act",
+        ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_whitelist]
         try:
             with open("resources/prompts/legal_prompt.txt", "r", encoding="utf-8") as f:
@@ -643,27 +605,18 @@ def _generate_structured_data(legal_response: str, state) -> dict | None:
 
 
 def run_legal_persona_ask(query: str) -> dict:
-    request = RouterLegalAskRequest(query=query)
-    result = legal_rag_ask(request)
-    citations = result.get("citations", []) if isinstance(result, dict) else []
-    source_metadata = [
-        {
-            "type": "legal_document",
-            "title": c.get("title"),
-            "category": c.get("category"),
-            "bucket_slug": c.get("bucket_slug"),
-            "year": c.get("year"),
-            "source_url": c.get("source_url"),
-            "s3_json_path": c.get("s3_json_path"),
-            "snippet": c.get("snippet"),
-            "full_text": c.get("full_text"),
-            "relevance": 1.0,
-        }
-        for c in citations
-    ]
+    """Legacy helper — legal ask now goes through chat Legal Tools + juris.ph MCP."""
+    search = globals().get("search_jurisprudence")
+    if not callable(search):
+        return {"answer": "", "source_metadata": []}
+    result = search(query, limit=5)
+    results = result.get("results", []) if isinstance(result, dict) else []
     return {
-        "answer": (result.get("answer", "") if isinstance(result, dict) else "").strip(),
-        "source_metadata": source_metadata,
+        "answer": (
+            "Use the [legal ai] chat persona with search_jurisprudence / "
+            "search_republic_acts and get_case / get_republic_act."
+        ),
+        "source_metadata": _search_results_to_source_metadata(results),
     }
 
 # ---------------------------------------------------------------------------
@@ -673,16 +626,13 @@ def run_legal_persona_ask(query: str) -> dict:
 def _search_results_to_source_metadata(results: list) -> list:
     return [
         {
-            "type": "legal_document",
-            "item_id": str(r.get("item_id") or "").strip() or None,
+            "type": r.get("type") or "legal_document",
+            "item_id": str(r.get("item_id") or r.get("id") or "").strip() or None,
             "title": r.get("title"),
-            "category": r.get("metadata", {}).get("category") or r.get("type"),
-            "bucket_slug": r.get("metadata", {}).get("bucket_slug"),
-            "year": r.get("metadata", {}).get("year"),
-            "source_url": r.get("url") or r.get("metadata", {}).get("source_url"),
-            "s3_json_path": r.get("metadata", {}).get("s3_json_path"),
+            "category": r.get("type"),
+            "year": r.get("year") or (r.get("metadata") or {}).get("year"),
+            "source_url": r.get("url") or (r.get("metadata") or {}).get("url"),
             "snippet": r.get("snippet"),
-            "full_text": r.get("text"),
             "relevance": r.get("score", 1.0),
         }
         for r in results
@@ -690,11 +640,7 @@ def _search_results_to_source_metadata(results: list) -> list:
 
 
 def _resolve_citation_url(url: str) -> str:
-    """Rewrite /sources/{id} → {LEGAL_LIBRARY_URL}/{id}. Pass other URLs through unchanged."""
-    if url.startswith("/sources/"):
-        doc_id = url[len("/sources/"):]
-        base = _context.legal_library_url or ""
-        return f"{base}/{doc_id}"
+    """Pass through absolute URLs; leave relative paths unchanged."""
     return url
 
 
@@ -713,93 +659,47 @@ def format_legal_citation_links(text: str) -> str:
     return text
 
 def repair_legal_source_links(text: str, search_results) -> str:
-    """Ensure /sources/... links map to ids present in current search results.
-
-    Any missing/placeholder/out-of-set id is rewritten using the active result ids.
-    """
+    """Rewrite leftover /sources/... links to juris.ph URLs from the current tool results."""
     if not text or not isinstance(text, str) or not search_results:
         return text
-    source_ids = []
+
+    urls = []
     for r in search_results:
-        raw = str(r.get("item_id") or r.get("id") or "").strip()
-        if raw.isdigit():
-            source_ids.append(raw)
-    if not source_ids:
+        url = str(r.get("url") or "").strip()
+        if url.startswith("http"):
+            urls.append(url)
+        doc = r.get("document") if isinstance(r, dict) else None
+        if isinstance(doc, dict):
+            doc_url = str(doc.get("url") or doc.get("page_url") or "").strip()
+            if doc_url.startswith("http"):
+                urls.append(doc_url)
+    # Preserve order, unique
+    seen = set()
+    source_urls = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            source_urls.append(u)
+    if not source_urls:
         return text
 
-    # Keep only ids that currently exist in the legal documents table.
-    # This protects against stale/mismatched ids leaking into /sources/{id}.
-    try:
-        legal_db = legal_rag_get_cached_db()
-        if legal_db is not None:
-            with legal_db.connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT id FROM documents WHERE id = ANY(%s::bigint[])",
-                        ([int(x) for x in source_ids],),
-                    )
-                    existing = {str(row[0]) for row in cur.fetchall()}
-            source_ids = [x for x in source_ids if x in existing]
-    except Exception as e:
-        logging.warning("[legal-citation] source id existence validation skipped: %s", e)
-
-    if not source_ids:
-        logging.warning("[legal-citation] no valid existing source ids available for repair")
-        return text
-
-    # Match /sources/{segment} in markdown links.
-    # Keep numeric ids only when they exist in current search results.
     broken = re.compile(r"/sources/([^)\s\"\]]*)")
     idx = [0]
-    source_id_set = set(source_ids)
 
     def repl(m):
-        segment = m.group(1)
-        if segment.isdigit() and segment in source_id_set:
-            return m.group(0)
-        replacement = source_ids[min(idx[0], len(source_ids) - 1)]
+        replacement = source_urls[min(idx[0], len(source_urls) - 1)]
         idx[0] += 1
-        return f"/sources/{replacement}"
+        return replacement
+
     repaired = broken.sub(repl, text)
-
-    # Hard validation gate: no outbound citation id may fall outside current search results.
-    invalid_ids = []
-    for m in broken.finditer(repaired):
-        segment = m.group(1)
-        if not (segment.isdigit() and segment in source_id_set):
-            invalid_ids.append(segment)
-
-    if invalid_ids:
-        increment_metric_counter(
-            "legal.citation_invalid_detected.count",
-            value=len(invalid_ids),
-            tags={"reason": "invalid_or_out_of_set_id"},
-            session_id=None,
-        )
-        logging.warning(
-            "[legal-citation] invalid source ids after repair=%s; forcing fallback id=%s",
-            invalid_ids,
-            source_ids[0],
-        )
+    if repaired != text:
+        logging.info("[legal-citation] rewrote /sources/ links to juris.ph URLs")
         increment_metric_counter(
             "legal.citation_repair.count",
             value=1,
-            tags={"reason": "invalid_or_out_of_set_id"},
+            tags={"reason": "sources_to_juris_url"},
             session_id=None,
         )
-        tracer = globals().get("broadcast_trace")
-        if callable(tracer):
-            try:
-                tracer(
-                    "action",
-                    f"Legal citation guard rewrote invalid source ids: {invalid_ids} -> {source_ids[0]}",
-                    None,
-                )
-            except Exception:
-                # Trace must never break response generation.
-                pass
-        repaired = broken.sub(f"/sources/{source_ids[0]}", repaired)
-
     return repaired
 
 # ---------------------------------------------------------------------------
@@ -954,10 +854,31 @@ def execute_function_call(function_call: dict, session_id: str = None):
         if func_name == "navigate_app" and session_id:
             func_args["session_id"] = session_id
         result = globals()[func_name](**func_args)
-        if func_name == "search_legal" and session_id and isinstance(result, dict):
+        _LEGAL_RESULT_TOOLS = {
+            "search_jurisprudence",
+            "search_republic_acts",
+            "get_case",
+            "get_republic_act",
+        }
+        if func_name in _LEGAL_RESULT_TOOLS and session_id and isinstance(result, dict) and result.get("success"):
             state = _context.sessions.get(session_id)
             if state is not None:
-                state.last_search_legal_results = result.get("results", [])
+                if func_name.startswith("search_"):
+                    state.last_search_legal_results = result.get("results", [])
+                else:
+                    # Merge get_* into citation pool for URL repair / metadata
+                    entry = {
+                        "id": result.get("id") or result.get("item_id"),
+                        "item_id": result.get("item_id") or result.get("id"),
+                        "title": result.get("title"),
+                        "url": result.get("url"),
+                        "type": result.get("type"),
+                        "year": result.get("year"),
+                        "document": result.get("document"),
+                    }
+                    existing = list(state.last_search_legal_results or [])
+                    existing.append(entry)
+                    state.last_search_legal_results = existing
         if func_name == "get_outfits_by_category" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -1186,14 +1107,22 @@ def _interpret_score(score: float) -> str:
 
 def _summarize_tool_result(tool_name: str, result) -> str:
     try:
-        if tool_name == "search_legal":
+        if tool_name == "search_jurisprudence":
             results = result.get("results", []) if isinstance(result, dict) else []
             if results:
-                return f"The search returned {len(results)} result(s). The top match was: \"{results[0].get('title', 'unknown')[:80]}\""
-            return "The search returned no results."
-        if tool_name == "summarize_legal_case":
-            title = (result.get("title") or result.get("case_title") or "unknown case") if isinstance(result, dict) else "unknown"
-            return f"A case summary was produced for: \"{str(title)[:80]}\""
+                return f"The jurisprudence search returned {len(results)} result(s). Top match: \"{results[0].get('title', 'unknown')[:80]}\""
+            return "The jurisprudence search returned no results."
+        if tool_name == "search_republic_acts":
+            results = result.get("results", []) if isinstance(result, dict) else []
+            if results:
+                return f"The Republic Act search returned {len(results)} result(s). Top match: \"{results[0].get('title', 'unknown')[:80]}\""
+            return "The Republic Act search returned no results."
+        if tool_name == "get_case":
+            title = (result.get("title") or "unknown case") if isinstance(result, dict) else "unknown"
+            return f"Fetched case record: \"{str(title)[:80]}\""
+        if tool_name == "get_republic_act":
+            title = (result.get("title") or result.get("ra_number") or "unknown RA") if isinstance(result, dict) else "unknown"
+            return f"Fetched Republic Act record: \"{str(title)[:80]}\""
         if tool_name == "recommend_garments":
             recs = result.get("recommendations", []) if isinstance(result, dict) else []
             return f"{len(recs)} outfit recommendation(s) were returned."
@@ -1254,12 +1183,18 @@ def _summarize_tool_result(tool_name: str, result) -> str:
 def _describe_tool_args(tool_name: str, arguments: str) -> str:
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
-        if tool_name == "search_legal":
+        if tool_name == "search_jurisprudence":
             q = args.get("query", "")
-            return f'It will search for: "{q}"' if q else ""
-        if tool_name == "summarize_legal_case":
-            item_id = args.get("item_id", "") or args.get("case_identifier", "")
-            return f"It will retrieve document #{item_id}." if item_id else ""
+            return f'It will search jurisprudence for: "{q}"' if q else ""
+        if tool_name == "search_republic_acts":
+            q = args.get("query", "")
+            return f'It will search Republic Acts for: "{q}"' if q else ""
+        if tool_name == "get_case":
+            ident = args.get("case_number") or args.get("id") or ""
+            return f"It will fetch case: {ident}." if ident else ""
+        if tool_name == "get_republic_act":
+            ident = args.get("ra_number") or args.get("id") or ""
+            return f"It will fetch Republic Act: {ident}." if ident else ""
         if tool_name == "recommend_garments":
             gender = args.get("gender", "")
             event_type = args.get("event_type", "")
@@ -1635,41 +1570,40 @@ async def health_check():
     checks = {}
     overall = "healthy"
 
-    # PostgreSQL — prefer the LegalDatabase pool (used by /chat and /chat-stream legal persona),
-    # fall back to the startup pool (_context.db_pool) if legal services not yet initialized.
+    # juris.ph MCP (live legal source)
     try:
-        legal_db = legal_rag_get_cached_db()
-        if legal_db is not None:
-            t0 = time.monotonic()
-            with legal_db.connect() as conn:
-                conn.cursor().execute("SELECT 1")
-            checks["postgres"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000)}
-        elif _context.db_pool:
-            t0 = time.monotonic()
-            conn = _context.db_pool.getconn()
-            try:
-                conn.cursor().execute("SELECT 1")
-            finally:
-                _context.db_pool.putconn(conn)
-            checks["postgres"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000)}
-        else:
-            checks["postgres"] = {"status": "unconfigured"}
+        t0 = time.monotonic()
+        probe = get_juris_mcp_client().call_tool(
+            "search_jurisprudence", {"query": "due process", "limit": 1}
+        )
+        ok = isinstance(probe, dict)
+        checks["juris_mcp"] = {
+            "status": "ok" if ok else "error",
+            "url": _context.juris_mcp_url,
+            "latency_ms": round((time.monotonic() - t0) * 1000),
+        }
+        if not ok:
+            overall = "degraded"
     except Exception as e:
-        checks["postgres"] = {"status": "error", "detail": str(e)}
+        checks["juris_mcp"] = {
+            "status": "error",
+            "url": _context.juris_mcp_url,
+            "detail": str(e),
+        }
         overall = "degraded"
 
-    # S3 legal bucket
+    # S3 (document uploads — optional)
     try:
-        legal_bucket = os.getenv("LEGAL_S3_BUCKET_NAME")
+        legal_bucket = os.getenv("LEGAL_S3_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME")
         if not legal_bucket:
-            checks["s3_legal"] = {"status": "unconfigured"}
+            checks["s3"] = {"status": "unconfigured"}
         else:
             t0 = time.monotonic()
             s3 = s3_storage.get_s3_client()
             s3.head_bucket(Bucket=legal_bucket)
-            checks["s3_legal"] = {"status": "ok", "bucket": legal_bucket, "latency_ms": round((time.monotonic() - t0) * 1000)}
+            checks["s3"] = {"status": "ok", "bucket": legal_bucket, "latency_ms": round((time.monotonic() - t0) * 1000)}
     except Exception as e:
-        checks["s3_legal"] = {"status": "error", "bucket": os.getenv("LEGAL_S3_BUCKET_NAME"), "detail": str(e)}
+        checks["s3"] = {"status": "error", "detail": str(e)}
         overall = "degraded"
 
     # S3 cosmetics bucket
@@ -1705,7 +1639,7 @@ async def health_check():
 @app.get("/config")
 async def get_config():
     """Public config for frontend clients — no secrets."""
-    return {"legal_library_url": _context.legal_library_url}
+    return {"juris_mcp_url": _context.juris_mcp_url}
 
 
 @app.get("/version")
@@ -1715,11 +1649,11 @@ async def get_version():
         "service": "chat-wonder-v2-api",
         "build_marker": _context.build_marker,
         "chat_model": _context.model,
+        "legal_source": "juris_mcp",
         "citation_guard": {
             "enabled": True,
-            "strict_out_of_set_validation": True,
+            "mode": "juris_ph_urls",
             "metrics": [
-                "legal.citation_invalid_detected.count",
                 "legal.citation_repair.count",
             ],
         },
@@ -2740,339 +2674,6 @@ _context.expertise = "General"
 _context.tone = "factual"
 
 # ---------------------------------------------------------------------------
-# Legal Case Search & Detail Endpoints
-# ---------------------------------------------------------------------------
-
-class LegalSearchRequest(BaseModel):
-    prompt: str = ""
-    page: int = 1
-    limit: int = 5
-    optimized_query: Optional[str] = None  # pass on page 2+ to skip re-optimizing
-    content_types: List[str] = None
-
-_LEGAL_SEARCH_MAX_POOL = 50  # max results fetched from RAG per query
-
-@app.post("/api/legal/search")
-async def api_legal_search(request: LegalSearchRequest):
-    try:
-        prompt = request.prompt.strip()
-        if not prompt:
-            raise HTTPException(status_code=400, detail="Prompt is required.")
-        if not _context.openai_api_key:
-            raise HTTPException(status_code=500, detail="OpenAI API key is not configured.")
-
-        page = max(1, request.page)
-        limit = max(1, min(request.limit, 20))
-        offset = (page - 1) * limit
-
-        session_id = getattr(request, "session_id", None)
-        broadcast_trace("request", f"Legal search — query: {prompt[:120]}", session_id,
-            summary=f"A search of the Philippine legal database was requested for: \"{prompt[:200]}\"")
-
-        # Reuse optimized_query on page 2+ to avoid an extra GPT call
-        if request.optimized_query:
-            optimized_query = request.optimized_query.strip()
-        else:
-            broadcast_trace("action", "Optimizing query with LLM...", session_id,
-                summary="The AI is refining the search query to improve accuracy.")
-            client = OpenAI(api_key=_context.openai_api_key)
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert Philippine legal researcher. "
-                            "Extract the core legal issue, relevant keywords, or specific laws from the user prompt "
-                            "to create a concise search query (max 10 words) optimized for semantic vector search. "
-                            "Return ONLY the search string, nothing else."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-            )
-            optimized_query = response.choices[0].message.content.strip()
-
-        logging.info(f"[Legal Search] page={page} '{prompt}' -> '{optimized_query}'")
-
-        broadcast_trace("action", f"Running pgvector search — optimized query: {optimized_query[:120]}", session_id,
-            summary=f"Searching the legal database using the optimised query: \"{optimized_query[:200]}\"")
-        rag_result = legal_rag_search(query=optimized_query, limit=_LEGAL_SEARCH_MAX_POOL)
-        rag_rows = rag_result.get("results", []) if isinstance(rag_result, dict) else []
-        broadcast_trace("retrieval", f"Legal search returned {len(rag_rows)} result(s)", session_id,
-            summary=f"The legal database returned {len(rag_rows)} result(s) matching the query.")
-
-        all_results = [
-            {
-                **row,
-                "item_id": str(row.get("id")) if row.get("id") is not None else None,
-                "text_content": row.get("snippet", ""),
-                "metadata": {
-                    "category": row.get("category"),
-                    "bucket_slug": row.get("bucket_slug"),
-                    "year": row.get("year"),
-                    "source_url": row.get("source_url"),
-                    "s3_json_path": row.get("s3_json_path"),
-                },
-            }
-            for row in rag_rows
-        ]
-
-        total = len(all_results)
-        paged = all_results[offset: offset + limit]
-        total_pages = (total + limit - 1) // limit if total > 0 else 1
-
-        return {
-            "success": True,
-            "query": prompt,
-            "ai_optimized_query": optimized_query,
-            "page": page,
-            "limit": limit,
-            "total_results": total,
-            "total_pages": total_pages,
-            "has_next": page < total_pages,
-            "has_prev": page > 1,
-            "results": paged,
-            "search_type": "hybrid_rag",
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"[Legal Search] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/legal/case/{item_id}")
-async def api_legal_case_detail(item_id: str):
-    try:
-        if not str(item_id).isdigit():
-            raise HTTPException(status_code=400, detail="item_id must be a numeric legal document id.")
-
-        broadcast_trace("request", f"Legal case fetch — item: {item_id}", None,
-            summary=f"Fetching full legal document with ID {item_id} from the database.")
-        doc = legal_rag_get_document(int(item_id))
-        if not isinstance(doc, dict):
-            raise HTTPException(status_code=404, detail=f"Case '{item_id}' not found.")
-
-        broadcast_trace("retrieval", f"Fetched legal document: {str(doc.get('title', ''))[:100]}", None,
-            summary=f"Retrieved legal document: '{str(doc.get('title', ''))[:100]}'")
-        metadata = doc.get("metadata_json") or {}
-        return {
-            "id": doc.get("id"),
-            "item_id": str(doc.get("id")),
-            "type": doc.get("category"),
-            "title": doc.get("title"),
-            "url": doc.get("source_url"),
-            "text_content": doc.get("full_text") or doc.get("summary") or doc.get("concise_summary") or "",
-            "formatted_markdown": doc.get("formatted_markdown"),
-            "gr_number": metadata.get("gr_number", ""),
-            "law_number": metadata.get("law_number", ""),
-            "date": metadata.get("date", ""),
-            "year": doc.get("year", ""),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"[Legal Case Detail] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-def _format_and_store_legal_markdown(
-    document_id: int,
-    force: bool = False,
-    generate_title: bool = True,
-) -> dict:
-    db = legal_rag_get_cached_db()
-    if db is None:
-        from legal_rag.router import _services
-        db = _services()[1]
-
-    doc = db.get_document(document_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is required")
-
-    existing_title = (doc.get("title") or "").strip() or None
-    existing_md = (doc.get("formatted_markdown") or "").strip()
-    if existing_md and not force and (existing_title or not generate_title):
-        return {
-            "item_id": str(document_id),
-            "title": existing_title,
-            "title_generated": False,
-            "formatted_markdown": existing_md,
-            "cached": True,
-        }
-
-    source_text = doc.get("full_text") or doc.get("summary") or doc.get("concise_summary") or ""
-    if not str(source_text).strip():
-        raise HTTPException(status_code=400, detail="Document has no text to format")
-
-    model = os.getenv("LEGAL_CHAT_MODEL", "gpt-4o-mini")
-    title, markdown, title_generated = format_document_combined(
-        str(source_text),
-        existing_title=existing_title,
-        generate_title=generate_title,
-        category=doc.get("category"),
-        case_no=doc.get("case_no"),
-        openai_api_key=api_key,
-        model=model,
-        openai_base_url=os.getenv("OPENAI_BASE_URL"),
-    )
-    if not markdown:
-        raise HTTPException(status_code=500, detail="Formatter returned empty markdown")
-
-    if title_generated and title:
-        db.set_document_title(document_id, title)
-
-    markdown = prepend_title_heading(markdown, title or existing_title)
-    db.set_formatted_markdown(document_id, markdown)
-    return {
-        "item_id": str(document_id),
-        "title": title or existing_title,
-        "title_generated": title_generated,
-        "formatted_markdown": markdown,
-        "cached": False,
-    }
-
-
-@app.post("/api/legal/format-document/{item_id}")
-async def api_format_legal_document(
-    item_id: str,
-    force: bool = Query(False),
-    generate_title: bool = Query(True, description="Generate documents.title when empty"),
-):
-    """Generate structured markdown (and title when missing) for a legal document."""
-    try:
-        if not str(item_id).isdigit():
-            raise HTTPException(status_code=400, detail="item_id must be a numeric legal document id.")
-        broadcast_trace("request", f"Legal format — item: {item_id}", None,
-            summary=f"Preparing to format legal document {item_id} into readable markdown.")
-        broadcast_trace("action", "Calling LLM to format legal document as markdown...", None,
-            summary="The AI is converting this legal document into clean, structured markdown.")
-        result = _format_and_store_legal_markdown(int(item_id), force=force, generate_title=generate_title)
-        broadcast_trace("memory", "Formatted markdown stored.", None,
-            summary="The formatted version of this document has been saved to the database.")
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"[Legal Format Document] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-def _list_document_ids_to_format(force: bool = False, limit: int | None = 50, all_docs: bool = False) -> list[int]:
-    db = legal_rag_get_cached_db()
-    if db is None:
-        from legal_rag.router import _services
-        db = _services()[1]
-
-    limit_clause = "" if all_docs else "LIMIT %s"
-    params: tuple = () if all_docs else (limit,)
-    if force:
-        sql = f"""
-            SELECT id FROM documents
-            WHERE full_text IS NOT NULL AND length(trim(full_text)) > 100
-            ORDER BY id
-            {limit_clause}
-        """
-    else:
-        sql = f"""
-            SELECT id FROM documents
-            WHERE formatted_markdown IS NULL
-              AND full_text IS NOT NULL
-              AND length(trim(full_text)) > 100
-            ORDER BY id
-            {limit_clause}
-        """
-    with db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return [row[0] for row in cur.fetchall()]
-
-
-@app.post("/api/legal/format-documents")
-async def api_format_legal_documents(
-    force: bool = Query(False, description="Reformat even when formatted_markdown already exists"),
-    limit: int = Query(50, ge=1, le=5000, description="Max documents per request (ignored when all=true)"),
-    all_docs: bool = Query(False, alias="all", description="Process every matching document"),
-    delay: float = Query(0.5, ge=0, le=10, description="Seconds between OpenAI calls"),
-    generate_title: bool = Query(True, description="Generate documents.title when empty"),
-):
-    """
-    Batch-format documents into formatted_markdown.
-
-    curl examples:
-      curl -X POST 'http://localhost:8000/api/legal/format-documents?limit=10'
-      curl -X POST 'http://localhost:8000/api/legal/format-documents?all=true'
-      curl -X POST 'http://localhost:8000/api/legal/format-document/150'
-    """
-    try:
-        doc_ids = _list_document_ids_to_format(force=force, limit=None if all_docs else limit, all_docs=all_docs)
-        broadcast_trace("request", f"Legal format-documents — {len(doc_ids)} document(s) to format", None,
-            summary=f"Batch formatting {len(doc_ids)} legal document(s) into readable markdown.")
-        if not doc_ids:
-            return {
-                "total": 0,
-                "ok": 0,
-                "failed": 0,
-                "cached": 0,
-                "formatted": 0,
-                "titles_generated": 0,
-                "errors": [],
-                "message": "No documents to format",
-            }
-
-        ok = 0
-        failed = 0
-        cached = 0
-        formatted = 0
-        titles_generated = 0
-        errors: list[dict] = []
-
-        for doc_id in doc_ids:
-            try:
-                result = _format_and_store_legal_markdown(
-                    doc_id, force=force, generate_title=generate_title
-                )
-                ok += 1
-                if result.get("cached"):
-                    cached += 1
-                else:
-                    formatted += 1
-                if result.get("title_generated"):
-                    titles_generated += 1
-            except HTTPException as exc:
-                failed += 1
-                errors.append({"item_id": str(doc_id), "detail": exc.detail})
-            except Exception as exc:
-                failed += 1
-                errors.append({"item_id": str(doc_id), "detail": str(exc)})
-
-            if delay > 0:
-                time.sleep(delay)
-
-        return {
-            "total": len(doc_ids),
-            "ok": ok,
-            "failed": failed,
-            "cached": cached,
-            "formatted": formatted,
-            "titles_generated": titles_generated,
-            "errors": errors[:50],
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"[Legal Format Documents] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # Document Analyzer Endpoints
 # ---------------------------------------------------------------------------
 
