@@ -1,107 +1,132 @@
 # -*- coding: utf-8 -*-
-"""Fact-pattern boost + prefetch of controlling authorities for [legal ai]."""
+"""Dynamic legal turn prep: general protocol for ANY fact pattern + optional prefetch."""
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
-# (pattern, checklist instruction)
-_BOOSTS: List[Tuple[re.Pattern, str]] = [
+# Always injected for every [legal ai] fact-pattern turn (not tied to Q1–Q5).
+_GENERAL_PROTOCOL = """[LEGAL_ANALYSIS_PROTOCOL — apply to THIS question, whatever the topic]
+1. Issue-spot: list every distinct legal question the user asked (a/b/c, and/or, separately…).
+2. For EACH issue, derive a targeted search query (doctrine + key facts). Run multiple
+   `search_jurisprudence` / `search_republic_acts` calls as needed — never one vague search for everything.
+3. Call `get_case` / `get_republic_act` on every document you will rely on before stating holdings.
+4. Structure the answer as a memo: one H3 per issue the user asked (mirror their numbering when present).
+   Under each issue: rule → application → conclusion. Cover forks (alternative legal paths) when material.
+5. Bottom line: name the controlling SC case and/or RA for the core question when grounded.
+6. Practical posture: forum, prescription/urgency, parallel remedies, evidence checklist.
+7. Never invent quotes, G.R. numbers, RA numbers, or juris.ph URLs. Prefer paraphrase over fake blockquotes.
+8. Never close all remedies ("you cannot file") without checking parallel civil/admin/labor paths.
+9. End with ONE determinative clarifying question that would change the legal fork.
+10. If tools miss, say so — do not fill from memory as if sourced."""
+
+# Soft hints only — accelerate common doctrines; protocol above still governs ALL topics.
+_HINTS: List[Tuple[re.Pattern, str]] = [
     (
-        re.compile(
-            r"foreign divorce|remarry|japan(?:ese)? divorce|recognition of.{0,20}divorce",
-            re.I,
-        ),
-        "Call search_jurisprudence with query set to: Republic v. Manalo foreign divorce. "
-        "Then get_case on the best hit. Name Manalo. Judicial recognition is required before remarriage.",
+        re.compile(r"foreign divorce|remarry|japan(?:ese)?.{0,20}divorce|recognition of.{0,20}divorce", re.I),
+        "Hint: search Republic v. Manalo; judicial recognition is usually a prerequisite to remarriage.",
     ),
     (
-        re.compile(
-            r"floating status|off-detail|security guard|no new assignment|(?<!\d)8[\s-]months?\b|\beight months\b",
-            re.I,
-        ),
-        "Call search_jurisprudence with query set to: floating status six months constructive dismissal security guard. "
-        "Then get_case on Exocet, Soliman, or Padilla if found. State the six-month cap. "
-        "Constructive dismissal does NOT require resignation. Cover 4-year and 3-year prescription, NLRC or SEnA, quitclaim risk.",
+        re.compile(r"floating status|off-detail|security guard|temporary off", re.I),
+        "Hint: search floating status six months constructive dismissal; resignation is NOT required; cover prescription + NLRC/SEnA.",
     ),
     (
-        re.compile(
-            r"one person corporation|\bOPC\b|sole stockholder|nominee|pierce.{0,20}veil",
-            re.I,
-        ),
-        "Use prefetched RA 11232 below. You MUST name Section 130 and the burden reversal "
-        "(sole stockholder must prove adequate financing and property independence or face solidary liability). "
-        "Missing nominee is not automatic personal liability. Forum is RTC Special Commercial Court, not SEC.",
+        re.compile(r"one person corporation|\bOPC\b|sole stockholder|nominee|pierce.{0,20}veil", re.I),
+        "Hint: RA 11232 Sec. 130 burden reversal; nominee gap ≠ automatic personal liability; RTC Special Commercial Court not SEC.",
     ),
     (
-        re.compile(
-            r"free patent|double sale|unregistered sale|naturalized|half-brother|foreign heir",
-            re.I,
-        ),
-        "Use prefetched RA 11231 below if present. Call search_jurisprudence with query set to: "
-        "Article 1544 double sale good faith. Name Art. 1544 and RA 11231. "
-        "State Constitution Article XII Section 7 hereditary succession exception for the foreign heir. "
-        "Do not say the father still owns merely because the first sale was unregistered.",
+        re.compile(r"free patent|double sale|unregistered sale|torrens|foreign heir|naturalized.{0,30}(inherit|heir|land)", re.I),
+        "Hint: Art. 1544 / Torrens direct action; RA 11231 (ag) vs RA 10023/RA 730 (residential); hereditary succession Art. XII Sec. 7.",
     ),
     (
-        re.compile(
-            r"cyber libel|facebook post|digital (subscription|services)|VAT|18 months|eighteen months",
-            re.I,
-        ),
-        "Use prefetched RA 12023 below if present. Call search_jurisprudence with query set to: "
-        "Causing v. People cyber libel prescription. Then get_case. "
-        "State Causing one-year criminal prescription (not 15 years). "
-        "ALWAYS discuss Civil Code Article 33 independent civil action (about 4 years) if criminal looks time-barred. "
-        "For foreign digital customers name RA 12023 and zero-rating; do not stop at TRAIN alone.",
+        re.compile(r"cyber libel|online libel|defamat|facebook.{0,20}post", re.I),
+        "Hint: Causing v. People (often 1-year criminal prescription); always consider Art. 33 independent civil action.",
+    ),
+    (
+        re.compile(r"\bVAT\b|digital (services|subscription)|zero[\s-]?rat", re.I),
+        "Hint: search RA 12023 digital services VAT; foreign customers may implicate zero-rating — do not stop at TRAIN alone.",
+    ),
+    (
+        re.compile(r"illegal dismissal|constructive dismissal|backwages|separation pay|NLRC", re.I),
+        "Hint: search controlling dismissal doctrine + Art. 294/279 framing; flag 4-year vs 3-year prescription when money claims appear.",
+    ),
+    (
+        re.compile(r"annulment|legal separation|custody|support|Family Code", re.I),
+        "Hint: search on-point SC family-law cases; do not invent Family Code article quotes without get_* text.",
     ),
 ]
 
-# (pattern, list of prefetch specs)
-# spec: {"kind": "ra"|"case", "ra_number": "...", "case_number": "..."}
-_PREFETCH: List[Tuple[re.Pattern, List[dict]]] = [
-    (
-        re.compile(r"one person corporation|\bOPC\b|sole stockholder|nominee", re.I),
-        [{"kind": "ra", "ra_number": "RA 11232"}],
-    ),
-    (
-        re.compile(r"free patent|double sale|unregistered sale|half-brother|foreign heir", re.I),
-        [{"kind": "ra", "ra_number": "RA 11231"}],
-    ),
-    (
-        re.compile(r"cyber libel|facebook post|digital (subscription|services)|VAT", re.I),
-        [{"kind": "ra", "ra_number": "RA 12023"}],
-    ),
-    (
-        re.compile(r"foreign divorce|remarry|japan(?:ese)? divorce", re.I),
-        [{"kind": "case", "case_number": "G.R. No. 221029"}],
-    ),
-    (
-        re.compile(r"cyber libel|18 months|eighteen months", re.I),
-        [{"kind": "case", "case_number": "G.R. No. 258524"}],
-    ),
+# Keyword → likely RA to prefetch when user did not name a number (soft, capped).
+_KEYWORD_RA: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"one person corporation|\bOPC\b", re.I), "RA 11232"),
+    (re.compile(r"agricultural free patent|free patent", re.I), "RA 11231"),
+    (re.compile(r"residential free patent", re.I), "RA 10023"),
+    (re.compile(r"cybercrime|cyber libel", re.I), "RA 10175"),
+    (re.compile(r"digital services.{0,40}VAT|VAT.{0,40}digital", re.I), "RA 12023"),
+    (re.compile(r"safe spaces|gender.?based.{0,20}harassment", re.I), "RA 11313"),
+    (re.compile(r"data privacy", re.I), "RA 10173"),
+    (re.compile(r"anti.?violence against women|\bVAWC\b", re.I), "RA 9262"),
 ]
+
+_MAX_PREFETCH = 4
 
 
 def apply_legal_fact_pattern_boost(user_input: str) -> str:
-    """Append [LEGAL_CHECKLIST] reminders when fact patterns match."""
+    """Always attach the general protocol; add soft doctrine hints when keywords match."""
     text = (user_input or "").strip()
     if not text:
         return user_input
-    hits: List[str] = []
+
+    lines = [_GENERAL_PROTOCOL]
+    hints: List[str] = []
     seen = set()
-    for pattern, instruction in _BOOSTS:
-        if pattern.search(text) and instruction not in seen:
-            hits.append(instruction)
-            seen.add(instruction)
-    if not hits:
-        return user_input
-    block = "\n".join(f"- {h}" for h in hits)
-    return (
-        f"{user_input.rstrip()}\n\n"
-        f"[LEGAL_CHECKLIST — follow before answering; use prefetched authorities when present]\n{block}"
-    )
+    for pattern, hint in _HINTS:
+        if pattern.search(text) and hint not in seen:
+            hints.append(f"- {hint}")
+            seen.add(hint)
+    if hints:
+        lines.append("[DOCTRINE_HINTS — optional accelerators; still run tools and follow the protocol]")
+        lines.extend(hints)
+
+    return f"{text}\n\n" + "\n".join(lines)
+
+
+def _extract_explicit_specs(text: str) -> List[dict]:
+    """Pull RA / G.R. numbers the user (or prior context) already named."""
+    specs: List[dict] = []
+    seen = set()
+
+    for m in re.finditer(
+        r"(?:RA|R\.A\.|Republic Act)\s*(?:No\.?\s*)?(\d{3,5})\b",
+        text,
+        flags=re.I,
+    ):
+        ra = f"RA {m.group(1)}"
+        key = ("ra", ra)
+        if key not in seen:
+            seen.add(key)
+            specs.append({"kind": "ra", "ra_number": ra})
+
+    for m in re.finditer(r"G\.?\s*R\.?\s*No\.?\s*([\d-]+)", text, flags=re.I):
+        gr = f"G.R. No. {m.group(1)}"
+        key = ("case", gr)
+        if key not in seen:
+            seen.add(key)
+            specs.append({"kind": "case", "case_number": gr})
+
+    return specs
+
+
+def _keyword_ra_specs(text: str) -> List[dict]:
+    specs: List[dict] = []
+    seen = set()
+    for pattern, ra in _KEYWORD_RA:
+        if pattern.search(text) and ra not in seen:
+            seen.add(ra)
+            specs.append({"kind": "ra", "ra_number": ra})
+    return specs
 
 
 def _entry_from_get(result: dict, *, type_hint: str) -> Optional[dict]:
@@ -133,29 +158,27 @@ def _entry_from_get(result: dict, *, type_hint: str) -> Optional[dict]:
 
 def prefetch_legal_authorities(user_input: str) -> Tuple[List[dict], str]:
     """
-    Fetch controlling RAs/cases for matched patterns via juris tools.
-    Returns (result_entries, injection_text).
+    Dynamic prefetch: explicit RA/G.R. in the query first, then keyword RA hints.
+    Works for any topic; not limited to a fixed eval list.
     """
     text = (user_input or "").strip()
     if not text:
         return [], ""
 
     specs: List[dict] = []
-    seen_keys = set()
-    for pattern, items in _PREFETCH:
-        if not pattern.search(text):
+    seen = set()
+    for spec in _extract_explicit_specs(text) + _keyword_ra_specs(text):
+        key = (spec.get("kind"), spec.get("ra_number"), spec.get("case_number"))
+        if key in seen:
             continue
-        for spec in items:
-            key = (spec.get("kind"), spec.get("ra_number"), spec.get("case_number"))
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            specs.append(spec)
+        seen.add(key)
+        specs.append(spec)
+        if len(specs) >= _MAX_PREFETCH:
+            break
 
     if not specs:
         return [], ""
 
-    # Import here to avoid circular import at module load
     from resources.functions import user_functions as uf
 
     entries: List[dict] = []
@@ -186,14 +209,15 @@ def prefetch_legal_authorities(user_input: str) -> Tuple[List[dict], str]:
         return [], ""
 
     injection = (
-        "[PREFETCHED_AUTHORITIES — already retrieved; cite these juris.ph URLs; "
-        "name them in your Bottom line when on-point]\n" + "\n".join(lines)
+        "[PREFETCHED_AUTHORITIES — already retrieved from the user's topic signals; "
+        "cite these juris.ph URLs when on-point; still search for any other controlling authority]\n"
+        + "\n".join(lines)
     )
     return entries, injection
 
 
 def prepare_legal_turn(user_input: str) -> Tuple[str, List[dict]]:
-    """Apply checklist boost + prefetch injection. Returns (augmented_input, prefetch_entries)."""
+    """General protocol + dynamic prefetch for any legal question."""
     boosted = apply_legal_fact_pattern_boost(user_input)
     entries, injection = prefetch_legal_authorities(user_input)
     if injection:
@@ -203,21 +227,50 @@ def prepare_legal_turn(user_input: str) -> Tuple[str, List[dict]]:
 
 def append_critical_doctrine_guards(text: str, user_input: str) -> str:
     """
-    Append short non-hallucinated doctrine reminders the model often drops
-    (e.g. Art. 33 civil action when cyber libel looks time-barred).
+    Light, topic-triggered reminders — never claim to be exhaustive.
+    Prefer model tool use; these only catch common omissions.
     """
     if not text:
         return text
     u = user_input or ""
     additions: List[str] = []
 
-    cyber = re.search(r"cyber libel|facebook post|18 months|eighteen months", u, re.I)
-    if cyber and not re.search(r"Article\s*33|Art\.\s*33|independent civil", text, re.I):
+    if re.search(r"cyber libel|online libel|defamat", u, re.I) and not re.search(
+        r"Article\s*33|Art\.\s*33|independent civil", text, re.I
+    ):
         additions.append(
-            "- **Parallel civil remedy:** Even if a criminal cyber libel case is time-barred "
-            "(often one year under *Causing*), an **independent civil action for defamation "
-            "under Civil Code Article 33** may still be available on a longer (commonly four-year) "
-            "prescription — verify with counsel before concluding you cannot file anything."
+            "- **Parallel civil remedy:** If a criminal defamation/cyber libel path looks time-barred, "
+            "consider an **independent civil action under Civil Code Article 33** (often a longer "
+            "prescription) before concluding nothing can be filed — verify with counsel."
+        )
+
+    if re.search(r"free patent|double sale|torrens|unregistered sale", u, re.I):
+        if re.search(r"free patent", u, re.I) and not re.search(r"11231|10023|residential|agricultural", text, re.I):
+            additions.append(
+                "- **Patent-type fork:** Confirm agricultural free patent (**RA 11231** / CA 141) vs "
+                "residential (**RA 10023** / older schemes) — restrictions and alienability can differ."
+            )
+        if not re.search(r"direct action|reconvey|Torrens|good faith", text, re.I):
+            additions.append(
+                "- **Title litigation:** Registered Torrens titles are usually challenged by "
+                "**direct action** (reconveyance/annulment), with good faith often decisive in double sales."
+            )
+
+    if re.search(r"naturalized|foreign.{0,20}heir|american citizen.{0,40}inherit", u, re.I) and not re.search(
+        r"hereditary|Article\s*XII|Art\.\s*XII", text, re.I
+    ):
+        additions.append(
+            "- **Foreign heir:** Land acquisition by **hereditary succession** is the usual "
+            "constitutional exception (Art. XII Sec. 7) — citizenship alone does not always bar inheritance."
+        )
+
+    if re.search(r"floating status|off-detail", u, re.I) and not re.search(
+        r"six[\s-]?month|6[\s-]?month", text, re.I
+    ):
+        additions.append(
+            "- **Floating / off-detail:** Security-agency temporary off-detail is commonly analyzed "
+            "under a **six-month** outer limit; longer limbo may be treated as constructive dismissal "
+            "without requiring a resignation — verify with current jurisprudence."
         )
 
     if not additions:
@@ -233,10 +286,7 @@ def append_critical_doctrine_guards(text: str, user_input: str) -> str:
 
 
 def append_missing_prefetched_mentions(text: str, search_results) -> str:
-    """
-    If a prefetched authority was retrieved but never named in the answer, append a short cite block.
-    Ensures eval-critical RAs (e.g. RA 11231) surface even when the model omits them.
-    """
+    """If a prefetched authority was retrieved but never named, append a short cite block."""
     if not text or not search_results:
         return text
     additions: List[str] = []
@@ -247,11 +297,9 @@ def append_missing_prefetched_mentions(text: str, search_results) -> str:
         url = str(row.get("url") or "").strip()
         snippet = str(row.get("snippet") or "")
         blob = f"{title} {snippet}"
-        # Prefer explicit RA numbers from snippet/title
         ra_nums = re.findall(r"(?:RA|Republic Act)\s*No\.?\s*(\d{4,5})", blob, flags=re.I)
         if not ra_nums:
-            ra_nums = re.findall(r"\b(11231|11232|12023|10175)\b", blob)
-        # Case G.R. numbers
+            ra_nums = re.findall(r"\b(\d{4,5})\b", title)
         gr = re.search(r"G\.R\.\s*No\.\s*[\d-]+", blob, flags=re.I)
 
         mentioned = False
@@ -261,7 +309,6 @@ def append_missing_prefetched_mentions(text: str, search_results) -> str:
                 break
         if gr and gr.group(0).lower().replace(" ", "") in re.sub(r"\s+", "", text.lower()):
             mentioned = True
-        # Also treat title substring as mention
         if title and len(title) > 12 and title.lower() in text.lower():
             mentioned = True
         if mentioned or not url:
@@ -287,7 +334,6 @@ def append_missing_prefetched_mentions(text: str, search_results) -> str:
         + "\n".join(additions)
         + "\n"
     )
-    # Insert before RELATED_QUERIES / final attorney disclaimer when present
     marker = "[RELATED_QUERIES]"
     if marker in text:
         return text.replace(marker, block + marker, 1)

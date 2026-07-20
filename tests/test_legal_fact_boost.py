@@ -1,62 +1,71 @@
-"""Unit tests for legal fact-pattern boost and prefetch."""
+"""Unit tests for dynamic legal fact-pattern boost and prefetch."""
 
 import unittest
 from unittest.mock import patch
 
-from legal_fact_boost import apply_legal_fact_pattern_boost, prepare_legal_turn, prefetch_legal_authorities
+from legal_fact_boost import (
+    apply_legal_fact_pattern_boost,
+    prepare_legal_turn,
+    prefetch_legal_authorities,
+)
 
 
 class LegalFactBoostTests(unittest.TestCase):
-    def test_opc_boost(self):
+    def test_every_question_gets_general_protocol(self):
+        out = apply_legal_fact_pattern_boost(
+            "What are the elements of estafa under the Revised Penal Code?"
+        )
+        self.assertIn("LEGAL_ANALYSIS_PROTOCOL", out)
+        self.assertIn("Issue-spot", out)
+
+    def test_opc_hint_still_fires(self):
         out = apply_legal_fact_pattern_boost(
             "I am sole stockholder of an OPC and never designated a nominee."
         )
-        self.assertIn("LEGAL_CHECKLIST", out)
-        self.assertIn("Section 130", out)
+        self.assertIn("LEGAL_ANALYSIS_PROTOCOL", out)
+        self.assertIn("DOCTRINE_HINTS", out)
+        self.assertIn("Sec. 130", out)
 
-    def test_cyber_boost(self):
+    def test_cyber_hint(self):
         out = apply_legal_fact_pattern_boost(
             "Facebook post 18 months ago cyber libel and VAT for foreign customers"
         )
         self.assertIn("Causing", out)
         self.assertIn("RA 12023", out)
-        self.assertIn("Article 33", out)
+        self.assertIn("Art. 33", out)
 
-    def test_no_boost_unrelated(self):
+    def test_unrelated_still_gets_protocol_not_only_hints(self):
         out = apply_legal_fact_pattern_boost("What is the weather today?")
-        self.assertNotIn("LEGAL_CHECKLIST", out)
+        self.assertIn("LEGAL_ANALYSIS_PROTOCOL", out)
 
-    def test_prefetch_free_patent(self):
+    def test_prefetch_explicit_ra_number(self):
         fake = {
             "success": True,
-            "id": "ra11231",
-            "title": "Agricultural Free Patent Reform Act",
-            "url": "https://juris.ph/republic-act/ra11231",
+            "id": "ra11313",
+            "title": "Safe Spaces Act",
+            "url": "https://juris.ph/republic-act/ra11313",
             "type": "republic_act",
-            "year": 2019,
-            "document": {"summary": "Removes restrictions on agricultural free patents.", "year": 2019},
+            "document": {"summary": "Defines gender-based streets and public spaces harassment.", "year": 2019},
         }
         with patch("resources.functions.user_functions.get_republic_act", return_value=fake):
             entries, injection = prefetch_legal_authorities(
-                "free patent land double sale half-brother naturalized American"
+                "Please explain RA 11313 and how it applies to workplace harassment."
             )
         self.assertEqual(len(entries), 1)
-        self.assertIn("11231", entries[0]["url"] + (entries[0].get("title") or ""))
+        self.assertIn("11313", entries[0]["url"] + entries[0]["title"])
         self.assertIn("PREFETCHED_AUTHORITIES", injection)
-        self.assertIn("Agricultural Free Patent", injection)
 
-    def test_prepare_legal_turn_combines(self):
+    def test_prefetch_keyword_opc(self):
         fake = {
             "success": True,
             "id": "x",
-            "title": "RA 11232",
+            "title": "Revised Corporation Code",
             "url": "https://juris.ph/republic-act/x",
             "document": {"summary": "Section 130 burden reversal for OPC."},
         }
         with patch("resources.functions.user_functions.get_republic_act", return_value=fake):
             text, entries = prepare_legal_turn("OPC sole stockholder nominee dispute")
-        self.assertIn("LEGAL_CHECKLIST", text)
-        self.assertIn("PREFETCHED_AUTHORITIES", text)
+        self.assertIn("LEGAL_ANALYSIS_PROTOCOL", text)
         self.assertTrue(entries)
 
 
