@@ -51,8 +51,8 @@ Post-response filter in legal mode: markdown links whose href is not an exact UR
 _Avoid_: leaving phantom juris.ph hrefs in the final answer
 
 **Legal Analysis Protocol**
-Always-on instructions injected for every `[legal ai]` fact-pattern turn: issue-spot the user's questions, run targeted multi-searches, fetch before holdings, answer one section per issue, name controlling authority, cover parallel remedies, end with one clarifying question. Sample doctrines (divorce, floating status, OPC, free patent, cyber libel, etc.) are non-exhaustive hints — not a closed list of supported topics.
-_Avoid_: hardcoding support to a fixed Q1–Q5 eval set only
+Always-on instructions injected for every `[legal ai]` fact-pattern turn: issue-spot the user's questions, run targeted multi-searches (including supporting case lines), fetch before holdings, and answer in an AnyCase-style memo — opening direct answer, sections mirroring (a)/(b)/(c) with nested practical steps (Why / Core requirements / Important note), authority trails with exact juris.ph URLs, direct-answer reprise, one clarifying question. Sample doctrines (divorce, floating status, OPC, free patent, cyber libel, etc.) are non-exhaustive hints — not a closed list of supported topics.
+_Avoid_: hardcoding support to a fixed Q1–Q5 eval set only; thin FAQ answers that skip operational next steps when the user asked a multi-part fact pattern; inventing BIR/LGU issuances to mimic AnyCase depth
 
 **Legal Tool**
 One of the four juris.ph MCP operations exposed to the `[legal ai]` persona: `search_jurisprudence`, `search_republic_acts`, `get_case`, `get_republic_act`. The model chooses among these directly; there is no umbrella `search_legal` / `summarize_legal_case` facade.

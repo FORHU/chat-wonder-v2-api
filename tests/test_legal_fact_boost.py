@@ -17,6 +17,7 @@ class LegalFactBoostTests(unittest.TestCase):
         )
         self.assertIn("LEGAL_ANALYSIS_PROTOCOL", out)
         self.assertIn("Issue-spot", out)
+        self.assertIn("AnyCase-style", out)
 
     def test_opc_hint_still_fires(self):
         out = apply_legal_fact_pattern_boost(
@@ -33,6 +34,14 @@ class LegalFactBoostTests(unittest.TestCase):
         self.assertIn("Causing", out)
         self.assertIn("RA 12023", out)
         self.assertIn("Art. 33", out)
+
+    def test_divorce_hint_names_manalo_line(self):
+        out = apply_legal_fact_pattern_boost(
+            "Japanese divorce, I filed, can I remarry in the Philippines?"
+        )
+        self.assertIn("Manalo", out)
+        self.assertIn("Ordaneza", out)
+        self.assertIn("annotation", out)
 
     def test_unrelated_still_gets_protocol_not_only_hints(self):
         out = apply_legal_fact_pattern_boost("What is the weather today?")

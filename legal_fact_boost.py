@@ -12,21 +12,26 @@ _GENERAL_PROTOCOL = """[LEGAL_ANALYSIS_PROTOCOL — apply to THIS question, what
 1. Issue-spot: list every distinct legal question the user asked (a/b/c, and/or, separately…).
 2. For EACH issue, derive a targeted search query (doctrine + key facts). Run multiple
    `search_jurisprudence` / `search_republic_acts` calls as needed — never one vague search for everything.
+   When a doctrine has a line of cases, fetch several supporting decisions (not only one).
 3. Call `get_case` / `get_republic_act` on every document you will rely on before stating holdings.
-4. Structure the answer as a memo: one H3 per issue the user asked (mirror their numbering when present).
-   Under each issue: rule → application → conclusion. Cover forks (alternative legal paths) when material.
-5. Bottom line: name the controlling SC case and/or RA for the core question when grounded.
-6. Practical posture: forum, prescription/urgency, parallel remedies, evidence checklist.
-7. Never invent quotes, G.R. numbers, RA numbers, or juris.ph URLs. Prefer paraphrase over fake blockquotes.
-8. Never close all remedies ("you cannot file") without checking parallel civil/admin/labor paths.
-9. End with ONE determinative clarifying question that would change the legal fork.
-10. If tools miss, say so — do not fill from memory as if sourced."""
+4. Write an AnyCase-style memo:
+   - Opening direct answer (plain yes/no + conditions + practical prerequisite), then authority trail.
+   - One H3 per user issue mirroring (a)/(b)/(c); nest numbered steps with Why / Core requirements /
+     Important note / Key point / Bottom line where the user needs a path.
+   - Direct-answer reprise for anxious yes/no asks; end with ONE determinative clarifying question.
+5. Cite with exact juris.ph `url` links after the sentences they support; prefer paraphrase over fake quotes.
+6. Never invent quotes, G.R. numbers, RA numbers, juris.ph URLs, BIR rulings, or LGU guidelines.
+   Label unscourceable practice tips as general information to verify with counsel.
+7. Never close all remedies ("you cannot file") without checking parallel civil/admin/labor paths.
+8. If tools miss, say so — do not fill from memory as if sourced."""
 
 # Soft hints only — accelerate common doctrines; protocol above still governs ALL topics.
 _HINTS: List[Tuple[re.Pattern, str]] = [
     (
         re.compile(r"foreign divorce|remarry|japan(?:ese)?.{0,20}divorce|recognition of.{0,20}divorce", re.I),
-        "Hint: search Republic v. Manalo; judicial recognition is usually a prerequisite to remarriage.",
+        "Hint: search/fetch Republic v. Manalo, Ordaneza v. Republic, Bayog-Saito, and Kikuchi if found. "
+        "Art. 26(2): recognition available even if Filipino filed; prove foreign divorce + foreign law; "
+        "judicial recognition + civil-registry annotation before remarriage; recognition ≠ automatic property award.",
     ),
     (
         re.compile(r"floating status|off-detail|security guard|temporary off", re.I),
