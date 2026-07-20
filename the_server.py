@@ -35,6 +35,12 @@ from urllib.parse import urljoin
 
 import s3_storage
 from juris_mcp.client import get_client as get_juris_mcp_client
+from legal_citations import apply_legal_citation_pipeline
+from legal_fact_boost import (
+    append_critical_doctrine_guards,
+    append_missing_prefetched_mentions,
+    prepare_legal_turn,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -639,68 +645,64 @@ def _search_results_to_source_metadata(results: list) -> list:
     ]
 
 
-def _resolve_citation_url(url: str) -> str:
-    """Pass through absolute URLs; leave relative paths unchanged."""
-    return url
+def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) -> str:
+    """Repair /sources/ leftovers, strip unverified quotes, cite-gate URLs, HTML-format."""
 
-
-def format_legal_citation_links(text: str) -> str:
-    if not text or not isinstance(text, str):
-        return text
-    url_pattern = r"(https?://[^)]+|[^)]+)"
-    def repl_law(m):
-        href = _resolve_citation_url(m.group(2))
-        return f'<a href="{href}" class="legal-ref law" target="_blank">{m.group(1)}</a>'
-    def repl_juris(m):
-        href = _resolve_citation_url(m.group(2))
-        return f'<a href="{href}" class="legal-ref jurisprudence" target="_blank">{m.group(1)}</a>'
-    text = re.sub(r"\[([^\]]+ Law)\]\(" + url_pattern + r"\)", repl_law, text)
-    text = re.sub(r"\[([^\]]+ Jurisprudence)\]\(" + url_pattern + r"\)", repl_juris, text)
-    return text
-
-def repair_legal_source_links(text: str, search_results) -> str:
-    """Rewrite leftover /sources/... links to juris.ph URLs from the current tool results."""
-    if not text or not isinstance(text, str) or not search_results:
-        return text
-
-    urls = []
-    for r in search_results:
-        url = str(r.get("url") or "").strip()
-        if url.startswith("http"):
-            urls.append(url)
-        doc = r.get("document") if isinstance(r, dict) else None
-        if isinstance(doc, dict):
-            doc_url = str(doc.get("url") or doc.get("page_url") or "").strip()
-            if doc_url.startswith("http"):
-                urls.append(doc_url)
-    # Preserve order, unique
-    seen = set()
-    source_urls = []
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            source_urls.append(u)
-    if not source_urls:
-        return text
-
-    broken = re.compile(r"/sources/([^)\s\"\]]*)")
-    idx = [0]
-
-    def repl(m):
-        replacement = source_urls[min(idx[0], len(source_urls) - 1)]
-        idx[0] += 1
-        return replacement
-
-    repaired = broken.sub(repl, text)
-    if repaired != text:
+    def on_repair(reason: str):
         logging.info("[legal-citation] rewrote /sources/ links to juris.ph URLs")
         increment_metric_counter(
             "legal.citation_repair.count",
             value=1,
-            tags={"reason": "sources_to_juris_url"},
+            tags={"reason": reason},
             session_id=None,
         )
-    return repaired
+
+    def on_gate(reason: str):
+        logging.info("[legal-citation] demoted unverified citation URL(s)")
+        increment_metric_counter(
+            "legal.citation_gate.count",
+            value=1,
+            tags={"reason": reason},
+            session_id=None,
+        )
+
+    def on_strip_quote(reason: str):
+        logging.info("[legal-citation] removed unverified blockquote(s)")
+        increment_metric_counter(
+            "legal.citation_quote_strip.count",
+            value=1,
+            tags={"reason": reason},
+            session_id=None,
+        )
+
+    return apply_legal_citation_pipeline(
+        text,
+        search_results,
+        legal_mode=legal_mode,
+        on_repair=on_repair,
+        on_gate=on_gate,
+        on_strip_quote=on_strip_quote,
+    )
+
+
+def _finalize_legal_response(
+    text: str,
+    search_results,
+    *,
+    legal_mode: bool,
+    user_input: str = "",
+) -> str:
+    """Citation pipeline + ensure prefetched controlling authorities are named."""
+    out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode)
+    if legal_mode:
+        out = append_missing_prefetched_mentions(out, search_results)
+        out = append_critical_doctrine_guards(out, user_input)
+        # Re-run HTML link format for any appended markdown cites
+        from legal_citations import format_legal_citation_links, gate_unverified_legal_urls
+
+        out = gate_unverified_legal_urls(out, search_results)
+        out = format_legal_citation_links(out)
+    return out
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -874,8 +876,17 @@ def execute_function_call(function_call: dict, session_id: str = None):
                         "url": result.get("url"),
                         "type": result.get("type"),
                         "year": result.get("year"),
+                        "snippet": result.get("snippet") or "",
+                        "disposition": result.get("disposition") or "",
                         "document": result.get("document"),
                     }
+                    # Keep quote-verification corpus from structured get_* fields
+                    doc = result.get("document") if isinstance(result.get("document"), dict) else {}
+                    if doc:
+                        entry["snippet"] = entry["snippet"] or doc.get("factual_background") or doc.get("summary") or ""
+                        entry["disposition"] = entry["disposition"] or doc.get("final_disposition") or doc.get("disposition") or ""
+                        entry["court_reasoning"] = doc.get("court_reasoning") or ""
+                        entry["full_text"] = doc.get("full_text") or doc.get("text") or ""
                     existing = list(state.last_search_legal_results or [])
                     existing.append(entry)
                     state.last_search_legal_results = existing
@@ -1674,6 +1685,12 @@ def chat(request: ChatRequest):
     user_input = request.user_input or request.user_history_select or ""
 
     persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
+    if persona == "legal":
+        user_input, _prefetch = prepare_legal_turn(user_input)
+        if _prefetch and session_id and session_id in _context.sessions:
+            existing = list(_context.sessions[session_id].last_search_legal_results or [])
+            existing.extend(_prefetch)
+            _context.sessions[session_id].last_search_legal_results = existing
 
     if persona == "garment" and request.weather:
         try:
@@ -1933,9 +1950,13 @@ def chat(request: ChatRequest):
 
     state.prompt.append(user_input.strip())
     final_text = (result or "").strip()
-    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-        final_text = format_legal_citation_links(final_text)
+    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+    final_text = _finalize_legal_response(
+        final_text,
+        state.last_search_legal_results,
+        legal_mode=_legal_mode,
+        user_input=user_input,
+    )
     if persona == "legal" and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
@@ -2070,9 +2091,13 @@ def approve(request: ApproveRequest):
         }
 
     final_text = (cont_result or "").strip()
-    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-        final_text = format_legal_citation_links(final_text)
+    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+    final_text = _finalize_legal_response(
+        final_text,
+        state.last_search_legal_results,
+        legal_mode=_legal_mode,
+        user_input="",
+    )
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -2198,9 +2223,13 @@ async def chat_stream(websocket: WebSocket):
 
                 if full_response:
                     final_text = full_response.strip()
-                    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-                    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-                        final_text = format_legal_citation_links(final_text)
+                    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                    final_text = _finalize_legal_response(
+                        final_text,
+                        state.last_search_legal_results,
+                        legal_mode=_legal_mode,
+                        user_input=user_input,
+                    )
                     state.generated.append(final_text)
                 _context.sessions[session_id] = state
                 await websocket.send_text(_context.__END__)
@@ -2228,6 +2257,12 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
+            if persona == "legal":
+                user_input, _prefetch = prepare_legal_turn(user_input)
+                if _prefetch and session_id and session_id in _context.sessions:
+                    existing = list(_context.sessions[session_id].last_search_legal_results or [])
+                    existing.extend(_prefetch)
+                    _context.sessions[session_id].last_search_legal_results = existing
 
             # Inject frontend-provided weather for garment persona
             if persona == "garment" and data.get("weather"):
@@ -2403,9 +2438,13 @@ async def chat_stream(websocket: WebSocket):
                 if full_response:
                     state.prompt.append(user_input)
                     final_text = full_response.strip()
-                    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-                    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-                        final_text = format_legal_citation_links(final_text)
+                    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                    final_text = _finalize_legal_response(
+                        final_text,
+                        state.last_search_legal_results,
+                        legal_mode=_legal_mode,
+                        user_input=user_input,
+                    )
                     if persona == "legal" and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")

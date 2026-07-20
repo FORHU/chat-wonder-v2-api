@@ -238,7 +238,7 @@ def _normalize_search_results(rows: list, doc_kind: str) -> list:
 
 
 def search_jurisprudence(
-    query: str,
+    query: str = None,
     limit: int = 5,
     year: int = None,
     case_type: str = None,
@@ -289,7 +289,7 @@ def search_jurisprudence(
         }
 
 
-def search_republic_acts(query: str, limit: int = 5, year: int = None) -> dict:
+def search_republic_acts(query: str = None, limit: int = 5, year: int = None) -> dict:
     """Semantic search over Philippine Republic Acts via juris.ph MCP."""
     query = (query or "").strip()
     if not query:

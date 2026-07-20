@@ -46,6 +46,10 @@ _Avoid_: Anycase issuance corpus, general “Philippine law” without an MCP hi
 A user-facing reference to a retrieved document, expressed as the juris.ph shareable page URL (optionally paired with the official PDF link). Not a local `/sources/{id}` library path.
 _Avoid_: numeric DB item_id, LEGAL_LIBRARY_URL sources links
 
+**Cite Gate**
+Post-response filter in legal mode: markdown links whose href is not an exact URL from the current tool-result pool (including truncated `juris.ph/case/...` placeholders) are demoted to plain link text. Implemented in `legal_citations.py`.
+_Avoid_: leaving phantom juris.ph hrefs in the final answer
+
 **Legal Tool**
 One of the four juris.ph MCP operations exposed to the `[legal ai]` persona: `search_jurisprudence`, `search_republic_acts`, `get_case`, `get_republic_act`. The model chooses among these directly; there is no umbrella `search_legal` / `summarize_legal_case` facade.
 _Avoid_: search_legal, summarize_legal_case, content_types mapper
