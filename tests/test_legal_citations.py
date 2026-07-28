@@ -7,6 +7,7 @@ from legal_citations import (
     collect_tool_result_urls,
     gate_unverified_legal_urls,
     repair_legal_source_links,
+    select_related_cases,
     strip_unverified_blockquotes,
 )
 
@@ -104,6 +105,97 @@ class LegalCitationsTests(unittest.TestCase):
         text = '> *"Totally fabricated statute language about nominees."*\n'
         out = apply_legal_citation_pipeline(text, pool, legal_mode=True)
         self.assertIn("Unverified quotation removed", out)
+
+
+class SelectRelatedCasesTests(unittest.TestCase):
+    def test_empty_pool(self):
+        self.assertEqual(select_related_cases([]), [])
+        self.assertEqual(select_related_cases(None), [])
+
+    def test_ranks_by_score_when_unvetted(self):
+        pool = [
+            {"id": "a", "title": "Low score", "score": 0.2, "type": "jurisprudence"},
+            {"id": "b", "title": "High score", "score": 0.9, "type": "jurisprudence"},
+        ]
+        out = select_related_cases(pool)
+        self.assertEqual([r["title"] for r in out], ["High score", "Low score"])
+
+    def test_vetted_get_case_entry_outranks_unvetted_search_row(self):
+        pool = [
+            {"id": "a", "title": "Unvetted, high score", "score": 0.99, "type": "jurisprudence"},
+            {"id": "b", "title": "Vetted via get_case", "score": None, "document": {"summary": "..."}},
+        ]
+        out = select_related_cases(pool)
+        self.assertEqual(out[0]["title"], "Vetted via get_case")
+        self.assertTrue(out[0]["vetted"])
+        self.assertFalse(out[1]["vetted"])
+
+    def test_dedupes_by_identity_preferring_vetted_entry(self):
+        pool = [
+            {"id": "same", "title": "Raw search row", "score": 0.5, "type": "jurisprudence"},
+            {"id": "same", "title": "Vetted get_case entry", "document": {"summary": "..."}},
+        ]
+        out = select_related_cases(pool)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["title"], "Vetted get_case entry")
+        self.assertTrue(out[0]["vetted"])
+
+    def test_dedupes_by_url_when_no_id(self):
+        pool = [
+            {"url": "https://juris.ph/case/x", "title": "First"},
+            {"url": "https://juris.ph/case/x", "title": "Second"},
+        ]
+        out = select_related_cases(pool)
+        self.assertEqual(len(out), 1)
+
+    def test_respects_limit(self):
+        pool = [{"id": str(i), "title": f"Case {i}", "score": i} for i in range(10)]
+        out = select_related_cases(pool, limit=3)
+        self.assertEqual(len(out), 3)
+        self.assertEqual([r["title"] for r in out], ["Case 9", "Case 8", "Case 7"])
+
+    def test_prefetched_entry_is_treated_as_vetted(self):
+        pool = [
+            {"id": "a", "title": "Unvetted", "score": 0.9},
+            {"id": "b", "title": "Prefetched", "prefetched": True},
+        ]
+        out = select_related_cases(pool)
+        self.assertEqual(out[0]["title"], "Prefetched")
+
+    def test_skips_rows_without_identity(self):
+        pool = [{"title": "No id or url"}]
+        self.assertEqual(select_related_cases(pool), [])
+
+    def test_output_shape(self):
+        pool = [
+            {
+                "id": "gr123",
+                "type": "jurisprudence",
+                "title": "People v. Doe",
+                "url": "https://juris.ph/case/gr123",
+                "case_number": "G.R. No. 123",
+                "year": 2020,
+                "snippet": "Some snippet.",
+                "score": 0.75,
+            }
+        ]
+        out = select_related_cases(pool)
+        self.assertEqual(
+            out,
+            [
+                {
+                    "type": "jurisprudence",
+                    "title": "People v. Doe",
+                    "url": "https://juris.ph/case/gr123",
+                    "case_number": "G.R. No. 123",
+                    "ra_number": None,
+                    "year": 2020,
+                    "snippet": "Some snippet.",
+                    "relevance": 0.75,
+                    "vetted": False,
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

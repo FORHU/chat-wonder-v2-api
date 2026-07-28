@@ -35,7 +35,7 @@ from urllib.parse import urljoin
 
 import s3_storage
 from juris_mcp.client import get_client as get_juris_mcp_client
-from legal_citations import apply_legal_citation_pipeline
+from legal_citations import apply_legal_citation_pipeline, select_related_cases
 from legal_fact_boost import (
     append_critical_doctrine_guards,
     append_missing_prefetched_mentions,
@@ -1957,8 +1957,10 @@ def chat(request: ChatRequest):
         legal_mode=_legal_mode,
         user_input=user_input,
     )
+    related_cases: list = []
     if persona == "legal" and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
+        related_cases = select_related_cases(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
     if _do_nav_extract:
         try:
@@ -1984,6 +1986,7 @@ def chat(request: ChatRequest):
         "response": final_text,
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
+        "related_cases": related_cases,
         "outfit_ids": state.last_outfit_ids_result if persona == "stylist" and state.last_outfit_ids_result else None,
         "cosmetics_ids": state.last_cosmetics_ids_result if persona == "stylist" and state.last_cosmetics_ids_result else None,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
@@ -2448,6 +2451,8 @@ async def chat_stream(websocket: WebSocket):
                     if persona == "legal" and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
+                        related_cases = select_related_cases(state.last_search_legal_results)
+                        await websocket.send_text(f"[RELATED_CASES]{json.dumps(related_cases)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
                 else:

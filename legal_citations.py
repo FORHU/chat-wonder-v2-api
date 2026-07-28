@@ -39,6 +39,64 @@ def collect_tool_result_urls(search_results) -> List[str]:
     return urls
 
 
+def select_related_cases(search_results, limit: int = 6) -> List[dict]:
+    """Dedupe the legal tool-result pool by document identity and rank it.
+
+    get_case/get_republic_act entries are model-vetted (ADR-0002 requires a
+    structured fetch before any holding statement), so they outrank raw,
+    unvetted search rows for the same document. Within each tier, sort by the
+    MCP's own relevance score (search rows only; vetted entries have none and
+    keep tier order).
+    """
+    if not search_results:
+        return []
+
+    def identity(row: dict) -> str:
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        return (
+            str(row.get("item_id") or row.get("id") or "").strip()
+            or str(meta.get("id") or "").strip()
+            or str(row.get("url") or meta.get("url") or "").strip()
+        )
+
+    best: dict = {}
+    for row in search_results:
+        if not isinstance(row, dict):
+            continue
+        key = identity(row)
+        if not key:
+            continue
+        vetted = bool(row.get("document") or row.get("prefetched"))
+        candidate = dict(row)
+        candidate["_vetted"] = vetted
+        existing = best.get(key)
+        if existing is None or (vetted and not existing["_vetted"]):
+            best[key] = candidate
+
+    ranked = sorted(
+        best.values(),
+        key=lambda r: (not r["_vetted"], -(r.get("score") or 0.0)),
+    )
+
+    results = []
+    for r in ranked[:limit]:
+        meta = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+        results.append(
+            {
+                "type": r.get("type") or "legal_document",
+                "title": r.get("title"),
+                "url": r.get("url") or meta.get("url"),
+                "case_number": r.get("case_number"),
+                "ra_number": r.get("ra_number"),
+                "year": r.get("year") or meta.get("year"),
+                "snippet": r.get("snippet"),
+                "relevance": r.get("score"),
+                "vetted": r["_vetted"],
+            }
+        )
+    return results
+
+
 def _normalize_url(url: str) -> str:
     return str(url or "").strip().rstrip("/")
 
