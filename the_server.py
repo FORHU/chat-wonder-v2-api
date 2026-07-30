@@ -1004,7 +1004,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
 # Reason loop (non-streaming, collects full response)
 # ---------------------------------------------------------------------------
 
-def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = ""):
+def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -1013,15 +1013,23 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
 
     def perform_chat(msgs):
         args = {
-            "model": _context.model,
+            "model": model or _context.model,
             "messages": msgs,
             "n": 1,
             "stream": True,
-            "temperature": _context.temperature,
+            "temperature": temperature if temperature is not None else _context.temperature,
         }
+        if reasoning_effort:
+            args["reasoning_effort"] = reasoning_effort
         if available_manifest:
             args["tools"] = available_manifest
             args["tool_choice"] = "auto"
+            # The streaming tool-call accumulator below only tracks a single
+            # in-flight call (delta.tool_calls[0]); parallel tool calls from
+            # newer models (confirmed live with gpt-5.6-terra) get their
+            # argument fragments interleaved into one invalid JSON blob,
+            # which fails to parse and makes the model retry forever.
+            args["parallel_tool_calls"] = False
         return state.openai_client.chat.completions.create(**args)
 
     for _ in range(max_chains):
@@ -1153,6 +1161,31 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
                 "Only execute new actions if their conditions are fully satisfied."
             ),
         })
+
+    if not full_response and funcall_chains:
+        # Exhausted max_chains while the model still wanted to call tools
+        # (confirmed live: some multi-issue fact patterns need close to all
+        # 7 rounds, and one extra needed search silently returns nothing).
+        # Force one final tool-free completion from what's already been
+        # gathered instead of returning an empty answer.
+        try:
+            forced = state.openai_client.chat.completions.create(
+                model=model or _context.model,
+                messages=messages + [{
+                    "role": "system",
+                    "content": (
+                        "[Constraints]\nYou have reached the maximum number of tool calls "
+                        "for this turn. Do NOT call any more tools. Answer now using only "
+                        "the information already gathered above, and say clearly if some "
+                        "aspect could not be fully verified."
+                    ),
+                }],
+                n=1,
+                temperature=temperature if temperature is not None else _context.temperature,
+            )
+            full_response = (forced.choices[0].message.content or "").strip()
+        except Exception as e:
+            logging.warning("Forced final-answer completion failed: %s", e)
 
     return full_response
 
@@ -1386,11 +1419,33 @@ def _broadcast_turn_confidence(state, session_id):
     broadcast_trace("cognition", f"Turn complete — RAG: {rag_count} source(s), tools: {tool_count} call(s)", session_id, summary=summary)
 
 
+def _legal_model_override(persona: str):
+    """Legal answers use a stronger model + low temperature, not the default persona config.
+
+    gpt-5.6-terra rejects function tools on /v1/chat/completions unless
+    reasoning_effort='none' (confirmed live: "Function tools with reasoning_effort
+    are not supported for gpt-5.6-terra in /v1/chat/completions"). Since the legal
+    persona is fundamentally tool-driven (search_jurisprudence/get_case/etc.), we
+    can't use a non-'none' reasoning_effort here without migrating to /v1/responses
+    (tracked separately). temperature is still controllable with reasoning_effort='none'.
+    """
+    if persona != "legal":
+        return None, None, None, None
+    return (
+        os.getenv("LEGAL_CHAT_MODEL", "gpt-5.6-terra"),
+        os.getenv("LEGAL_REASONING_EFFORT", "none"),
+        float(os.getenv("LEGAL_TEMPERATURE", "0.2")),
+        int(os.getenv("LEGAL_MAX_CHAINS", "12")),
+    )
+
+
 def reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
-    result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
+    _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+    result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
     _broadcast_turn_confidence(state, session_id)
     return result
 
@@ -1422,7 +1477,7 @@ async def _astream_llm(perform_chat_fn, messages):
         yield item
 
 
-async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = ""):
+async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -1432,15 +1487,20 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
 
     def perform_chat(msgs):
         args = {
-            "model": _context.model,
+            "model": model or _context.model,
             "messages": msgs,
             "n": 1,
             "stream": True,
-            "temperature": _context.temperature,
+            "temperature": temperature if temperature is not None else _context.temperature,
         }
+        if reasoning_effort:
+            args["reasoning_effort"] = reasoning_effort
         if available_manifest:
             args["tools"] = available_manifest
             args["tool_choice"] = "auto"
+            # See matching comment in run_function_chain's perform_chat: the
+            # streaming tool-call accumulator only tracks one in-flight call.
+            args["parallel_tool_calls"] = False
         return state.openai_client.chat.completions.create(**args)
 
     for iteration in range(max_chains):
@@ -1614,12 +1674,43 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             "content": "[Constraints]\nIf a complete response has been produced, TERMINATE.",
         })
 
+    if not full_response and funcall_chains:
+        # Exhausted max_chains while the model still wanted to call tools
+        # (confirmed live: some multi-issue fact patterns need close to all
+        # 7 rounds, and one extra needed search silently returns nothing).
+        # Force one final tool-free completion from what's already been
+        # gathered instead of yielding an empty answer.
+        try:
+            forced = await asyncio.to_thread(
+                state.openai_client.chat.completions.create,
+                model=model or _context.model,
+                messages=messages + [{
+                    "role": "system",
+                    "content": (
+                        "[Constraints]\nYou have reached the maximum number of tool calls "
+                        "for this turn. Do NOT call any more tools. Answer now using only "
+                        "the information already gathered above, and say clearly if some "
+                        "aspect could not be fully verified."
+                    ),
+                }],
+                n=1,
+                temperature=temperature if temperature is not None else _context.temperature,
+            )
+            forced_text = (forced.choices[0].message.content or "").strip()
+            if forced_text:
+                full_response = forced_text
+                yield forced_text
+        except Exception as e:
+            logging.warning("Forced final-answer completion failed: %s", e)
+
 async def streaming_reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
-    async for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query):
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
+    _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+    async for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs):
         yield chunk
     _broadcast_turn_confidence(state, session_id)
     await asyncio.sleep(0)
@@ -2111,7 +2202,10 @@ def approve(request: ApproveRequest):
     try:
         available_manifest = [t for t in _context.fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
         _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
-        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query)
+        _resume_persona = "legal" if (addendum_override and "LEGAL ASSISTANT MODE" in addendum_override) else "auto"
+        _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona)
+        _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
     finally:
         _context.auto_approval = False
 
@@ -2236,9 +2330,12 @@ async def chat_stream(websocket: WebSocket):
                 available_manifest = [t for t in _context.all_fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
                 _context.auto_approval = True
                 full_response = ""
+                _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto")
+                _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
                 try:
                     _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
-                    async for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query):
+                    async for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs):
                         if chunk.startswith("__HITL__"):
                             hitl_data = json.loads(chunk[8:])
                             new_fc = hitl_data["function_call"]
@@ -2257,16 +2354,24 @@ async def chat_stream(websocket: WebSocket):
                                 "arguments": args_parsed,
                             }))
                             break
-                        await websocket.send_text(chunk)
+                        # Legal answers are buffered and sent post-finalize below,
+                        # same as the main streaming path — see _finalize_legal_response.
+                        if not _legal_mode:
+                            await websocket.send_text(chunk)
                         full_response += chunk
                 finally:
                     _context.auto_approval = False
 
                 if full_response:
                     final_text = full_response.strip()
-                    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-                    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-                        final_text = format_legal_citation_links(final_text)
+                    final_text = _finalize_legal_response(
+                        final_text,
+                        state.last_search_legal_results,
+                        legal_mode=_legal_mode,
+                        user_input=user_input,
+                    )
+                    if _legal_mode:
+                        await websocket.send_text(final_text)
                     state.generated.append(final_text)
                 _context.sessions[session_id] = state
                 await websocket.send_text(_context.__END__)
@@ -2463,15 +2568,25 @@ async def chat_stream(websocket: WebSocket):
                         break
                     if _ws_t_first_chunk is None:
                         _ws_t_first_chunk = time.time()
-                    await websocket.send_text(chunk)
+                    # Legal answers must pass through citation gating/doctrine guards
+                    # (_finalize_legal_response) before the client sees them, so raw
+                    # chunks are buffered instead of streamed live for this persona.
+                    if persona != "legal":
+                        await websocket.send_text(chunk)
                     full_response += chunk
 
                 if full_response:
                     state.prompt.append(user_input)
                     final_text = full_response.strip()
-                    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-                    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-                        final_text = format_legal_citation_links(final_text)
+                    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                    final_text = _finalize_legal_response(
+                        final_text,
+                        state.last_search_legal_results,
+                        legal_mode=_legal_mode,
+                        user_input=user_input,
+                    )
+                    if persona == "legal":
+                        await websocket.send_text(final_text)
                     if persona == "legal" and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
