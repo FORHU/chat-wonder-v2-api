@@ -24,7 +24,9 @@
             "description": "Optional filter, e.g. Criminal, Civil, Administrative, Labor"
           }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       }
     }
   },
@@ -49,7 +51,9 @@
             "description": "Optional: only acts enacted in this year"
           }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       }
     }
   },
@@ -390,7 +394,10 @@
           },
           "gender": {
             "type": "string",
-            "enum": ["MALE", "FEMALE"],
+            "enum": [
+              "MALE",
+              "FEMALE"
+            ],
             "description": "User's gender for filtering outfits. Required — ask the user if not known."
           },
           "weather_json": {
@@ -398,7 +405,10 @@
             "description": "Pass the [FRONTEND_WEATHER:{...}] JSON string exactly as received. Used to filter out weather-inappropriate outfits (e.g. heavy jackets when it's hot). Optional."
           }
         },
-        "required": ["category", "gender"]
+        "required": [
+          "category",
+          "gender"
+        ]
       }
     }
   },
@@ -509,11 +519,19 @@
         "properties": {
           "skin_type": {
             "type": "string",
-            "enum": ["DRY", "OILY", "COMBINATION", "NORMAL", "SENSITIVE"],
+            "enum": [
+              "DRY",
+              "OILY",
+              "COMBINATION",
+              "NORMAL",
+              "SENSITIVE"
+            ],
             "description": "User's skin type — pass the value exactly as received. Valid values: DRY, OILY, COMBINATION, NORMAL, SENSITIVE."
           }
         },
-        "required": ["skin_type"]
+        "required": [
+          "skin_type"
+        ]
       }
     }
   },
