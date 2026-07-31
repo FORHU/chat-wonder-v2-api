@@ -38,14 +38,11 @@ jobs:
             - name: Write user_functions.env into build context
               run: |
                   cat > resources/functions/user_functions.env << 'FUNCEOF'
-                  LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
+                  JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-                  LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
                   AWS_REGION=${{ vars.AWS_REGION }}
                   AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
                   AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
-                  LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
                   GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                   GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                   OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
@@ -94,11 +91,8 @@ jobs:
                       cat > /opt/chat-wonder-v2/.env << 'ENVEOF'
                       OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
                       CHAT_MODEL=${{ vars.CHAT_MODEL }}
-                      LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
+                      JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                       LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-                      LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
-                      LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
-                      LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
                       AWS_REGION=${{ vars.AWS_REGION }}
                       AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
                       AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -109,23 +103,19 @@ jobs:
                       GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                       GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                       OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
-                      LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                       GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
                       TAILOR_S3_BUCKET_NAME=${{ vars.TAILOR_S3_BUCKET_NAME }}
                       TAILOR_AWS_REGION=${{ vars.TAILOR_AWS_REGION }}
                       ENVEOF
 
-                      # ── Write user_functions.env (legal RAG credentials) ─────────
+                      # ── Write user_functions.env ─────────────────────────────────
                       # Mounted into the container at resources/functions/user_functions.env
                       cat > /opt/chat-wonder-v2/resources/functions/user_functions.env << 'FUNCEOF'
-                      LEGAL_DATABASE_URL=${{ secrets.LEGAL_DATABASE_URL }}
+                      JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                       LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-                      LEGAL_S3_PREFIX=${{ vars.LEGAL_S3_PREFIX }}
                       AWS_REGION=${{ vars.AWS_REGION }}
                       AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
                       AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                      LEGAL_EMBEDDING_MODEL=${{ vars.LEGAL_EMBEDDING_MODEL }}
-                      LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
                       GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                       GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                       OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
