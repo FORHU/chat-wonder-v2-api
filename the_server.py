@@ -43,6 +43,13 @@ from legal_rag.router import (
 )
 from legal_rag.markdown_format import format_document_combined, prepend_title_heading
 import s3_storage
+from juris_mcp.client import get_client as get_juris_mcp_client
+from legal_citations import apply_legal_citation_pipeline, select_related_cases
+from legal_fact_boost import (
+    append_critical_doctrine_guards,
+    append_missing_prefetched_mentions,
+    prepare_legal_turn,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -78,6 +85,7 @@ _context.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
 _context.embedding_model: str = os.getenv("LEGAL_EMBEDDING_MODEL", "text-embedding-3-small")
 _context.model: str = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 _context.legal_library_url: str = os.getenv("LEGAL_LIBRARY_URL", "").rstrip("/")
+_context.juris_mcp_url: str = os.getenv("JURIS_MCP_URL", "https://juris.ph/mcp").rstrip("/")
 _context.temperature: float = 1.0
 _context.informed: bool = True
 _context.show_clues: list = []
@@ -407,7 +415,7 @@ def process_persona(user_input: str):
     if user_input.lower().startswith("[legal ai]"):
         persona = "legal"
         user_input = user_input[10:].strip()
-        legal_whitelist = ["search_legal", "summarize_legal_case"]
+        legal_whitelist = ["search_jurisprudence", "search_republic_acts", "get_case", "get_republic_act"]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_whitelist]
         try:
             with open("resources/prompts/legal_prompt.txt", "r", encoding="utf-8") as f:
@@ -801,6 +809,47 @@ def repair_legal_source_links(text: str, search_results) -> str:
         repaired = broken.sub(f"/sources/{source_ids[0]}", repaired)
 
     return repaired
+
+def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) -> str:
+    def on_repair(reason: str):
+        logging.info("[legal-citation] repaired /sources/ link(s)")
+        increment_metric_counter("legal.citation_repair.count", value=1, tags={"reason": reason}, session_id=None)
+
+    def on_gate(reason: str):
+        logging.info("[legal-citation] demoted unverified citation URL(s)")
+        increment_metric_counter("legal.citation_gate.count", value=1, tags={"reason": reason}, session_id=None)
+
+    def on_strip_quote(reason: str):
+        logging.info("[legal-citation] removed unverified blockquote(s)")
+        increment_metric_counter("legal.citation_quote_strip.count", value=1, tags={"reason": reason}, session_id=None)
+
+    return apply_legal_citation_pipeline(
+        text,
+        search_results,
+        legal_mode=legal_mode,
+        on_repair=on_repair,
+        on_gate=on_gate,
+        on_strip_quote=on_strip_quote,
+    )
+
+
+def _finalize_legal_response(
+    text: str,
+    search_results,
+    *,
+    legal_mode: bool,
+    user_input: str = "",
+) -> str:
+    """Citation pipeline + ensure prefetched controlling authorities are named."""
+    out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode)
+    if legal_mode:
+        out = append_missing_prefetched_mentions(out, search_results)
+        out = append_critical_doctrine_guards(out, user_input)
+        from legal_citations import format_legal_citation_links as _format_legal_citation_links, gate_unverified_legal_urls as _gate_unverified_legal_urls
+
+        out = _gate_unverified_legal_urls(out, search_results)
+        out = _format_legal_citation_links(out)
+    return out
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -1778,6 +1827,22 @@ async def health_check():
         checks["s3_cosmetics"] = {"status": "error", "bucket": os.getenv("COSMETICS_S3_BUCKET_NAME"), "detail": str(e)}
         overall = "degraded"
 
+    # juris.ph MCP (live legal source for the [legal ai] persona)
+    try:
+        t0 = time.monotonic()
+        probe = get_juris_mcp_client().call_tool("search_jurisprudence", {"query": "due process", "limit": 1})
+        ok = isinstance(probe, dict)
+        checks["juris_mcp"] = {
+            "status": "ok" if ok else "error",
+            "url": _context.juris_mcp_url,
+            "latency_ms": round((time.monotonic() - t0) * 1000),
+        }
+        if not ok:
+            overall = "degraded"
+    except Exception as e:
+        checks["juris_mcp"] = {"status": "error", "url": _context.juris_mcp_url, "detail": str(e)}
+        overall = "degraded"
+
     # OpenAI
     if _context.openai_api_key:
         checks["openai"] = {"status": "configured", "model": _context.model}
@@ -1796,7 +1861,7 @@ async def health_check():
 @app.get("/config")
 async def get_config():
     """Public config for frontend clients — no secrets."""
-    return {"legal_library_url": _context.legal_library_url}
+    return {"legal_library_url": _context.legal_library_url, "juris_mcp_url": _context.juris_mcp_url}
 
 
 @app.get("/version")
@@ -1831,6 +1896,12 @@ def chat(request: ChatRequest):
     user_input = request.user_input or request.user_history_select or ""
 
     persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
+    if persona == "legal":
+        user_input, _prefetch = prepare_legal_turn(user_input)
+        if _prefetch and session_id and session_id in _context.sessions:
+            existing = list(_context.sessions[session_id].last_search_legal_results or [])
+            existing.extend(_prefetch)
+            _context.sessions[session_id].last_search_legal_results = existing
 
     if persona == "garment" and request.weather:
         try:
@@ -2090,9 +2161,13 @@ def chat(request: ChatRequest):
 
     state.prompt.append(user_input.strip())
     final_text = (result or "").strip()
-    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-        final_text = format_legal_citation_links(final_text)
+    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+    final_text = _finalize_legal_response(
+        final_text,
+        state.last_search_legal_results,
+        legal_mode=_legal_mode,
+        user_input=user_input,
+    )
     if persona == "legal" and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
@@ -2230,9 +2305,13 @@ def approve(request: ApproveRequest):
         }
 
     final_text = (cont_result or "").strip()
-    final_text = repair_legal_source_links(final_text, state.last_search_legal_results)
-    if addendum_override and "LEGAL ASSISTANT MODE" in addendum_override:
-        final_text = format_legal_citation_links(final_text)
+    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+    final_text = _finalize_legal_response(
+        final_text,
+        state.last_search_legal_results,
+        legal_mode=_legal_mode,
+        user_input=state.prompt[-1] if state.prompt else "",
+    )
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -2399,6 +2478,12 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
+            if persona == "legal":
+                user_input, _prefetch = prepare_legal_turn(user_input)
+                if _prefetch and session_id and session_id in _context.sessions:
+                    existing = list(_context.sessions[session_id].last_search_legal_results or [])
+                    existing.extend(_prefetch)
+                    _context.sessions[session_id].last_search_legal_results = existing
 
             # Inject frontend-provided weather for garment persona
             if persona == "garment" and data.get("weather"):
@@ -2590,6 +2675,8 @@ async def chat_stream(websocket: WebSocket):
                     if persona == "legal" and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
+                        related_cases = select_related_cases(state.last_search_legal_results)
+                        await websocket.send_text(f"[RELATED_CASES]{json.dumps(related_cases)}")
                     state.generated.append(final_text)
                     _context.sessions[session_id] = state
                 else:

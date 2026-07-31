@@ -194,223 +194,234 @@ Include standard Philippine lease provisions:
 }
 
 
-def _fetch_full_case_content(item_id: int, doc_type: str = None) -> dict:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
+def _juris_call(tool_name: str, arguments: dict) -> dict:
+    from juris_mcp.client import get_client
 
-    try:
-        database_url = os.getenv("LEGAL_DATABASE_URL")
-        if not database_url:
-            return {"success": False, "error": "LEGAL_DATABASE_URL not configured"}
+    t0 = time.perf_counter()
+    payload = get_client().call_tool(tool_name, arguments)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    _logger.info("juris_mcp %s elapsed=%.0fms", tool_name, elapsed_ms)
+    return payload if isinstance(payload, dict) else {"data": payload}
 
-        conn = psycopg2.connect(database_url)
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(
-            """
-            SELECT id, source_url AS url, title, category, bucket_slug, year,
-                   full_text AS content, summary, concise_summary, metadata_json
-            FROM documents WHERE id = %s
-            """,
-            (item_id,),
+
+def _normalize_search_results(rows: list, doc_kind: str) -> list:
+    mapped = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        url = row.get("url") or row.get("page_url") or ""
+        title = (
+            row.get("case_title")
+            or row.get("title")
+            or row.get("short_title")
+            or row.get("ra_number")
+            or ""
         )
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        mapped.append(
+            {
+                "id": str(row.get("id") or ""),
+                "item_id": str(row.get("id") or ""),
+                "score": float(row.get("score", 0.0) or 0.0),
+                "type": doc_kind,
+                "title": title,
+                "url": url,
+                "case_number": row.get("case_number") or "",
+                "ra_number": row.get("ra_number") or row.get("number") or "",
+                "year": row.get("year"),
+                "snippet": row.get("facts") or row.get("summary") or row.get("snippet") or "",
+                "disposition": row.get("disposition") or "",
+                "pdf_url": row.get("pdf_url") or row.get("source_pdf") or "",
+                "metadata": row,
+            }
+        )
+    return mapped
 
-        if not result:
-            return {"success": False, "error": f"Document {item_id} not found"}
 
-        doc = dict(result)
-        metadata = doc.get("metadata_json") or {}
-        doc["gr_number"] = metadata.get("gr_number", "")
-        doc["law_number"] = metadata.get("law_number", "")
-        doc["case_number"] = metadata.get("case_number", "")
-        return {"success": True, "document": doc}
+def search_jurisprudence(
+    query: str = None,
+    limit: int = 5,
+    year: int = None,
+    case_type: str = None,
+) -> dict:
+    """Semantic search over Philippine Supreme Court decisions via juris.ph MCP."""
+    query = (query or "").strip()
+    if not query:
+        return {"success": False, "error": "query is required"}
 
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def search_legal(query: str, page: int = 1, limit: int = 5, content_types: list = None) -> dict:
-    """Search for Philippine law content (cases, statutes, SC E-Library documents)."""
-    offset = (page - 1) * limit
-    content_types_str = ",".join(sorted(content_types)) if content_types else "all"
-    cache_key = hashlib.md5(f"legal:{query}:{page}:{limit}:{content_types_str}".encode()).hexdigest()
+    limit = max(1, min(int(limit or 5), 20))
+    cache_key = hashlib.md5(
+        f"juris:{query}:{limit}:{year}:{case_type}".encode()
+    ).hexdigest()
     if cache_key in _search_cache:
         cached = _search_cache[cache_key]
         if time.time() - cached["timestamp"] < CACHE_TTL_SECONDS:
-            cached["result"]["cached"] = True
-            _logger.info("search_legal cache HIT query=%r", query[:80])
-            return cached["result"]
+            out = cached["result"].copy()
+            out["cached"] = True
+            return out
         del _search_cache[cache_key]
 
+    args = {"query": query, "limit": limit}
+    if year is not None:
+        args["year"] = int(year)
+    if case_type:
+        args["case_type"] = str(case_type)
+
     try:
-        from legal_rag.router import legal_search as legal_rag_search
-
-        t0 = time.perf_counter()
-        # Pass the full list so retrieval can use ANY() for multi-type filtering.
-        # A single-element list falls back to an equality filter; None = unfiltered.
-        category = content_types if content_types else None
-        # Always fetch full text — case law holdings are as important as statute text.
-        rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), category=category, include_full_text=True)
-        # If category filter returns no results, retry without it. This means the
-        # requested content_types had no match — results below are NOT a verified
-        # category match, just whatever ranked highest corpus-wide. Flag this so the
-        # prompt can tell the model these results are ungrounded for this query.
-        category_filter_missed = False
-        if category and (not rag_payload or not rag_payload.get("results")):
-            _logger.info("search_legal category=%r returned 0 results, retrying unfiltered", category)
-            rag_payload = legal_rag_search(query=query.strip(), limit=max(limit * page, limit), include_full_text=True)
-            category_filter_missed = True
-        _logger.info("search_legal MISS query=%r total=%.0fms", query[:80], (time.perf_counter() - t0) * 1000)
-        rag_results = rag_payload.get("results", []) if isinstance(rag_payload, dict) else []
-
-        MAX_TEXT_CHARS = 6000
-        mapped = []
-        for row in rag_results:
-            full_text = row.get("full_text") or ""
-            snippet = row.get("snippet") or ""
-            summary = row.get("summary") or ""
-            # Prefer the most relevant chunk (snippet from best-scoring vector match).
-            # For large documents, center an 6000-char window around the snippet's
-            # position in full_text so the LLM sees surrounding context.
-            if full_text and snippet and len(full_text) > MAX_TEXT_CHARS:
-                pos = full_text.find(snippet[:100])
-                if pos >= 0:
-                    start = max(0, pos - 1000)
-                    text = full_text[start:start + MAX_TEXT_CHARS]
-                else:
-                    text = full_text[:MAX_TEXT_CHARS]
-            elif full_text:
-                text = full_text[:MAX_TEXT_CHARS]
-            else:
-                text = summary or snippet
-            mapped.append({
-                "id": str(row.get("id") or ""),
-                "item_id": str(row.get("id") or ""),
-                "score": float(row.get("final_score", 0.0) or 0.0),
-                "type": row.get("category", "legal_document"),
-                "title": row.get("title"),
-                "url": row.get("source_url"),
-                "text": text,
-                "snippet": snippet,
-                "metadata": {
-                    "category": row.get("category"),
-                    "bucket_slug": row.get("bucket_slug"),
-                    "year": row.get("year"),
-                    "source_url": row.get("source_url"),
-                    "s3_json_path": row.get("s3_json_path"),
-                },
-            })
-
-        paged = mapped[offset: offset + limit]
+        payload = _juris_call("search_jurisprudence", args)
+        results = _normalize_search_results(payload.get("results") or [], "jurisprudence")
         result = {
             "success": True,
             "query": query,
-            "page": page,
             "limit": limit,
-            "total_results": len(mapped),
-            "results": paged,
-            "search_type": "hybrid_rag",
+            "total_results": len(results),
+            "results": results,
+            "note": payload.get("note"),
+            "search_type": "juris_mcp",
             "cached": False,
-            "category_filter_missed": category_filter_missed,
         }
-        if category_filter_missed:
-            result["warning"] = (
-                "The requested content_types had no match for this query. These results are "
-                "an UNFILTERED fallback across the whole corpus, not a verified category match — "
-                "do not cite them as the controlling provision. Follow the abstention rule instead."
-            )
         _search_cache[cache_key] = {"timestamp": time.time(), "result": result.copy()}
         return result
     except Exception as e:
-        return {"success": False, "error": str(e), "message": f"Legal search failed: {str(e)}"}
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"Jurisprudence search failed: {e}",
+        }
 
 
-def summarize_legal_case(case_identifier: str, summary_type: str = "brief") -> dict:
-    """Generate a structured summary of a Philippine legal case."""
-    from openai import OpenAI
+def search_republic_acts(query: str = None, limit: int = 5, year: int = None) -> dict:
+    """Semantic search over Philippine Republic Acts via juris.ph MCP."""
+    query = (query or "").strip()
+    if not query:
+        return {"success": False, "error": "query is required"}
 
-    search_result = search_legal(case_identifier, page=1, limit=1, content_types=["case"])
-    if not search_result.get("success"):
-        return {"success": False, "error": search_result.get("error", "Search failed")}
+    limit = max(1, min(int(limit or 5), 20))
+    cache_key = hashlib.md5(f"ra:{query}:{limit}:{year}".encode()).hexdigest()
+    if cache_key in _search_cache:
+        cached = _search_cache[cache_key]
+        if time.time() - cached["timestamp"] < CACHE_TTL_SECONDS:
+            out = cached["result"].copy()
+            out["cached"] = True
+            return out
+        del _search_cache[cache_key]
 
-    cases = search_result.get("results", [])
-    if not cases:
-        search_result = search_legal(case_identifier, page=1, limit=1)
-        all_docs = search_result.get("results", [])
-        if not all_docs:
-            return {"success": False, "error": f"No legal documents found matching '{case_identifier}'"}
-        cases = [all_docs[0]]
-
-    case = cases[0]
-
-    prompts = {
-        "brief": "Provide a concise 2-3 paragraph summary covering: key facts, main legal issue(s), and the Supreme Court's ruling.",
-        "detailed": (
-            "Provide a structured legal summary with sections: CASE INFORMATION, FACTS, ISSUES, RULING, DOCTRINE, DISPOSITIVE PORTION."
-        ),
-        "legal-analysis": (
-            "Provide a comprehensive legal analysis with: CASE INFORMATION, PROCEDURAL HISTORY, STATEMENT OF FACTS, "
-            "ISSUES PRESENTED, RULING AND RATIO DECIDENDI, OBITER DICTA, DOCTRINAL SIGNIFICANCE, RELATED CASES, PRACTICAL APPLICATION."
-        ),
-    }
-    if summary_type not in prompts:
-        summary_type = "brief"
-
-    item_id = case.get("item_id")
-    case_text = case.get("text", "")
-    if item_id:
-        full_result = _fetch_full_case_content(int(item_id))
-        if full_result.get("success"):
-            full_doc = full_result["document"]
-            case_text = full_doc.get("content") or case_text
-            case.update(full_doc)
-
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    case_content = (
-        f"Case Title: {case.get('title', 'Unknown')}\n"
-        f"GR Number: {case.get('gr_number', case.get('case_number', 'N/A'))}\n"
-        f"Year: {case.get('year', 'N/A')}\n"
-        f"URL: {case.get('url') or case.get('source_url', '')}\n\n"
-        f"Full Content:\n{case_text}"
-    )
+    args = {"query": query, "limit": limit}
+    if year is not None:
+        args["year"] = int(year)
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a Philippine legal research assistant specializing in Supreme Court jurisprudence.",
-                },
-                {"role": "user", "content": f"{prompts[summary_type]}\n\n{case_content}"},
-            ],
-            temperature=0.3,
-        )
+        payload = _juris_call("search_republic_acts", args)
+        results = _normalize_search_results(payload.get("results") or [], "republic_act")
+        result = {
+            "success": True,
+            "query": query,
+            "limit": limit,
+            "total_results": len(results),
+            "results": results,
+            "note": payload.get("note"),
+            "search_type": "juris_mcp",
+            "cached": False,
+        }
+        _search_cache[cache_key] = {"timestamp": time.time(), "result": result.copy()}
+        return result
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"Republic Act search failed: {e}",
+        }
+
+
+def get_case(
+    id: str = None,
+    case_number: str = None,
+    include_full_text: bool = False,
+) -> dict:
+    """Fetch one Supreme Court decision by juris.ph id or case number (e.g. G.R. No. 254972)."""
+    args = {"include_full_text": bool(include_full_text)}
+    if id:
+        args["id"] = str(id).strip()
+    if case_number:
+        args["case_number"] = str(case_number).strip()
+    if not args.get("id") and not args.get("case_number"):
+        return {"success": False, "error": "Provide id or case_number"}
+
+    try:
+        payload = _juris_call("get_case", args)
+        if not payload:
+            return {"success": False, "error": "Case not found"}
+        url = payload.get("url") or payload.get("page_url") or ""
+        title = payload.get("case_title") or payload.get("title") or ""
         return {
             "success": True,
-            "case_title": case.get("title", "Unknown"),
-            "gr_number": case.get("gr_number", ""),
-            "year": case.get("year", ""),
-            "url": case.get("url") or case.get("source_url", ""),
-            "summary_type": summary_type,
-            "summary": response.choices[0].message.content,
-            "disclaimer": "This summary is generated by AI for informational purposes. Always verify with the original case document.",
+            "type": "jurisprudence",
+            "id": str(payload.get("id") or args.get("id") or ""),
+            "item_id": str(payload.get("id") or args.get("id") or ""),
+            "title": title,
+            "url": url,
+            "case_number": payload.get("case_number") or args.get("case_number") or "",
+            "year": payload.get("year"),
+            "pdf_url": payload.get("pdf_url") or payload.get("source_pdf") or "",
+            "document": payload,
+            "include_full_text": bool(include_full_text),
         }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e), "message": f"get_case failed: {e}"}
+
+
+def get_republic_act(
+    id: str = None,
+    ra_number: str = None,
+    include_full_text: bool = False,
+) -> dict:
+    """Fetch one Republic Act by juris.ph id or RA number (e.g. RA 11313)."""
+    args = {"include_full_text": bool(include_full_text)}
+    if id:
+        args["id"] = str(id).strip()
+    if ra_number:
+        args["ra_number"] = str(ra_number).strip()
+    if not args.get("id") and not args.get("ra_number"):
+        return {"success": False, "error": "Provide id or ra_number"}
+
+    try:
+        payload = _juris_call("get_republic_act", args)
+        if not payload:
+            return {"success": False, "error": "Republic Act not found"}
+        url = payload.get("url") or payload.get("page_url") or ""
+        title = payload.get("title") or payload.get("short_title") or payload.get("ra_number") or ""
+        return {
+            "success": True,
+            "type": "republic_act",
+            "id": str(payload.get("id") or args.get("id") or ""),
+            "item_id": str(payload.get("id") or args.get("id") or ""),
+            "title": title,
+            "url": url,
+            "ra_number": payload.get("ra_number") or args.get("ra_number") or "",
+            "year": payload.get("year"),
+            "pdf_url": payload.get("pdf_url") or payload.get("source_pdf") or "",
+            "document": payload,
+            "include_full_text": bool(include_full_text),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"get_republic_act failed: {e}",
+        }
 
 
 def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict:
     """Provide legal information and recommendations for a given legal issue."""
     from openai import OpenAI
 
-    search_result = search_legal(legal_issue, limit=3)
     relevant_materials = []
-    if search_result.get("success"):
-        for doc in search_result.get("results", [])[:3]:
-            relevant_materials.append(f"{doc.get('type', 'Document')}: {doc.get('title', '')}")
+    for search_fn in (search_jurisprudence, search_republic_acts):
+        search_result = search_fn(legal_issue, limit=2)
+        if search_result.get("success"):
+            for doc in search_result.get("results", [])[:2]:
+                relevant_materials.append(
+                    f"{doc.get('type', 'Document')}: {doc.get('title', '')} ({doc.get('url', '')})"
+                )
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     context_section = f"\n\nUser's Situation: {user_context}" if user_context else ""

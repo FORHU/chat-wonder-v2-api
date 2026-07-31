@@ -115,7 +115,12 @@ class LegalAnswerRegressionTests(unittest.TestCase):
         )
         lowered = answer.lower()
         self.assertNotIn("you cannot file", lowered)
-        self.assertIn("civil action", lowered)
+        # Phrasing varies run-to-run ("civil action" vs "civil damages claim");
+        # what matters is that a parallel civil remedy isn't omitted entirely.
+        self.assertTrue(
+            "civil action" in lowered or "civil damages" in lowered or "civil claim" in lowered,
+            "Answer should mention a parallel civil remedy in some form.",
+        )
         # NOTE: not asserting the exact "Article 33" citation -- like the
         # foreign-heir case above, that depends on the model retrieving a
         # source on point (retrieval-breadth follow-up, out of scope here).

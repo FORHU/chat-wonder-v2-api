@@ -2,30 +2,26 @@
   {
     "type": "function",
     "function": {
-      "name": "search_legal",
-      "description": "Search for Philippine law content including Supreme Court cases, statutes (Republic Acts, Executive Orders), and SC E-Library documents. Call this when user asks about legal matters, laws, cases, jurisprudence, or Philippine legislation.",
+      "name": "search_jurisprudence",
+      "description": "Semantic search over Philippine Supreme Court decisions via juris.ph. Use for case law, doctrines, holdings, and G.R. number discovery. Then call get_case before stating a holding.",
       "parameters": {
         "type": "object",
         "properties": {
           "query": {
             "type": "string",
-            "description": "Search query for legal content, e.g. 'murder case', 'Republic Act 10175', 'cybercrime law', 'estafa'"
-          },
-          "page": {
-            "type": "integer",
-            "description": "Page number for pagination (default: 1)"
+            "description": "Natural-language legal question, facts, or doctrine to search"
           },
           "limit": {
             "type": "integer",
-            "description": "Number of results per page (default: 5)"
+            "description": "Max results (1-20, default 5)"
           },
-          "content_types": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "enum": ["law", "jurisprudence", "issuance"]
-            },
-            "description": "Filter by content type. Use 'law' for statutes, codes, and enacted laws (Republic Acts, Executive Orders, Civil Code, etc.). Use 'jurisprudence' for Supreme Court decisions and case law. Use 'issuance' for administrative orders and agency circulars. Omit to search all types. Pass multiple to cover both statutes and cases, e.g. [\"law\", \"jurisprudence\"]."
+          "year": {
+            "type": "integer",
+            "description": "Optional: only decisions promulgated in this year"
+          },
+          "case_type": {
+            "type": "string",
+            "description": "Optional filter, e.g. Criminal, Civil, Administrative, Labor"
           }
         },
         "required": [
@@ -37,28 +33,75 @@
   {
     "type": "function",
     "function": {
-      "name": "summarize_legal_case",
-      "description": "Summarize a Philippine legal case by GR number, case title, or search query. Use when user asks to summarize, explain, or understand a specific case.",
+      "name": "search_republic_acts",
+      "description": "Semantic search over Philippine Republic Acts via juris.ph. Use for statutes and policy areas. Then call get_republic_act before stating what an RA requires.",
       "parameters": {
         "type": "object",
         "properties": {
-          "case_identifier": {
+          "query": {
             "type": "string",
-            "description": "GR number, case title, or search query to find the case"
+            "description": "Natural-language subject matter or policy area"
           },
-          "summary_type": {
-            "type": "string",
-            "enum": [
-              "brief",
-              "detailed",
-              "legal-analysis"
-            ],
-            "description": "Type of summary: brief (2-3 paragraphs), detailed (full breakdown), legal-analysis (includes ratio decidendi and obiter dicta)"
+          "limit": {
+            "type": "integer",
+            "description": "Max results (1-20, default 5)"
+          },
+          "year": {
+            "type": "integer",
+            "description": "Optional: only acts enacted in this year"
           }
         },
         "required": [
-          "case_identifier"
+          "query"
         ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_case",
+      "description": "Fetch the structured record of one Supreme Court decision by juris.ph id or case number (e.g. G.R. No. 254972). Required before stating a holding. Set include_full_text only when quoting exact language or the user asks for the full decision.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Document id from a search_jurisprudence result"
+          },
+          "case_number": {
+            "type": "string",
+            "description": "Official case number, e.g. G.R. No. 254972"
+          },
+          "include_full_text": {
+            "type": "boolean",
+            "description": "Also return the complete decision text (long). Default false."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_republic_act",
+      "description": "Fetch the structured record of one Republic Act by juris.ph id or RA number (e.g. RA 11313). Required before stating what the act requires. Set include_full_text only when quoting exact language or the user asks for the full act.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Document id from a search_republic_acts result"
+          },
+          "ra_number": {
+            "type": "string",
+            "description": "RA number, e.g. RA 11313 or 11313"
+          },
+          "include_full_text": {
+            "type": "boolean",
+            "description": "Also return the complete act text (long). Default false."
+          }
+        }
       }
     }
   },
@@ -351,7 +394,10 @@
           },
           "gender": {
             "type": "string",
-            "enum": ["MALE", "FEMALE"],
+            "enum": [
+              "MALE",
+              "FEMALE"
+            ],
             "description": "User's gender for filtering outfits. Required — ask the user if not known."
           },
           "weather_json": {
@@ -359,7 +405,10 @@
             "description": "Pass the [FRONTEND_WEATHER:{...}] JSON string exactly as received. Used to filter out weather-inappropriate outfits (e.g. heavy jackets when it's hot). Optional."
           }
         },
-        "required": ["category", "gender"]
+        "required": [
+          "category",
+          "gender"
+        ]
       }
     }
   },
@@ -470,11 +519,19 @@
         "properties": {
           "skin_type": {
             "type": "string",
-            "enum": ["DRY", "OILY", "COMBINATION", "NORMAL", "SENSITIVE"],
+            "enum": [
+              "DRY",
+              "OILY",
+              "COMBINATION",
+              "NORMAL",
+              "SENSITIVE"
+            ],
             "description": "User's skin type — pass the value exactly as received. Valid values: DRY, OILY, COMBINATION, NORMAL, SENSITIVE."
           }
         },
-        "required": ["skin_type"]
+        "required": [
+          "skin_type"
+        ]
       }
     }
   },
