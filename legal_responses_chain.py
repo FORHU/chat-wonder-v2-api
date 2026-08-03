@@ -170,6 +170,7 @@ def run_function_chain_responses(
     model: str = None,
     reasoning_effort: str = None,
     temperature: float = None,
+    auto_approval: bool = False,
 ):
     """Legal-persona equivalent of the_server.run_function_chain(), on /v1/responses
     instead of /v1/chat/completions, so real reasoning_effort can be combined
@@ -271,7 +272,7 @@ def run_function_chain_responses(
             break
 
         # HITL gate
-        if not _context.auto_approval:
+        if not (_context.manual_auto_approval or auto_approval):
             return {"__hitl__": True, "function_call": function_call, "messages": input_items, "tools": tools}
 
         try:
@@ -384,6 +385,7 @@ async def streaming_run_function_chain_responses(
     model: str = None,
     reasoning_effort: str = None,
     temperature: float = None,
+    auto_approval: bool = False,
 ):
     """Streaming (async generator) counterpart of run_function_chain_responses,
     structurally mirroring the_server.streaming_run_function_chain -- same
@@ -526,7 +528,7 @@ async def streaming_run_function_chain_responses(
             break
 
         # HITL gate: emit pending_approval event and stop streaming
-        if not _context.auto_approval:
+        if not (_context.manual_auto_approval or auto_approval):
             yield f"__HITL__{json.dumps({'function_call': function_call, 'messages': input_items, 'tools': [t['name'] for t in (available_manifest or [])]})}"
             return
 
