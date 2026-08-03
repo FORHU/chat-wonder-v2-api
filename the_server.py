@@ -41,6 +41,7 @@ from legal_fact_boost import (
     append_missing_prefetched_mentions,
     prepare_legal_turn,
 )
+import legal_responses_chain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -1407,22 +1408,41 @@ def _broadcast_turn_confidence(state, session_id):
     broadcast_trace("cognition", f"Turn complete — RAG: {rag_count} source(s), tools: {tool_count} call(s)", session_id, summary=summary)
 
 
+def _legal_use_responses_api() -> bool:
+    """Rollback lever independent of reasoning effort: if the Responses API
+    migration itself misbehaves, flip this to 'false' to fall back to the
+    known-good Chat Completions path (which forces reasoning_effort='none').
+    """
+    return os.getenv("LEGAL_USE_RESPONSES_API", "true").strip().lower() not in ("false", "0", "no")
+
+
 def _legal_model_override(persona: str):
-    """Legal answers use a stronger model + low temperature, not the default persona config.
+    """Legal answers use a stronger model, not the default persona config.
 
     gpt-5.6-terra rejects function tools on /v1/chat/completions unless
     reasoning_effort='none' (confirmed live: "Function tools with reasoning_effort
-    are not supported for gpt-5.6-terra in /v1/chat/completions"). Since the legal
-    persona is fundamentally tool-driven (search_jurisprudence/get_case/etc.), we
-    can't use a non-'none' reasoning_effort here without migrating to /v1/responses
-    (tracked separately). temperature is still controllable with reasoning_effort='none'.
+    are not supported for gpt-5.6-terra in /v1/chat/completions. To use function
+    tools, use /v1/responses or set reasoning_effort to 'none'."). Since the legal
+    persona is fundamentally tool-driven (search_jurisprudence/get_case/etc.), real
+    reasoning_effort requires routing through legal_responses_chain's /v1/responses
+    loop instead (see _legal_use_responses_api / reason_loop / streaming_reason_loop).
+
+    temperature is NOT included here: confirmed live that gpt-5.6-terra rejects it
+    outright on /v1/responses ("Unsupported parameter: 'temperature' is not
+    supported with this model."). LEGAL_TEMPERATURE only applies on the Chat
+    Completions fallback path (LEGAL_USE_RESPONSES_API=false), read directly there.
     """
     if persona != "legal":
         return None, None, None, None
+    use_responses = _legal_use_responses_api()
+    reasoning_effort = os.getenv("LEGAL_REASONING_EFFORT", "high" if use_responses else "none")
+    # temperature is meaningless/rejected once real reasoning_effort is in play
+    # on /v1/responses; only the Chat Completions fallback path uses it.
+    temperature = None if (use_responses and reasoning_effort != "none") else float(os.getenv("LEGAL_TEMPERATURE", "0.2"))
     return (
         os.getenv("LEGAL_CHAT_MODEL", "gpt-5.6-terra"),
-        os.getenv("LEGAL_REASONING_EFFORT", "none"),
-        float(os.getenv("LEGAL_TEMPERATURE", "0.2")),
+        reasoning_effort,
+        temperature,
         int(os.getenv("LEGAL_MAX_CHAINS", "12")),
     )
 
@@ -1433,7 +1453,10 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
-    result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
+    if persona == "legal" and _legal_use_responses_api():
+        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
+    else:
+        result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
     _broadcast_turn_confidence(state, session_id)
     return result
 
@@ -1698,7 +1721,11 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
-    async for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs):
+    if persona == "legal" and _legal_use_responses_api():
+        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
+    else:
+        chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
+    async for chunk in chain:
         yield chunk
     _broadcast_turn_confidence(state, session_id)
     await asyncio.sleep(0)
@@ -2221,7 +2248,10 @@ def approve(request: ApproveRequest):
         _resume_persona = "legal" if (addendum_override and "LEGAL ASSISTANT MODE" in addendum_override) else "auto"
         _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona)
         _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
-        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
+        if _resume_persona == "legal" and _legal_use_responses_api():
+            cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
+        else:
+            cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
     finally:
         _context.auto_approval = False
 
@@ -2355,7 +2385,11 @@ async def chat_stream(websocket: WebSocket):
                 _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
                 try:
                     _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
-                    async for chunk in streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs):
+                    if _legal_mode and _legal_use_responses_api():
+                        _resume_chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
+                    else:
+                        _resume_chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
+                    async for chunk in _resume_chain:
                         if chunk.startswith("__HITL__"):
                             hitl_data = json.loads(chunk[8:])
                             new_fc = hitl_data["function_call"]
