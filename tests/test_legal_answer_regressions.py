@@ -41,18 +41,14 @@ def _ask_legal(question: str) -> str:
     if prefetch:
         state.last_search_legal_results = list(state.last_search_legal_results or []) + prefetch
 
-    was_auto = srv._context.auto_approval
-    srv._context.auto_approval = True
-    try:
-        result = srv.reason_loop(
-            state,
-            user_input,
-            tools=filtered_tools,
-            addendum_override=addendum_override,
-            persona=persona,
-        )
-    finally:
-        srv._context.auto_approval = was_auto
+    # reason_loop() derives auto-approval from persona="legal" internally — no manual toggle needed.
+    result = srv.reason_loop(
+        state,
+        user_input,
+        tools=filtered_tools,
+        addendum_override=addendum_override,
+        persona=persona,
+    )
 
     final_text = (result or "").strip()
     legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)

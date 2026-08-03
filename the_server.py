@@ -58,7 +58,7 @@ class ApiContext:
     user_functions: dict = {}
     sessions: dict = {}
     db_pool = None
-    auto_approval: bool = False  # HITL: when True all tool calls execute without asking
+    manual_auto_approval: bool = False  # persistent dev/Swagger toggle — set via /set-hitl
     xai_reason_visible: bool = False  # XAI: when True, REASON line is passed through to clients
 
 _context = ApiContext()
@@ -979,7 +979,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
 # Reason loop (non-streaming, collects full response)
 # ---------------------------------------------------------------------------
 
-def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None):
+def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -1076,7 +1076,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             break
 
         # HITL gate
-        if not _context.auto_approval:
+        if not (_context.manual_auto_approval or auto_approval):
             return {"__hitl__": True, "function_call": function_call, "messages": messages, "tools": tools}
 
         # Duplicate check
@@ -1453,10 +1453,14 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+    # Auto-approval is derived from this call's own persona argument — a plain local
+    # value, not shared/global state — so it can never be affected by any other
+    # concurrent request, and this request's replies can never be blocked on it.
+    _auto_approval = persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist", "tailor")
     if persona == "legal" and _legal_use_responses_api():
-        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
+        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
-        result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
+        result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     _broadcast_turn_confidence(state, session_id)
     return result
 
@@ -1488,7 +1492,7 @@ async def _astream_llm(perform_chat_fn, messages):
         yield item
 
 
-async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None):
+async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -1622,7 +1626,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             break
 
         # HITL gate: emit pending_approval event and stop streaming
-        if not _context.auto_approval:
+        if not (_context.manual_auto_approval or auto_approval):
             yield f"__HITL__{json.dumps({'function_call': function_call, 'messages': messages, 'tools': [t['function']['name'] for t in (tools or [])]})}"
             return
 
@@ -1721,10 +1725,14 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+    # Auto-approval derived from this call's own persona argument — a plain local value,
+    # not shared/global state — so it can never be affected by any other concurrent
+    # request, and this request's replies can never be blocked on it.
+    _auto_approval = persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist", "tailor")
     if persona == "legal" and _legal_use_responses_api():
-        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
+        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
-        chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
+        chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     async for chunk in chain:
         yield chunk
     _broadcast_turn_confidence(state, session_id)
@@ -2094,14 +2102,10 @@ def chat(request: ChatRequest):
             "nav_result": {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
         }
 
-    # Normal path with optional HITL (legal, garment, cosmetics, maps, nav, stylist personas always auto-approve)
-    _was_auto = _context.auto_approval
-    if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist"):
-        _context.auto_approval = True
-    try:
-        result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona)
-    finally:
-        _context.auto_approval = _was_auto
+    # HITL auto-approval (legal, garment, cosmetics, maps, nav, stylist, tailor personas)
+    # is now derived inside reason_loop() from its own persona argument — a plain local
+    # value scoped to this call, not shared state — so no wrapping is needed here.
+    result = reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona)
 
     # HITL pending approval
     if isinstance(result, dict) and result.get("__hitl__"):
@@ -2240,20 +2244,17 @@ def approve(request: ApproveRequest):
             "content": "[Constraints]\nIf a complete response has been produced, TERMINATE.",
         })
 
-    # Resume the reason loop with auto_approval temporarily True for this continuation
-    _context.auto_approval = True
-    try:
-        available_manifest = [t for t in _context.fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
-        _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
-        _resume_persona = "legal" if (addendum_override and "LEGAL ASSISTANT MODE" in addendum_override) else "auto"
-        _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona)
-        _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
-        if _resume_persona == "legal" and _legal_use_responses_api():
-            cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
-        else:
-            cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
-    finally:
-        _context.auto_approval = False
+    # Resume with auto_approval=True passed directly for this one continuation — a plain
+    # call argument, not shared state, so it can't leak into or be reset by any other request.
+    available_manifest = [t for t in _context.fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
+    _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
+    _resume_persona = "legal" if (addendum_override and "LEGAL ASSISTANT MODE" in addendum_override) else "auto"
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona)
+    _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+    if _resume_persona == "legal" and _legal_use_responses_api():
+        cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
+    else:
+        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=True, **_chain_kwargs)
 
     if isinstance(cont_result, dict) and cont_result.get("__hitl__"):
         # Another tool call needs approval
@@ -2310,13 +2311,13 @@ def _normalize_hitl_decision(decision: str) -> str:
 
 @app.post("/set-hitl")
 def set_hitl(request: SetHitlRequest):
-    _context.auto_approval = request.auto_approval
-    return {"message": f"HITL auto_approval set to {request.auto_approval}", "auto_approval": _context.auto_approval}
+    _context.manual_auto_approval = request.auto_approval
+    return {"message": f"HITL auto_approval set to {request.auto_approval}", "auto_approval": _context.manual_auto_approval}
 
 
 @app.get("/hitl-status")
 def hitl_status():
-    return {"auto_approval": _context.auto_approval}
+    return {"auto_approval": _context.manual_auto_approval}
 
 
 @app.websocket("/chat-stream")
@@ -2378,7 +2379,6 @@ async def chat_stream(websocket: WebSocket):
                     })
 
                 available_manifest = [t for t in _context.all_fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
-                _context.auto_approval = True
                 full_response = ""
                 _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
                 _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto")
@@ -2386,9 +2386,9 @@ async def chat_stream(websocket: WebSocket):
                 try:
                     _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
                     if _legal_mode and _legal_use_responses_api():
-                        _resume_chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, **_chain_kwargs)
+                        _resume_chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
                     else:
-                        _resume_chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, **_chain_kwargs)
+                        _resume_chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=True, **_chain_kwargs)
                     async for chunk in _resume_chain:
                         if chunk.startswith("__HITL__"):
                             hitl_data = json.loads(chunk[8:])
@@ -2414,7 +2414,7 @@ async def chat_stream(websocket: WebSocket):
                             await websocket.send_text(chunk)
                         full_response += chunk
                 finally:
-                    _context.auto_approval = False
+                    pass
 
                 if full_response:
                     final_text = full_response.strip()
@@ -2570,10 +2570,10 @@ async def chat_stream(websocket: WebSocket):
             full_response = ""
             _ws_t_start = time.time()
             _ws_t_first_chunk = None
-            _was_auto = _context.auto_approval
+            # HITL auto-approval is derived inside reason_loop()/streaming_reason_loop()
+            # from each call's own persona argument — a plain local value, not shared
+            # state — so no wrapping is needed here.
             end_sent = False
-            if persona in ("legal", "garment", "cosmetics", "maps", "nav", "stylist", "tailor"):
-                _context.auto_approval = True
 
             # B2: nav runs sync — no streaming of raw JSON
             if persona == "nav":
@@ -2602,8 +2602,6 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text("[Error] Navigation failed.")
                     await websocket.send_text(_context.__END__)
                     await websocket.send_text("[DONE]")
-                finally:
-                    _context.auto_approval = _was_auto
                 continue
 
             try:
@@ -2713,7 +2711,6 @@ async def chat_stream(websocket: WebSocket):
                 await websocket.send_text(_context.__END__)
                 end_sent = True
             finally:
-                _context.auto_approval = _was_auto
                 if not end_sent:
                     try:
                         await websocket.send_text(_context.__END__)
