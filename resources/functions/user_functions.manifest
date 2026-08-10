@@ -107,6 +107,33 @@
   },
   {
     "type": "function",
+    "persona": "legal",
+    "function": {
+      "name": "get_case_document",
+      "description": "Fetch a case document the user has uploaded to their own case in ilovelawyer (e.g. a contract, pleading, or other case file). This is the user's own private material, NOT public jurisprudence — never cite it as a Legal Citation or treat it as precedent. Call this when the conversation references a specific case_document_id, or when the user asks about a document they've attached to their case.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "case_document_id": {
+            "type": "string",
+            "description": "The case document's id"
+          },
+          "case_document_chunk_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional — restrict to this specific set of chunk ids instead of the whole document."
+          }
+        },
+        "required": [
+          "case_document_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
     "function": {
       "name": "get_legal_recommendation",
       "description": "Get legal information and recommendations for a Philippine legal question. Use when user asks about laws, rights, penalties, or legal procedures.",

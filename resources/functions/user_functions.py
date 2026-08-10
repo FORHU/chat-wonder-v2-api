@@ -8,6 +8,7 @@ import tempfile
 import logging
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, date
 
 # Simple in-memory cache with TTL
@@ -24,6 +25,10 @@ _garments_cache: dict = {"data": None, "timestamp": 0}
 _OUTFITS_API_BASE = os.getenv("OUTFITS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/outfits")
 _OUTFITS_CACHE_TTL = 300  # 5 minutes
 _outfits_cache: dict = {"data": None, "timestamp": 0}
+
+# ilovelawyer-api — Case Document Tool
+_ILOVELAWYER_API_BASE = os.getenv("ILOVELAWYER_API_BASE", "")
+_CASE_DOCUMENT_CHAR_CAP = 8000  # per-document char budget when joining chunks into the prompt
 
 # Cosmetics API
 _COSMETICS_API_BASE = os.getenv("COSMETICS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/cosmetics")
@@ -408,6 +413,62 @@ def get_republic_act(
             "error": str(e),
             "message": f"get_republic_act failed: {e}",
         }
+
+
+def get_case_document(case_document_id: str, case_document_chunk_ids: list = None) -> dict:
+    """Fetch a user's own uploaded case document (contract, pleading, etc.) from
+    ilovelawyer-api by id. Private to the uploading user — never treat this content
+    as public jurisprudence or a Legal Citation."""
+    if not case_document_id:
+        return {"success": False, "error": "Provide case_document_id"}
+
+    url = f"{_ILOVELAWYER_API_BASE.rstrip('/')}/api/v1/case-document/{urllib.parse.quote(str(case_document_id))}"
+    api_key = os.getenv("CHAT_WONDER_API_KEY", "")
+    try:
+        data = _http_get_json(url, {"x-api-key": api_key})
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"success": False, "error": "not_found", "message": "Case document not found."}
+        return {"success": False, "error": f"http_{e.code}", "message": f"get_case_document failed: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"get_case_document failed: {e}"}
+
+    name = data.get("name") or ""
+    rag_status = data.get("ragStatus") or ""
+
+    chunks = data.get("chunks") or []
+    if case_document_chunk_ids:
+        wanted = set(case_document_chunk_ids)
+        chunks = [c for c in chunks if c.get("id") in wanted] or chunks
+
+    chunks = sorted(chunks, key=lambda c: c.get("chunkIndex", 0))
+    text = "\n\n".join(c.get("chunkText", "") for c in chunks).strip()
+
+    if not text:
+        if rag_status == "FAILED":
+            _empty_message = "Text extraction failed for this document — no content is available."
+        elif rag_status == "PENDING":
+            _empty_message = "This document is still being processed — no content is available yet."
+        else:
+            _empty_message = "No extracted content available yet — the document may still be processing."
+        return {
+            "success": True,
+            "id": case_document_id,
+            "name": name,
+            "chunks_found": 0,
+            "message": _empty_message,
+        }
+
+    if len(text) > _CASE_DOCUMENT_CHAR_CAP:
+        text = text[:_CASE_DOCUMENT_CHAR_CAP].rstrip() + "\n\n[...truncated...]"
+
+    return {
+        "success": True,
+        "id": case_document_id,
+        "name": name,
+        "text": text,
+        "chunk_count": len(chunks),
+    }
 
 
 def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict:

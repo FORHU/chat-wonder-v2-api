@@ -110,6 +110,9 @@ class ChatState:
         self.last_tailor_result: dict = {}
         self.last_outfit_ids_result: list = []
         self.last_cosmetics_ids_result: list = []
+        self.active_case_documents: list = []
+        self.case_document_cache: dict = {}
+        self.document_fetch_error: Optional[dict] = None
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
         self.openai_client = None
@@ -261,6 +264,8 @@ class ChatRequest(BaseModel):
     sets: Optional[int] = None
     fsets: Optional[int] = None
     csets: Optional[int] = None
+    case_document_id: Optional[str] = None
+    case_document_chunk_ids: Optional[List[str]] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -377,6 +382,7 @@ def process_persona(user_input: str):
             "search_republic_acts",
             "get_case",
             "get_republic_act",
+            "get_case_document",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_whitelist]
         try:
@@ -898,7 +904,16 @@ def execute_function_call(function_call: dict, session_id: str = None):
     try:
         if func_name == "navigate_app" and session_id:
             func_args["session_id"] = session_id
-        result = globals()[func_name](**func_args)
+        _cached_case_document = None
+        if func_name == "get_case_document" and session_id:
+            _cd_state = _context.sessions.get(session_id)
+            _cd_id = func_args.get("case_document_id")
+            if _cd_state is not None and _cd_id and _cd_id in _cd_state.case_document_cache:
+                _cached_case_document = _cd_state.case_document_cache[_cd_id]
+        if _cached_case_document is not None:
+            result = {"success": True, **_cached_case_document}
+        else:
+            result = globals()[func_name](**func_args)
         _LEGAL_RESULT_TOOLS = {
             "search_jurisprudence",
             "search_republic_acts",
@@ -969,6 +984,20 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_tailor_result = result
+        if func_name == "get_case_document" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                _cd_id = result.get("id") or func_args.get("case_document_id")
+                if result.get("success") and result.get("text"):
+                    entry = {"id": _cd_id, "name": result.get("name") or "", "text": result["text"], "chunk_count": result.get("chunk_count", 0)}
+                    state.case_document_cache[_cd_id] = entry
+                    active = [d for d in state.active_case_documents if d.get("id") != _cd_id]
+                    active.append(entry)
+                    if len(active) > 5:
+                        active = active[-5:]
+                    state.active_case_documents = active
+                elif not result.get("success"):
+                    state.document_fetch_error = {"case_document_id": _cd_id, "message": result.get("message") or result.get("error")}
         logging.info(f"Function {func_name} executed successfully.")
         return result
     except Exception as e:
@@ -1875,6 +1904,18 @@ def chat(request: ChatRequest):
             existing = list(_context.sessions[session_id].last_search_legal_results or [])
             existing.extend(_prefetch)
             _context.sessions[session_id].last_search_legal_results = existing
+        if request.case_document_id and session_id and session_id in _context.sessions:
+            if request.case_document_id not in _context.sessions[session_id].case_document_cache:
+                execute_function_call(
+                    {
+                        "name": "get_case_document",
+                        "arguments": json.dumps({
+                            "case_document_id": request.case_document_id,
+                            "case_document_chunk_ids": request.case_document_chunk_ids,
+                        }),
+                    },
+                    session_id=session_id,
+                )
 
     if persona == "garment" and request.weather:
         try:
@@ -1965,6 +2006,18 @@ def chat(request: ChatRequest):
     state.last_used = time.time()
     if request.user_id:
         state.user_id = request.user_id
+
+    if persona == "legal" and state.active_case_documents:
+        _doc_blocks = "\n".join(
+            f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
+            for d in state.active_case_documents
+        )
+        _case_doc_injection = (
+            "\n\n[CASE DOCUMENTS — files the user uploaded to their own case. "
+            "Reference them directly when relevant; do NOT treat them as public "
+            "legal precedent or jurisprudence.]\n" + _doc_blocks
+        )
+        addendum_override = (addendum_override or "You are a helpful assistant.") + _case_doc_injection
 
     if not _context.openai_api_key:
         raise HTTPException(status_code=400, detail="API key is required.")
@@ -2459,6 +2512,17 @@ async def chat_stream(websocket: WebSocket):
                     existing = list(_context.sessions[session_id].last_search_legal_results or [])
                     existing.extend(_prefetch)
                     _context.sessions[session_id].last_search_legal_results = existing
+                if request.case_document_id and request.case_document_id not in state.case_document_cache:
+                    execute_function_call(
+                        {
+                            "name": "get_case_document",
+                            "arguments": json.dumps({
+                                "case_document_id": request.case_document_id,
+                                "case_document_chunk_ids": request.case_document_chunk_ids,
+                            }),
+                        },
+                        session_id=session_id,
+                    )
 
             # Inject frontend-provided weather for garment persona
             if persona == "garment" and data.get("weather"):
@@ -2561,6 +2625,18 @@ async def chat_stream(websocket: WebSocket):
                     + request.document_context
                 )
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
+
+            if persona == "legal" and state.active_case_documents:
+                _doc_blocks = "\n".join(
+                    f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
+                    for d in state.active_case_documents
+                )
+                _case_doc_injection = (
+                    "\n\n[CASE DOCUMENTS — files the user uploaded to their own case. "
+                    "Reference them directly when relevant; do NOT treat them as public "
+                    "legal precedent or jurisprudence.]\n" + _doc_blocks
+                )
+                addendum_override = (addendum_override or "You are a helpful assistant.") + _case_doc_injection
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
             _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
