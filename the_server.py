@@ -890,6 +890,35 @@ def clean_function_definitions(manifest_list: list) -> list:
             cleaned.append({k: v for k, v in item["function"].items() if k != "strict"})
     return cleaned
 
+def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None):
+    """Replace this turn's active case docs.
+
+    Sessions are reused across consultations/cases on the client. Without a full replace,
+    old documents stay in active_case_documents and keep being injected into later turns.
+    Passing an empty list clears them (new case with no READY docs yet).
+    Passing None means the caller did not send the field — leave session state alone.
+    """
+    if case_document_ids is None:
+        return
+    state = _context.sessions.get(session_id)
+    if state is None:
+        return
+    state.active_case_documents = []
+    for _cid in case_document_ids:
+        if _cid in state.case_document_cache:
+            state.active_case_documents.append(state.case_document_cache[_cid])
+            continue
+        execute_function_call(
+            {
+                "name": "get_case_document",
+                "arguments": json.dumps({
+                    "case_document_id": _cid,
+                    "case_document_chunk_ids": case_document_chunk_ids,
+                }),
+            },
+            session_id=session_id,
+        )
+
 def execute_function_call(function_call: dict, session_id: str = None):
     func_name = function_call.get("name")
     try:
@@ -1904,19 +1933,12 @@ def chat(request: ChatRequest):
             existing = list(_context.sessions[session_id].last_search_legal_results or [])
             existing.extend(_prefetch)
             _context.sessions[session_id].last_search_legal_results = existing
-        if request.case_document_ids and session_id and session_id in _context.sessions:
-            for _cid in request.case_document_ids:
-                if _cid not in _context.sessions[session_id].case_document_cache:
-                    execute_function_call(
-                        {
-                            "name": "get_case_document",
-                            "arguments": json.dumps({
-                                "case_document_id": _cid,
-                                "case_document_chunk_ids": request.case_document_chunk_ids,
-                            }),
-                        },
-                        session_id=session_id,
-                    )
+        if session_id and session_id in _context.sessions:
+            sync_active_case_documents(
+                session_id,
+                request.case_document_ids,
+                request.case_document_chunk_ids,
+            )
 
     if persona == "garment" and request.weather:
         try:
@@ -2513,19 +2535,11 @@ async def chat_stream(websocket: WebSocket):
                     existing = list(_context.sessions[session_id].last_search_legal_results or [])
                     existing.extend(_prefetch)
                     _context.sessions[session_id].last_search_legal_results = existing
-                if request.case_document_ids:
-                    for _cid in request.case_document_ids:
-                        if _cid not in state.case_document_cache:
-                            execute_function_call(
-                                {
-                                    "name": "get_case_document",
-                                    "arguments": json.dumps({
-                                        "case_document_id": _cid,
-                                        "case_document_chunk_ids": request.case_document_chunk_ids,
-                                    }),
-                                },
-                                session_id=session_id,
-                            )
+                sync_active_case_documents(
+                    session_id,
+                    request.case_document_ids,
+                    request.case_document_chunk_ids,
+                )
 
             # Inject frontend-provided weather for garment persona
             if persona == "garment" and data.get("weather"):
