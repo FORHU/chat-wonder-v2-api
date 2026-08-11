@@ -436,10 +436,11 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
     name = data.get("name") or ""
     rag_status = data.get("ragStatus") or ""
 
-    chunks = data.get("chunks") or []
+    raw_chunks = data.get("chunks") or []
+    chunks = raw_chunks
     if case_document_chunk_ids:
         wanted = set(case_document_chunk_ids)
-        chunks = [c for c in chunks if c.get("id") in wanted] or chunks
+        chunks = [c for c in raw_chunks if c.get("id") in wanted]
 
     chunks = sorted(chunks, key=lambda c: c.get("chunkIndex", 0))
     text = "\n\n".join(c.get("chunkText", "") for c in chunks).strip()
@@ -449,6 +450,11 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
             _empty_message = "Text extraction failed for this document — no content is available."
         elif rag_status == "PENDING":
             _empty_message = "This document is still being processed — no content is available yet."
+        elif raw_chunks and case_document_chunk_ids:
+            # Document has real content, but none of its chunks made the relevance-filtered
+            # id list — happens routinely with multiple active documents where only some are
+            # relevant to the current question. Distinct from FAILED/PENDING, not an error.
+            _empty_message = "No chunks relevant to the current question were found in this document."
         else:
             _empty_message = "No extracted content available yet — the document may still be processing."
         return {

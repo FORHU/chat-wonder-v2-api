@@ -264,7 +264,7 @@ class ChatRequest(BaseModel):
     sets: Optional[int] = None
     fsets: Optional[int] = None
     csets: Optional[int] = None
-    case_document_id: Optional[str] = None
+    case_document_ids: Optional[List[str]] = None
     case_document_chunk_ids: Optional[List[str]] = None
 
 class ApproveRequest(BaseModel):
@@ -993,8 +993,8 @@ def execute_function_call(function_call: dict, session_id: str = None):
                     state.case_document_cache[_cd_id] = entry
                     active = [d for d in state.active_case_documents if d.get("id") != _cd_id]
                     active.append(entry)
-                    if len(active) > 5:
-                        active = active[-5:]
+                    if len(active) > 10:
+                        active = active[-10:]
                     state.active_case_documents = active
                 elif not result.get("success"):
                     state.document_fetch_error = {"case_document_id": _cd_id, "message": result.get("message") or result.get("error")}
@@ -1904,18 +1904,19 @@ def chat(request: ChatRequest):
             existing = list(_context.sessions[session_id].last_search_legal_results or [])
             existing.extend(_prefetch)
             _context.sessions[session_id].last_search_legal_results = existing
-        if request.case_document_id and session_id and session_id in _context.sessions:
-            if request.case_document_id not in _context.sessions[session_id].case_document_cache:
-                execute_function_call(
-                    {
-                        "name": "get_case_document",
-                        "arguments": json.dumps({
-                            "case_document_id": request.case_document_id,
-                            "case_document_chunk_ids": request.case_document_chunk_ids,
-                        }),
-                    },
-                    session_id=session_id,
-                )
+        if request.case_document_ids and session_id and session_id in _context.sessions:
+            for _cid in request.case_document_ids:
+                if _cid not in _context.sessions[session_id].case_document_cache:
+                    execute_function_call(
+                        {
+                            "name": "get_case_document",
+                            "arguments": json.dumps({
+                                "case_document_id": _cid,
+                                "case_document_chunk_ids": request.case_document_chunk_ids,
+                            }),
+                        },
+                        session_id=session_id,
+                    )
 
     if persona == "garment" and request.weather:
         try:
@@ -2512,17 +2513,19 @@ async def chat_stream(websocket: WebSocket):
                     existing = list(_context.sessions[session_id].last_search_legal_results or [])
                     existing.extend(_prefetch)
                     _context.sessions[session_id].last_search_legal_results = existing
-                if request.case_document_id and request.case_document_id not in state.case_document_cache:
-                    execute_function_call(
-                        {
-                            "name": "get_case_document",
-                            "arguments": json.dumps({
-                                "case_document_id": request.case_document_id,
-                                "case_document_chunk_ids": request.case_document_chunk_ids,
-                            }),
-                        },
-                        session_id=session_id,
-                    )
+                if request.case_document_ids:
+                    for _cid in request.case_document_ids:
+                        if _cid not in state.case_document_cache:
+                            execute_function_call(
+                                {
+                                    "name": "get_case_document",
+                                    "arguments": json.dumps({
+                                        "case_document_id": _cid,
+                                        "case_document_chunk_ids": request.case_document_chunk_ids,
+                                    }),
+                                },
+                                session_id=session_id,
+                            )
 
             # Inject frontend-provided weather for garment persona
             if persona == "garment" and data.get("weather"):
