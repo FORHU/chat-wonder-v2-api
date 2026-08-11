@@ -48,7 +48,7 @@ jobs:
                   OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                   COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                   GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
-                  ILOVELAWYER_API_BASE=${{ vars.ILOVELAWYER_API_BASE }}
+                  ILOVELAWYER_API_BASE=${{ secrets.ILOVELAWYER_API_BASE }}
                   CHAT_WONDER_API_KEY=${{ secrets.CHAT_WONDER_API_KEY }}
                   FUNCEOF
 
@@ -123,7 +123,7 @@ jobs:
                       OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                       COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                       GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
-                      ILOVELAWYER_API_BASE=${{ vars.ILOVELAWYER_API_BASE }}
+                      ILOVELAWYER_API_BASE=${{ secrets.ILOVELAWYER_API_BASE }}
                       CHAT_WONDER_API_KEY=${{ secrets.CHAT_WONDER_API_KEY }}
                       FUNCEOF
 
