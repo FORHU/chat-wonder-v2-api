@@ -29,7 +29,9 @@ _outfits_cache: dict = {"data": None, "timestamp": 0}
 # ilovelawyer-api — Case Document Tool
 # Base URL / API key are read at call time (not import time) so values from
 # user_functions.env loaded by the_server.py via dotenv are always picked up.
-_CASE_DOCUMENT_CHAR_CAP = 8000  # per-document char budget when joining chunks into the prompt
+# Bundled pleadings (many exhibits in one PDF) lose later pages at 8k.
+# Fact-filtered chunk lists still need room so page 30 is not cut off by the cover.
+_CASE_DOCUMENT_CHAR_CAP = 32000
 
 # Cosmetics API
 _COSMETICS_API_BASE = os.getenv("COSMETICS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/cosmetics")
