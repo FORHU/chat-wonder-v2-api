@@ -415,24 +415,10 @@ def get_republic_act(
         }
 
 
-def get_case_document(case_document_id: str, case_document_chunk_ids: list = None) -> dict:
-    """Fetch a user's own uploaded case document (contract, pleading, etc.) from
-    ilovelawyer-api by id. Private to the uploading user — never treat this content
-    as public jurisprudence or a Legal Citation."""
-    if not case_document_id:
-        return {"success": False, "error": "Provide case_document_id"}
-
-    url = f"{_ILOVELAWYER_API_BASE.rstrip('/')}/api/v1/case-document/{urllib.parse.quote(str(case_document_id))}"
-    api_key = os.getenv("CHAT_WONDER_API_KEY", "")
-    try:
-        data = _http_get_json(url, {"x-api-key": api_key})
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return {"success": False, "error": "not_found", "message": "Case document not found."}
-        return {"success": False, "error": f"http_{e.code}", "message": f"get_case_document failed: {e}"}
-    except Exception as e:
-        return {"success": False, "error": str(e), "message": f"get_case_document failed: {e}"}
-
+def _case_document_response(identifier: str, data: dict, case_document_chunk_ids: list = None) -> dict:
+    """Shared envelope-building logic for both id- and file-key-based case document lookups:
+    filter chunks to the relevance list (if any), join in order, cap/truncate, and produce the
+    same success/soft-failure/content shape either lookup path returns."""
     name = data.get("name") or ""
     rag_status = data.get("ragStatus") or ""
 
@@ -459,7 +445,7 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
             _empty_message = "No extracted content available yet — the document may still be processing."
         return {
             "success": True,
-            "id": case_document_id,
+            "id": identifier,
             "name": name,
             "chunks_found": 0,
             "message": _empty_message,
@@ -470,16 +456,63 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
 
     return {
         "success": True,
-        "id": case_document_id,
+        "id": identifier,
         "name": name,
         "text": text,
         "chunk_count": len(chunks),
     }
 
 
+def get_case_document(case_document_id: str, case_document_chunk_ids: list = None) -> dict:
+    """Fetch a user's own uploaded case document (contract, pleading, etc.) from
+    ilovelawyer-api by id. Private to the uploading user — never treat this content
+    as public jurisprudence or a Legal Citation."""
+    if not case_document_id:
+        return {"success": False, "error": "Provide case_document_id"}
+
+    url = f"{_ILOVELAWYER_API_BASE.rstrip('/')}/api/v1/case-document/{urllib.parse.quote(str(case_document_id))}"
+    api_key = os.getenv("CHAT_WONDER_API_KEY", "")
+    try:
+        data = _http_get_json(url, {"x-api-key": api_key})
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"success": False, "error": "not_found", "message": "Case document not found."}
+        return {"success": False, "error": f"http_{e.code}", "message": f"get_case_document failed: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"get_case_document failed: {e}"}
+
+    return _case_document_response(case_document_id, data, case_document_chunk_ids)
+
+
+def get_case_document_by_file(file_key: str, case_document_chunk_ids: list = None) -> dict:
+    """Fetch a user's own uploaded file (contract, pleading, etc.) from ilovelawyer-api by its
+    S3 key, for consultation-chat attachments that aren't (yet) resolved to a case_document_id
+    on the frontend. Reuses the same ingestion pipeline as get_case_document server-side —
+    ilovelawyer-api is expected to have already turned this key into a real Document row with
+    embedded chunks (see docs/plans/case-document-file-key-plan.md for the assumed contract);
+    this just looks it up by a different key. Private to the uploading user — never treat this
+    content as public jurisprudence or a Legal Citation."""
+    if not file_key:
+        return {"success": False, "error": "Provide file_key"}
+
+    url = f"{_ILOVELAWYER_API_BASE.rstrip('/')}/api/v1/case-document/by-key?key={urllib.parse.quote(str(file_key), safe='')}"
+    api_key = os.getenv("CHAT_WONDER_API_KEY", "")
+    try:
+        data = _http_get_json(url, {"x-api-key": api_key})
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"success": False, "error": "not_found", "message": "File not found or not yet processed."}
+        return {"success": False, "error": f"http_{e.code}", "message": f"get_case_document_by_file failed: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"get_case_document_by_file failed: {e}"}
+
+    return _case_document_response(file_key, data, case_document_chunk_ids)
+
+
 def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict:
     """Provide legal information and recommendations for a given legal issue."""
-    from openai import OpenAI
+    import llm_provider
+    import model_settings_client
 
     relevant_materials = []
     for search_fn in (search_jurisprudence, search_republic_acts):
@@ -490,7 +523,12 @@ def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict
                     f"{doc.get('type', 'Document')}: {doc.get('title', '')} ({doc.get('url', '')})"
                 )
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = model_settings_client.resolve_model(
+        "get_legal_recommendation",
+        "LEGAL_RECOMMENDATION_MODEL",
+        os.getenv("CHAT_MODEL", "deepseek-v4-flash"),
+    )
+    client = llm_provider.build_client(model)
     context_section = f"\n\nUser's Situation: {user_context}" if user_context else ""
     materials_section = (
         "\n\nRelevant Legal Materials Found:\n" + "\n".join(relevant_materials)
@@ -499,40 +537,45 @@ def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict
     )
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a Philippine legal information assistant. Provide helpful legal INFORMATION (not advice).\n"
-                        "IMPORTANT RULES:\n"
-                        "1. Start with: 'This is general legal information, not legal advice.'\n"
-                        "2. Structure your response with clear sections\n"
-                        "3. Cite relevant Philippine laws and cases when applicable\n"
-                        "4. Always recommend consulting a licensed attorney for specific situations\n"
-                        "5. End with: 'For your specific situation, please consult a licensed attorney.'"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Legal Issue: {legal_issue}{context_section}{materials_section}\n\n"
-                        "Please provide:\n"
-                        "1. BRIEF ANSWER - Direct response to the question\n"
-                        "2. LEGAL BASIS - Relevant Philippine law or case\n"
-                        "3. EXPLANATION - Plain language explanation\n"
-                        "4. PRACTICAL STEPS - What the person can do\n"
-                        "5. WHEN TO SEEK LEGAL HELP - Signs they need a lawyer"
-                    ),
-                },
-            ],
-            temperature=0.3,
+        request_kwargs = llm_provider.normalize_request_kwargs(
+            model,
+            {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a Philippine legal information assistant. Provide helpful legal INFORMATION (not advice).\n"
+                            "IMPORTANT RULES:\n"
+                            "1. Start with: 'This is general legal information, not legal advice.'\n"
+                            "2. Structure your response with clear sections\n"
+                            "3. Cite relevant Philippine laws and cases when applicable\n"
+                            "4. Always recommend consulting a licensed attorney for specific situations\n"
+                            "5. End with: 'For your specific situation, please consult a licensed attorney.'"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Legal Issue: {legal_issue}{context_section}{materials_section}\n\n"
+                            "Please provide:\n"
+                            "1. BRIEF ANSWER - Direct response to the question\n"
+                            "2. LEGAL BASIS - Relevant Philippine law or case\n"
+                            "3. EXPLANATION - Plain language explanation\n"
+                            "4. PRACTICAL STEPS - What the person can do\n"
+                            "5. WHEN TO SEEK LEGAL HELP - Signs they need a lawyer"
+                        ),
+                    },
+                ],
+                "temperature": 0.3,
+            },
         )
+        response = client.chat.completions.create(**request_kwargs)
+        recommendation = llm_provider.strip_think_tags(response.choices[0].message.content)
         return {
             "success": True,
             "issue": legal_issue,
-            "recommendation": response.choices[0].message.content,
+            "recommendation": recommendation,
             "relevant_materials": relevant_materials,
             "disclaimer": "This is general legal information, not legal advice. For your specific situation, please consult a licensed attorney.",
         }
@@ -641,12 +684,15 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
         if truncated:
             extracted_text = extracted_text[:CHAR_LIMIT]
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return {"success": False, "error": "OpenAI API key not configured."}
+        import llm_provider
+        import model_settings_client
 
-        client = OpenAI(api_key=api_key)
-        model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+        model = model_settings_client.resolve_model(
+            "analyze_document",
+            "ANALYZE_DOCUMENT_MODEL",
+            os.getenv("CHAT_MODEL", "deepseek-v4-flash"),
+        )
+        client = llm_provider.build_client(model)
 
         system_prompt = (
             "You are an expert Philippine legal document analyst with deep knowledge of the Civil Code, "
@@ -671,16 +717,24 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
         if truncated:
             text_for_ai += f"\n\n[Note: Document truncated — only the first {CHAR_LIMIT:,} characters were analyzed.]"
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Document: **{fname}**\n\n---\n\n{text_for_ai}"},
-            ],
-            temperature=0.2,
-            max_tokens=4000,
+        request_kwargs = llm_provider.normalize_request_kwargs(
+            model,
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Document: **{fname}**\n\n---\n\n{text_for_ai}"},
+                ],
+                "temperature": 0.2,
+            },
         )
-        ai_summary = response.choices[0].message.content.strip()
+        response = client.chat.completions.create(**request_kwargs)
+        if llm_provider.is_truncated_empty(response):
+            return {
+                "success": False,
+                "error": f"Model '{model}' hit its token limit while reasoning and produced no output.",
+            }
+        ai_summary = llm_provider.strip_think_tags(response.choices[0].message.content.strip())
 
         file_url = s3_storage.generate_presigned_get(s3_key)
 
@@ -937,30 +991,42 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
         if field not in filled:
             filled[field] = "N/A"
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    import llm_provider
+    import model_settings_client
+
+    model = model_settings_client.resolve_model(
+        "generate_legal_document",
+        "LEGAL_DOCUMENT_GENERATION_MODEL",
+        os.getenv("CHAT_MODEL", "deepseek-v4-flash"),
+    )
+    client = llm_provider.build_client(model)
     try:
         prompt = template["prompt"].format(**filled)
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a Philippine legal document drafter. Generate properly formatted legal documents "
-                        "following Philippine legal conventions. Use proper legal document structure, formal language, "
-                        "leave blanks (___) for missing info, and include proper signature/notary blocks."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
+        request_kwargs = llm_provider.normalize_request_kwargs(
+            model,
+            {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a Philippine legal document drafter. Generate properly formatted legal documents "
+                            "following Philippine legal conventions. Use proper legal document structure, formal language, "
+                            "leave blanks (___) for missing info, and include proper signature/notary blocks."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+            },
         )
+        response = client.chat.completions.create(**request_kwargs)
         return {
             "success": True,
             "document_type": doc_type_lower,
             "document_name": template["name"],
             "format": format,
-            "content": response.choices[0].message.content,
+            "content": llm_provider.strip_think_tags(response.choices[0].message.content),
             "fields_used": details,
             "disclaimer": "This is a template document generated by AI. Have it reviewed by a licensed attorney before use.",
             "next_steps": [
