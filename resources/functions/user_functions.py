@@ -27,8 +27,11 @@ _OUTFITS_CACHE_TTL = 300  # 5 minutes
 _outfits_cache: dict = {"data": None, "timestamp": 0}
 
 # ilovelawyer-api — Case Document Tool
-_ILOVELAWYER_API_BASE = os.getenv("ILOVELAWYER_API_BASE", "")
-_CASE_DOCUMENT_CHAR_CAP = 8000  # per-document char budget when joining chunks into the prompt
+# Base URL / API key are read at call time (not import time) so values from
+# user_functions.env loaded by the_server.py via dotenv are always picked up.
+# Bundled pleadings (many exhibits in one PDF) lose later pages at 8k.
+# Fact-filtered chunk lists still need room so page 30 is not cut off by the cover.
+_CASE_DOCUMENT_CHAR_CAP = 32000
 
 # Cosmetics API
 _COSMETICS_API_BASE = os.getenv("COSMETICS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/cosmetics")
@@ -470,8 +473,22 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
     if not case_document_id:
         return {"success": False, "error": "Provide case_document_id"}
 
-    url = f"{_ILOVELAWYER_API_BASE.rstrip('/')}/api/v1/case-document/{urllib.parse.quote(str(case_document_id))}"
+    base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
     api_key = os.getenv("CHAT_WONDER_API_KEY", "")
+    if not base:
+        return {
+            "success": False,
+            "error": "missing_config",
+            "message": "ILOVELAWYER_API_BASE is not set in user_functions.env",
+        }
+    if not api_key:
+        return {
+            "success": False,
+            "error": "missing_config",
+            "message": "CHAT_WONDER_API_KEY is not set in user_functions.env",
+        }
+
+    url = f"{base}/api/v1/case-document/{urllib.parse.quote(str(case_document_id))}"
     try:
         data = _http_get_json(url, {"x-api-key": api_key})
     except urllib.error.HTTPError as e:
@@ -495,8 +512,22 @@ def get_case_document_by_file(file_key: str, case_document_chunk_ids: list = Non
     if not file_key:
         return {"success": False, "error": "Provide file_key"}
 
-    url = f"{_ILOVELAWYER_API_BASE.rstrip('/')}/api/v1/case-document/by-key?key={urllib.parse.quote(str(file_key), safe='')}"
+    base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
     api_key = os.getenv("CHAT_WONDER_API_KEY", "")
+    if not base:
+        return {
+            "success": False,
+            "error": "missing_config",
+            "message": "ILOVELAWYER_API_BASE is not set in user_functions.env",
+        }
+    if not api_key:
+        return {
+            "success": False,
+            "error": "missing_config",
+            "message": "CHAT_WONDER_API_KEY is not set in user_functions.env",
+        }
+
+    url = f"{base}/api/v1/case-document/by-key?key={urllib.parse.quote(str(file_key), safe='')}"
     try:
         data = _http_get_json(url, {"x-api-key": api_key})
     except urllib.error.HTTPError as e:

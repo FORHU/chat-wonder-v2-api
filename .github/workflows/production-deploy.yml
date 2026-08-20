@@ -48,6 +48,8 @@ jobs:
                   OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                   COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                   GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
+                  ILOVELAWYER_API_BASE=${{ secrets.ILOVELAWYER_API_BASE }}
+                  CHAT_WONDER_API_KEY=${{ secrets.CHAT_WONDER_API_KEY }}
                   FUNCEOF
 
             - name: Build and push Docker image
@@ -121,6 +123,8 @@ jobs:
                       OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
                       COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
                       GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
+                      ILOVELAWYER_API_BASE=${{ secrets.ILOVELAWYER_API_BASE }}
+                      CHAT_WONDER_API_KEY=${{ secrets.CHAT_WONDER_API_KEY }}
                       FUNCEOF
 
                       # ── Authenticate EC2 to ECR ───────────────────────────────────
