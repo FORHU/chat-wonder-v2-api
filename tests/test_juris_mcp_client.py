@@ -48,7 +48,7 @@ class JurisMcpClientTests(unittest.TestCase):
             "post",
             side_effect=[requests.ConnectionError("boom"), ok_resp],
         ) as post:
-            with patch("juris_mcp.client.time.sleep"):
+            with patch("mcp_client.time.sleep"):
                 out = client.call_tool("search_republic_acts", {"query": "safe spaces"})
         self.assertEqual(out["results"], [])
         self.assertEqual(post.call_count, 2)

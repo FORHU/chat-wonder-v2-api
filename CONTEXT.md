@@ -32,7 +32,7 @@ A WebSocket emission block containing a JSON array of outfit UUID strings. Emitt
 **SCL Tracer**
 A background thread that fires a lightweight duplicate call after certain tool executions, for XAI compliance logging. Fires after `search_outfits_by_category` (structured path) and after `get_outfits_by_category` (LLM path).
 
-## Legal search
+## Legal search (Philippines)
 
 **Legal Source**
 The sole live authority for legal retrieval in this product: the juris.ph MCP (`search_jurisprudence`, `search_republic_acts`, `get_case`, `get_republic_act`). Local Postgres/pgvector RAG is not used for live search.
@@ -77,3 +77,21 @@ _Avoid_: citing from search digest only, always-on include_full_text
 **Legal Content Use**
 Live legal material from juris.ph / lawphil is used under a non-commercial (internal/research) posture with attribution via Legal Citations. Commercial redistribution is out of scope for this product decision.
 _Avoid_: assuming SaaS commercial license is settled
+
+## Legal search (UK)
+
+**UK Legal Source**
+The sole live authority for UK legal retrieval: the UK Legal MCP at `https://uk-legal-mcp.fly.dev/mcp`. A distinct persona and MCP server from the Philippines Legal Source — the two are never mixed in one turn.
+_Avoid_: routing UK questions through juris.ph, jurisdiction auto-detection
+
+**UK Legal Tool**
+Any of the 34 operations exposed by the UK Legal MCP to the `[legal ai uk]` persona, spanning case law (`case_law_search`, `judgment_get_*`), legislation (`legislation_search`, `legislation_get_*`), citations (`citations_parse`, `citations_resolve`, `citations_network`, `citations_format_oscola`), Parliament/Hansard, bills, votes, committees, and HMRC guidance. Deliberately the full server surface, not a curated core — see ADR-0003.
+_Avoid_: a narrowed subset matching the PH Legal Tool count; an umbrella facade tool
+
+**UK Legal Citation**
+A user-facing reference to a UK judgment, legislation section, or Hansard contribution, formatted per OSCOLA convention (via `citations_format_oscola`/`citations_resolve`), using the source's own public URL (e.g. National Archives judgment URI, legislation.gov.uk, hansard.parliament.uk).
+_Avoid_: juris.ph-style plain URL citation for UK sources, inventing an OSCOLA citation without resolving it first
+
+**UK MCP Client**
+The shared generic MCP client (`mcp_client.py`) instantiated against the UK Legal MCP, with no Cloudflare UA spoofing (unlike the Juris MCP Client). See ADR-0003 for why the transport layer is shared with the PH client rather than duplicated.
+_Avoid_: a second hand-copied Streamable HTTP client with its own retry/unwrap logic

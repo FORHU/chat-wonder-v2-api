@@ -615,5 +615,1024 @@
         ]
       }
     }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "case_law_search",
+      "description": "Search UK case law by party names, court, judge, date, or free-text query via the UK Legal MCP (TNA Find Case Law). Returns judgment summaries with a slug for judgment_get_header/index/paragraph. Coverage starts roughly early-2000s; for older authorities, search for a modern judgment quoting them. from_date/to_date are currently ignored upstream — do not rely on them to narrow results. judge filter is a case-insensitive surname substring match; appending honorifics like 'JSC' or 'KC' silently zeroes the results.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Full-text search query, e.g. 'negligence duty of care'"
+          },
+          "court": {
+            "type": "string",
+            "description": "Optional court slug filter, e.g. 'uksc', 'ewca/civ', 'ewhc/kb', 'ukut/iac'"
+          },
+          "party": {
+            "type": "string",
+            "description": "Optional party name filter"
+          },
+          "judge": {
+            "type": "string",
+            "description": "Optional judge surname filter (case-insensitive substring, e.g. 'Reed'). Do not append honorifics like 'JSC' or 'KC'."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results (1-50, default 10)"
+          },
+          "page": {
+            "type": "integer",
+            "description": "Result page number, 1-indexed (default 1)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "judgment_get_header",
+      "description": "Fetch a UK judgment's metadata (parties, judges, neutral citation, court, dates) by slug. Call case_law_search first to get the slug.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "Judgment slug, e.g. 'uksc/2024/12' or 'ewca/civ/2023/450'"
+          }
+        },
+        "required": [
+          "slug"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "judgment_get_index",
+      "description": "Fetch the paragraph navigation index (eId + preview line for every paragraph) of a UK judgment by slug. Use eIds with judgment_get_paragraph, or use case_law_grep_judgment to search by content instead.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "Judgment slug, e.g. 'uksc/2024/12'"
+          }
+        },
+        "required": [
+          "slug"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "judgment_get_paragraph",
+      "description": "Fetch one paragraph's full text from a UK judgment by slug + eId. Call judgment_get_index first to discover eIds, or case_law_grep_judgment to locate them by content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "Judgment slug, e.g. 'uksc/2024/12'"
+          },
+          "eId": {
+            "type": "string",
+            "description": "Paragraph eId from judgment_get_index, e.g. 'para_12'"
+          }
+        },
+        "required": [
+          "slug",
+          "eId"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "case_law_grep_judgment",
+      "description": "Search within one UK judgment for paragraphs matching a regex or substring pattern. Returns {eId, snippet, match} hits. Read full paragraphs via judgment_get_paragraph afterward.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "Judgment slug, e.g. 'uksc/2024/12'"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Regex or plain substring to search for within paragraph text"
+          },
+          "case_insensitive": {
+            "type": "boolean",
+            "description": "Default true"
+          },
+          "max_hits": {
+            "type": "integer",
+            "description": "Cap on hits returned (default 25)"
+          }
+        },
+        "required": [
+          "slug",
+          "pattern"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "legislation_search",
+      "description": "Search UK Acts and Statutory Instruments (legislation.gov.uk) by title or full text. type/year filters are exact-match — omit unless already known; guessing a year and getting it wrong zeroes the results. fulltext=false (default) searches titles only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query, e.g. 'Housing Act 1988' or 'data protection personal data'"
+          },
+          "type": {
+            "type": "string",
+            "description": "Exact-match filter: 'ukpga' (Acts), 'uksi' (SIs), 'asp' (Scottish Acts), 'nia' (NI Acts). Omit if unsure."
+          },
+          "year": {
+            "type": "integer",
+            "description": "Exact-match year of enactment. Omit unless already known — query without it and read the year from results instead."
+          },
+          "fulltext": {
+            "type": "boolean",
+            "description": "Default false (titles only). Set true to search full text of every Act/SI."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results (1-50, default 20)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "legislation_get_toc",
+      "description": "Fetch the structural table of contents (parts, chapters, sections, schedules) of a UK Act or SI. Pass the numeric section id (e.g. '47', not 'section-47') into legislation_get_section for full text. Paginated for large statutes — check has_more/total_items.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Legislation type code from legislation_search results: 'ukpga', 'uksi', 'asp', 'nia'"
+          },
+          "year": {
+            "type": "integer",
+            "description": "Year of enactment"
+          },
+          "number": {
+            "type": "integer",
+            "description": "Chapter or SI number"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Items to skip, for paginating large statutes (default 0)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max items to return (default 200, max 1000)"
+          }
+        },
+        "required": [
+          "type",
+          "year",
+          "number"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "legislation_get_section",
+      "description": "Fetch the parsed text of one section of a UK Act or SI, with territorial extent and in-force status. ALWAYS check the returned extent — a section may apply to England & Wales but not Scotland or Northern Ireland; reciting it without checking extent is a common error. Content is capped at max_chars (default 10000); check content_truncated.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Legislation type code: 'ukpga', 'uksi', 'asp', 'nia'"
+          },
+          "year": {
+            "type": "integer",
+            "description": "Year of enactment"
+          },
+          "number": {
+            "type": "integer",
+            "description": "Chapter or SI number"
+          },
+          "section": {
+            "type": "string",
+            "description": "Section number, e.g. '47' or '12A' (numeric part only, not 'section-47')"
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "Max characters of content to return (default 10000, raise only for unusually long sections)"
+          }
+        },
+        "required": [
+          "type",
+          "year",
+          "number",
+          "section"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "citations_parse",
+      "description": "Extract and classify every OSCOLA-style citation in free text (neutral citations, law reports, legislation sections, SIs, retained EU law). Pure regex by default; set disambiguate=true to let the calling model resolve ambiguous court codes (e.g. bare EWHC without a division) via MCP sampling.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Free text containing OSCOLA citations to extract (max 50,000 chars)"
+          },
+          "disambiguate": {
+            "type": "boolean",
+            "description": "Default false (pure regex, no model in the loop). Set true only to accept model-assisted division resolution for ambiguous citations."
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "citations_resolve",
+      "description": "Parse and resolve a single OSCOLA citation (neutral citation, SI, legislation section, retained EU law), returning parsed fields plus resolved_url. For neutral citations, performs a live check against The National Archives — confidence 0.0 means the document was not found there; do NOT format or quote a confidence-0.0 citation. Call this BEFORE constructing an OSCOLA citation string or citing a case.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "citation": {
+            "type": "string",
+            "description": "A single OSCOLA citation to parse and resolve, e.g. '[2024] UKSC 12', 'SI 2018/1234', 's.47 Companies Act 2006'"
+          }
+        },
+        "required": [
+          "citation"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "citations_network",
+      "description": "Fetch every citation a UK judgment makes (cases cited, legislation, SIs, retained EU law referenced), grouped by type. Pass any result through citations_resolve to confirm it resolves and get its canonical URL.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "case_uri": {
+            "type": "string",
+            "description": "TNA judgment URI slug from a case_law_search result's 'uri' field, e.g. 'uksc/2024/12' — do not include the https:// prefix"
+          }
+        },
+        "required": [
+          "case_uri"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "citations_format_oscola",
+      "description": "Produce a correctly formatted OSCOLA 4th-edition citation string from the structured fields returned by citations_resolve. Do NOT construct these fields yourself — always pass through citations_resolve's output verbatim; guessing fields is the primary citation-fabrication risk. Refuses to format (and must not be worked around) if confidence is 0.0 or a neutral citation has no resolved_url.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "citation_type": {
+            "type": "string",
+            "description": "'type' field from citations_resolve result: 'neutral', 'law_report', 'legislation', 'si', or 'eu_retained'"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "'confidence' field from citations_resolve — pass through exactly, never guess. 0.0 means refuse to format."
+          },
+          "court": {
+            "type": "string",
+            "description": "'court' from citations_resolve, e.g. 'UKSC', 'EWCA CIV'"
+          },
+          "year": {
+            "type": "integer",
+            "description": "'year' from citations_resolve"
+          },
+          "number": {
+            "type": "integer",
+            "description": "'number' from citations_resolve (judgment number within the year)"
+          },
+          "resolved_url": {
+            "type": "string",
+            "description": "'resolved_url' from citations_resolve — required for neutral citations"
+          },
+          "report_series": {
+            "type": "string",
+            "description": "'report_series' from citations_resolve, e.g. 'WLR', 'AC', 'QB'"
+          },
+          "volume": {
+            "type": "integer",
+            "description": "'volume' from citations_resolve (law report volume)"
+          },
+          "page": {
+            "type": "integer",
+            "description": "'page' from citations_resolve (starting page in the law report)"
+          },
+          "legislation_title": {
+            "type": "string",
+            "description": "'legislation_title' from citations_resolve, e.g. 'Companies Act 2006'"
+          },
+          "section": {
+            "type": "string",
+            "description": "'section' from citations_resolve, e.g. '47', '12', '20A'"
+          },
+          "si_year": {
+            "type": "integer",
+            "description": "'si_year' from citations_resolve"
+          },
+          "si_number": {
+            "type": "integer",
+            "description": "'si_number' from citations_resolve"
+          },
+          "raw": {
+            "type": "string",
+            "description": "'raw' from citations_resolve — used as-is for EU retained law"
+          }
+        },
+        "required": [
+          "citation_type",
+          "confidence"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_search_hansard",
+      "description": "Search Hansard debate contributions by phrase, date range, house, or member. query must be words a member actually said, not a bill title (members rarely say the full title verbatim). Chain: read the debate via parliament_get_debate_contributions(debate_ext_id). To filter by member, resolve member_id via parliament_find_member first.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Phrase to find in Hansard contribution text, e.g. 'disproportionate sanction' — tokens a member would say, not a bill title"
+          },
+          "house": {
+            "type": "string",
+            "description": "'Commons', 'Lords', or 'both' (default)"
+          },
+          "from_date": {
+            "type": "string",
+            "description": "Start date YYYY-MM-DD"
+          },
+          "to_date": {
+            "type": "string",
+            "description": "End date YYYY-MM-DD"
+          },
+          "member_id": {
+            "type": "integer",
+            "description": "Filter to one member's contributions — get the integer id from parliament_find_member first"
+          },
+          "contribution_type": {
+            "type": "string",
+            "description": "'Spoken' (default), 'Written', or 'Corrections'"
+          },
+          "text_mode": {
+            "type": "string",
+            "description": "'preview' (default, short snippet) or 'full' (still capped at 3000 chars)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max contributions (1-100, default 20)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Pagination offset (default 0)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_policy_position_summary",
+      "description": "Aggregate Hansard debate-level signals on a topic (by house, year, month, section) without reading every contribution — pure counts, no editorial labels. Pick a debate from top_debates and pass its debate_ext_id into parliament_get_debate_contributions to drill in.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Phrase to aggregate on — a bill title works here even though it wouldn't for parliament_search_hansard, since this tool also matches debate titles/metadata"
+          },
+          "house": {
+            "type": "string",
+            "description": "'Commons', 'Lords', or 'both' (default)"
+          },
+          "from_date": {
+            "type": "string",
+            "description": "Start date YYYY-MM-DD"
+          },
+          "to_date": {
+            "type": "string",
+            "description": "End date YYYY-MM-DD"
+          },
+          "max_debates_scanned": {
+            "type": "integer",
+            "description": "Cap on debates sampled to compute facets (default 200, max 2000)"
+          }
+        },
+        "required": [
+          "topic"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_find_member",
+      "description": "Look up a Member of Parliament or Lord by name to get their integer member_id, party, constituency, and house. Call this BEFORE any tool that filters by member_id (parliament_get_debate_contributions, parliament_member_debates, parliament_member_interests). Text-searching by name in other tools returns unrelated results.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name or partial name, e.g. 'Starmer' or 'Baroness Hale'"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_member_debates",
+      "description": "Find contributions where a specific member used a topic phrase verbatim (text-body search) — call parliament_find_member first to get member_id. For every contribution by that member in a known debate regardless of vocabulary, use parliament_get_debate_contributions(debate_ext_id, member_id=...) instead.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "member_id": {
+            "type": "integer",
+            "description": "Parliament Members API integer id, from parliament_find_member"
+          },
+          "topic": {
+            "type": "string",
+            "description": "Optional phrase this member would have said verbatim — not a bill title"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max contributions (default 20)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Pagination offset (default 0)"
+          }
+        },
+        "required": [
+          "member_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_member_interests",
+      "description": "Fetch a member's registered financial interests (donations, directorships, land, gifts) — call parliament_find_member first to get member_id. Hard-capped at 20 results per call by the upstream API regardless of limit; paginate via offset for prolific members.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "member_id": {
+            "type": "integer",
+            "description": "Parliament Members API integer id, from parliament_find_member"
+          },
+          "category": {
+            "type": "string",
+            "description": "Optional filter: 'donations', 'gifts_uk', 'employment', 'land', 'shareholdings', 'overseas_visits', etc. Omit for all categories."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max interests per call (hard-capped at 20 upstream regardless of value)"
+          },
+          "max_description_chars": {
+            "type": "integer",
+            "description": "Per-entry cap on free-text description (default 500)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Pagination offset for prolific members (default 0)"
+          }
+        },
+        "required": [
+          "member_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_search_petitions",
+      "description": "Search UK Parliament petitions (petition.parliament.uk) by keyword. Filter by state to narrow to live or historical petitions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search term for petition titles, e.g. 'ban trophy hunting'"
+          },
+          "state": {
+            "type": "string",
+            "description": "'open', 'closed', or 'all' (default)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max petitions (default 20)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Pagination offset (default 0)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_get_debate_divisions",
+      "description": "Fetch the formal votes (divisions) held within a debate. An empty list is the honest, common result — most debates have no vote. Each division carries a votes_id usable with votes_get_division for the full member-by-member record.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "debate_ext_id": {
+            "type": "string",
+            "description": "Debate GUID, chained from parliament_search_hansard or parliament_policy_position_summary results"
+          }
+        },
+        "required": [
+          "debate_ext_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_get_debate_contributions",
+      "description": "Fetch verbatim contributions from a debate, optionally filtered to one member by member_id (resolved via parliament_find_member). This is the canonical path for 'everything a member said in this debate' regardless of vocabulary — unlike text-search tools, it doesn't drop members who spoke without using a searched phrase. Omitting member_id returns every contribution (~100-200 for a long debate).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "debate_ext_id": {
+            "type": "string",
+            "description": "Debate GUID, chained from parliament_search_hansard or parliament_lookup_by_column results"
+          },
+          "member_id": {
+            "type": "integer",
+            "description": "Optional — only that member's contributions are returned when given"
+          }
+        },
+        "required": [
+          "debate_ext_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "parliament_lookup_by_column",
+      "description": "Resolve an OSCOLA-style Hansard citation (column + volume + house), e.g. 'HL Deb 14 Oct 2025, vol 849, col 200', to its debate. volume_number is required — sitting date alone will not resolve it. An empty match list usually means the volume number is wrong (opposing counsel sometimes cites the running volume rather than the bound volume).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "column_number": {
+            "type": "string",
+            "description": "Hansard column number from an OSCOLA footnote, e.g. '200' or '1162W' for written answers"
+          },
+          "volume_number": {
+            "type": "integer",
+            "description": "Hansard volume number — required, sitting date is not a substitute"
+          },
+          "house": {
+            "type": "string",
+            "description": "'Commons', 'Lords', or 'both' (default)"
+          }
+        },
+        "required": [
+          "column_number",
+          "volume_number"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "bills_search_bills",
+      "description": "Search UK parliamentary bills by keyword, session, house, or stage. Pass a resulting bill_id into bills_get_bill for full detail. session is a numeric parliamentary session id (e.g. 40 = 2024-25), NOT a year string — omit if only the year is known.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search term for bill titles/descriptions, e.g. 'online safety'"
+          },
+          "house": {
+            "type": "string",
+            "description": "'Commons', 'Lords', or 'All' (default)"
+          },
+          "session": {
+            "type": "integer",
+            "description": "Numeric parliamentary session id (e.g. 40 = 2024-25) — not a year string"
+          },
+          "stage": {
+            "type": "string",
+            "description": "One of: firstreading, secondreading, committee, report, thirdreading, royalassent"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max bills (default 20, max 100)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Pagination offset (default 0)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "bills_get_bill",
+      "description": "Fetch full detail for a UK parliamentary bill (sponsors, current stage, long title, summary, Royal Assent date if enacted) by bill_id from bills_search_bills. Chain to parliament_search_hansard(query=bill_short_title) for its debates.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "bill_id": {
+            "type": "integer",
+            "description": "Bill ID from bills_search_bills results"
+          },
+          "max_summary_chars": {
+            "type": "integer",
+            "description": "Max characters of summary text (default 5000; check summary_truncated)"
+          }
+        },
+        "required": [
+          "bill_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "votes_search_divisions",
+      "description": "Search Commons or Lords formal votes by topic, date, or member. Pass a resulting division_id + house into votes_get_division for the full member-by-member voter list.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search term for division titles, e.g. 'Rwanda' — omit to browse recent divisions"
+          },
+          "house": {
+            "type": "string",
+            "description": "'Commons' (default) or 'Lords'"
+          },
+          "from_date": {
+            "type": "string",
+            "description": "Start date YYYY-MM-DD"
+          },
+          "to_date": {
+            "type": "string",
+            "description": "End date YYYY-MM-DD"
+          },
+          "member_id": {
+            "type": "integer",
+            "description": "Filter to divisions where this member voted, from parliament_find_member"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max divisions (default 25)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Pagination offset (default 0)"
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "votes_get_division",
+      "description": "Fetch the full member-by-member voting record for a division. Voter lists are truncated to 100 per side; total voter counts remain accurate regardless of truncation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "division_id": {
+            "type": "integer",
+            "description": "Division ID from votes_search_divisions results"
+          },
+          "house": {
+            "type": "string",
+            "description": "'Commons' (default) or 'Lords' — which house this division belongs to"
+          }
+        },
+        "required": [
+          "division_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "committees_search_committees",
+      "description": "Search or list UK parliamentary select committees by name, house, or active status. Pass a resulting committee_id into committees_get_committee or committees_search_evidence.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search term for committee names, e.g. 'defence' — omit to list all"
+          },
+          "house": {
+            "type": "string",
+            "description": "'Commons', 'Lords', or 'Joint'"
+          },
+          "active_only": {
+            "type": "boolean",
+            "description": "Default true — only currently active committees"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max committees (default 100)"
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "committees_get_committee",
+      "description": "Fetch a select committee's metadata and current membership by committee_id from committees_search_committees.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "committee_id": {
+            "type": "integer",
+            "description": "Committee ID from committees_search_committees results"
+          }
+        },
+        "required": [
+          "committee_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "committees_search_evidence",
+      "description": "Fetch oral and written evidence submitted to a select committee by committee_id. Returns one page (default 20) — paginate with offset while has_more is true.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "committee_id": {
+            "type": "integer",
+            "description": "Committee ID from committees_search_committees results"
+          },
+          "evidence_type": {
+            "type": "string",
+            "description": "'oral', 'written', or 'both' (default)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max evidence items (default 20; split across oral/written when evidence_type='both')"
+          },
+          "max_title_chars": {
+            "type": "integer",
+            "description": "Per-item cap on title text (default 300)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Pagination offset (default 0)"
+          }
+        },
+        "required": [
+          "committee_id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "hmrc_get_vat_rate",
+      "description": "Look up the UK VAT rate category (standard 20%, reduced 5%, zero 0%, exempt) for a commodity or service description. Uses a static lookup table current as of 22 Nov 2023 — for time-sensitive advice, verify against hmrc_search_guidance since rates may have changed in later Budgets.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "commodity_code": {
+            "type": "string",
+            "description": "Commodity code or plain-English description, e.g. 'food', 'domestic fuel', 'financial services'"
+          }
+        },
+        "required": [
+          "commodity_code"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "hmrc_check_mtd_status",
+      "description": "Check a UK business's Making Tax Digital VAT mandate status by VAT Registration Number. Requires HMRC OAuth credentials to be configured server-side (HMRC_CLIENT_ID/HMRC_CLIENT_SECRET) — if not configured, this call errors rather than guessing; report the error rather than inferring status.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "vrn": {
+            "type": "string",
+            "description": "9-digit VAT Registration Number, e.g. '123456789' (GB prefix accepted and stripped automatically)"
+          }
+        },
+        "required": [
+          "vrn"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "hmrc_search_guidance",
+      "description": "Search GOV.UK for official HMRC tax guidance (VAT, income tax, corporation tax, etc.) by topic. Authoritative and current — do not supplement with web search, which returns out-of-date or third-party reproductions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query, e.g. 'VAT digital services' or 'R&D tax relief SME'"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max results (1-25, default 10)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "uk_legal_mcp_list_prompts",
+      "description": "List the UK Legal MCP's available named prompts (metadata: name, description, arguments). Rarely needed for legal research — use only if the user explicitly asks what preset prompts this MCP offers.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "uk_legal_mcp_get_prompt",
+      "description": "Fetch one of the UK Legal MCP's named prompts by name, with optional arguments, rendered as a messages array. Rarely needed for legal research.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Prompt name, from uk_legal_mcp_list_prompts"
+          },
+          "arguments": {
+            "type": "object",
+            "description": "Optional arguments for the prompt, as a flat object"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "uk_legal_mcp_list_resources",
+      "description": "List the UK Legal MCP's available resources and resource templates (e.g. judgment://, legislation://, hansard:// URIs). Rarely needed directly — case_law_search / legislation_search / parliament tools already surface the URIs you need via next_steps.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "uk_legal_mcp_read_resource",
+      "description": "Read one UK Legal MCP resource by its exact URI (e.g. 'judgment://uksc/2024/12/header', 'legislation://ukpga/1988/50/toc'). Prefer the equivalent tool (judgment_get_header, legislation_get_toc, etc.) unless you already have a specific resource URI from a prior tool result's next_steps field.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string",
+            "description": "Resource URI, e.g. 'judgment://uksc/2024/12/header'"
+          }
+        },
+        "required": [
+          "uri"
+        ]
+      }
+    }
   }
 ]
