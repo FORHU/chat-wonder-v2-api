@@ -648,9 +648,16 @@ def _generate_structured_data(legal_response: str, state) -> dict | None:
             "return ONLY a JSON object with two keys: 'timeline' and 'mindMap'.\n\n"
             "timeline: array of 3–6 concrete legal steps the user should take.\n"
             "Each item: {\"title\": str, \"description\": str, \"status\": \"pending\", \"requires_previous\": bool}\n\n"
-            "mindMap: tree rooted at the core legal issue.\n"
+            "mindMap: tree rooted at the core legal issue, at least 2 levels deep — "
+            "don't just label the branches, populate them with the actual specifics "
+            "from the analysis below.\n"
             "Shape: {\"id\": \"root\", \"label\": str, \"isRoot\": true, \"children\": [{\"id\": str, \"label\": str, \"children\": [...]}]}\n"
-            "First-level children: Legal Basis, Key Facts, Remedies, Risks, Next Steps. Labels ≤ 6 words.\n\n"
+            "First-level children (fixed, in this order): Legal Basis, Key Facts, Remedies, Risks, Next Steps. Labels ≤ 6 words.\n"
+            "Each first-level node needs 2-4 second-level children drawn from concrete "
+            "details in the analysis (e.g. under Key Facts: specific events/dates; under "
+            "Risks: specific named risks; under Remedies: specific remedies sought) — "
+            "never leave a first-level node's children empty. Add a third level wherever "
+            "the analysis has that much specific detail to break out further.\n\n"
             f"Legal analysis (first 2500 chars):\n{legal_response[:2500]}"
         )
         t0 = time.time()
