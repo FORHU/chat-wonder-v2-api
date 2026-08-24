@@ -114,6 +114,8 @@ class ChatState:
         self.last_cosmetics_ids_result: list = []
         self.active_case_documents: list = []
         self.case_document_cache: dict = {}
+        # None = not yet synced this process; empty set = this turn has no case docs.
+        self.allowed_case_document_ids = None
         self.document_fetch_error: Optional[dict] = None
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
@@ -953,8 +955,14 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
     state = _context.sessions.get(session_id)
     if state is None:
         return
+    allowed = [str(_cid) for _cid in case_document_ids]
+    state.allowed_case_document_ids = set(allowed)
+    # Drop cached docs from other cases so a later get_case_document call cannot revive them.
+    state.case_document_cache = {
+        k: v for k, v in state.case_document_cache.items() if str(k) in state.allowed_case_document_ids
+    }
     state.active_case_documents = []
-    for _cid in case_document_ids:
+    for _cid in allowed:
         if _cid in state.case_document_cache:
             state.active_case_documents.append(state.case_document_cache[_cid])
             continue
@@ -983,6 +991,16 @@ def execute_function_call(function_call: dict, session_id: str = None):
     try:
         if func_name == "navigate_app" and session_id:
             func_args["session_id"] = session_id
+        if func_name == "get_case_document" and session_id:
+            _cd_state = _context.sessions.get(session_id)
+            _cd_id = str(func_args.get("case_document_id") or "")
+            _allowed = getattr(_cd_state, "allowed_case_document_ids", None) if _cd_state is not None else None
+            if _allowed is not None and _cd_id not in _allowed:
+                return {
+                    "success": False,
+                    "error": "out_of_scope",
+                    "message": "Case document is not attached to this case.",
+                }
         _cached_case_document = None
         if func_name == "get_case_document" and session_id:
             _cd_state = _context.sessions.get(session_id)
