@@ -1698,10 +1698,10 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
-    # Auto-approval is derived from this call's own persona argument — a plain local
-    # value, not shared/global state — so it can never be affected by any other
-    # concurrent request, and this request's replies can never be blocked on it.
-    _auto_approval = persona in ("legal", "legal_uk", "garment", "cosmetics", "maps", "nav", "stylist", "tailor")
+    # HITL is disabled: every persona (including the untagged "auto" default)
+    # auto-approves function calls, so /chat and the websocket path never
+    # surface a pending_approval response.
+    _auto_approval = True
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
@@ -1973,10 +1973,10 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
-    # Auto-approval derived from this call's own persona argument — a plain local value,
-    # not shared/global state — so it can never be affected by any other concurrent
-    # request, and this request's replies can never be blocked on it.
-    _auto_approval = persona in ("legal", "legal_uk", "garment", "cosmetics", "maps", "nav", "stylist", "tailor")
+    # HITL is disabled: every persona (including the untagged "auto" default)
+    # auto-approves function calls, so /chat and the websocket path never
+    # surface a pending_approval response.
+    _auto_approval = True
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
