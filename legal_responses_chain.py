@@ -194,6 +194,8 @@ def run_function_chain_responses(
     funcall_chains = []
     full_response = ""
     last_tool = None
+    tool_log = []
+    state.last_turn_tool_log = tool_log
 
     def perform_responses_call(items):
         args = {
@@ -321,6 +323,7 @@ def run_function_chain_responses(
         except Exception:
             _rp = str(result)
         _ctx = _summarize_tool_result(function_call["name"], result)
+        tool_log.append({"name": function_call["name"], "args": cur_args, "summary": _ctx})
         broadcast_trace(
             "action",
             f"Result from `{function_call['name']}`:\n{_rp[:300]}",
@@ -407,6 +410,8 @@ async def streaming_run_function_chain_responses(
     funcall_chains = []
     full_response = ""
     last_tool = None
+    tool_log = []
+    state.last_turn_tool_log = tool_log
 
     def perform_responses_call(items):
         args = {
@@ -581,6 +586,7 @@ async def streaming_run_function_chain_responses(
         except Exception:
             _rp = str(result)
         _ctx = _summarize_tool_result(function_call["name"], result)
+        tool_log.append({"name": function_call["name"], "args": cur_args, "summary": _ctx})
         broadcast_trace(
             "action",
             f"Result from `{function_call['name']}`:\n{_rp[:300]}",

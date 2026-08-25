@@ -105,6 +105,7 @@ class ChatState:
         self.summary: str = ""
         self.source_metadata: list = []
         self.last_search_legal_results: list = []
+        self.last_turn_tool_log: list = []
         self.last_garment_result: dict = {}
         self.last_cosmetics_result: dict = {}
         self.last_maps_result: list = []
@@ -677,6 +678,66 @@ def _generate_structured_data(legal_response: str, state) -> dict | None:
         return None
 
 
+def _generate_reasoning_explanation(user_input: str, legal_response: str, search_results: list, tool_log: list, state) -> dict | None:
+    """Third lightweight LLM call: a plain-language 'why this answer' explanation for
+    the ilovelawyer chat UI. Distinct from the glass-box SCL trace (raw R-CCAM phase
+    events, for developers) — this is a short, user-facing summary of the practical
+    reasoning, grounded only in the tool calls and sources actually used this turn
+    (tool_log / search_results), not re-derived from the model's general knowledge."""
+    if not tool_log and not search_results:
+        return None
+    try:
+        grounding_lines = []
+        for entry in tool_log[:8]:
+            name = entry.get("name", "")
+            args = entry.get("args") or {}
+            if isinstance(args, dict):
+                arg_str = ", ".join(f"{k}={v}" for k, v in args.items() if v not in (None, "", []))
+            else:
+                arg_str = str(args)[:120]
+            grounding_lines.append(f"- Called `{name}`({arg_str}) -> {entry.get('summary', '')}")
+        grounding = "\n".join(grounding_lines) or "No tools were called; answered directly from the legal-analysis protocol."
+
+        cited_titles = [str(r.get("title")) for r in (search_results or [])[:8] if r.get("title")]
+        cited_str = "; ".join(cited_titles) or "none"
+
+        prompt = (
+            "You are writing a short, plain-language 'how I reached this answer' explanation "
+            "for a non-lawyer user of a legal-AI chat. Do NOT introduce any law, case, or fact "
+            "not already present below — only explain the reasoning connecting what was actually "
+            "looked up to the answer given.\n\n"
+            f"User's question:\n{user_input[:600]}\n\n"
+            f"Steps actually taken this turn:\n{grounding}\n\n"
+            f"Sources retrieved (titles): {cited_str}\n\n"
+            f"Final answer given (first 2000 chars):\n{legal_response[:2000]}\n\n"
+            "Return ONLY a JSON object with:\n"
+            "  \"reasoning\": a 2-4 sentence plain-language paragraph covering what it understood "
+            "the question to be, what it looked up and why, and how that led to the conclusion.\n"
+            "  \"citation_reasons\": array of {\"title\": str, \"why_cited\": str (<=25 words)}, one "
+            "per source above that materially supports the answer. Omit sources retrieved but not "
+            "relied on. Empty array if none were used."
+        )
+        t0 = time.time()
+        completion = state.openai_client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. No markdown, no explanation outside the JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        raw = completion.choices[0].message.content or ""
+        logging.info("_generate_reasoning_explanation %.2fs", time.time() - t0)
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict) or not parsed.get("reasoning"):
+            return None
+        parsed.setdefault("citation_reasons", [])
+        return parsed
+    except Exception as e:
+        logging.warning("_generate_reasoning_explanation failed: %s", e)
+        return None
+
+
 def run_legal_persona_ask(query: str) -> dict:
     """Legacy helper — legal ask now goes through chat Legal Tools + juris.ph MCP."""
     search = globals().get("search_jurisprudence")
@@ -1166,6 +1227,8 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
     function_outputs = []
     full_response = ""
     last_tool = None
+    tool_log = []
+    state.last_turn_tool_log = tool_log
 
     def perform_chat(msgs):
         args = {
@@ -1294,6 +1357,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
         except Exception:
             _rp = str(result)
         _ctx = _summarize_tool_result(function_call["name"], result)
+        tool_log.append({"name": function_call["name"], "args": cur_args, "summary": _ctx})
         broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id,
             summary=f"'{function_call['name']}' completed. {_ctx}")
         broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id,
@@ -1679,6 +1743,8 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
     function_outputs = []
     full_response = ""
     last_tool = None
+    tool_log = []
+    state.last_turn_tool_log = tool_log
     _chain_start = time.time()
 
     def perform_chat(msgs):
@@ -1850,6 +1916,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         except Exception:
             _rp = str(result)
         _ctx = _summarize_tool_result(function_call["name"], result)
+        tool_log.append({"name": function_call["name"], "args": cur_args, "summary": _ctx})
         broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id,
             summary=f"'{function_call['name']}' completed. {_ctx}")
         await asyncio.sleep(0)
@@ -2386,12 +2453,19 @@ def chat(request: ChatRequest):
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
+    reasoning = None
+    if persona == "legal" and final_text:
+        reasoning = _generate_reasoning_explanation(
+            user_input, final_text, state.last_search_legal_results, state.last_turn_tool_log, state,
+        )
+
     logging.info("/chat [%s] %.2fs session=%s", persona, time.time() - _t_start, session_id)
     return {
         "response": final_text,
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
         "related_cases": related_cases,
+        "reasoning": reasoning,
         "outfit_ids": state.last_outfit_ids_result if persona == "stylist" and state.last_outfit_ids_result else None,
         "cosmetics_ids": state.last_cosmetics_ids_result if persona == "stylist" and state.last_cosmetics_ids_result else None,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
@@ -2942,6 +3016,18 @@ async def chat_stream(websocket: WebSocket):
                     logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
                     if structured:
                         await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
+                    t_re = time.time()
+                    reasoning = await asyncio.to_thread(
+                        _generate_reasoning_explanation,
+                        user_input,
+                        final_text,
+                        state.last_search_legal_results,
+                        state.last_turn_tool_log,
+                        state,
+                    )
+                    logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
+                    if reasoning:
+                        await websocket.send_text(f"[REASONING]{json.dumps(reasoning)}")
                 await websocket.send_text("[DONE]")
                 end_sent = True
 
