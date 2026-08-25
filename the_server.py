@@ -641,6 +641,57 @@ def process_persona(user_input: str):
 # Legal RAG persona flow
 # ---------------------------------------------------------------------------
 
+_AUDIO_OVERVIEW_TRIGGER_RE = re.compile(r"audio overview", re.IGNORECASE)
+
+
+def _wants_audio_overview(user_input: str) -> bool:
+    """Gates the extra _generate_audio_overview_script call below — unlike timeline/mindMap
+    (folded into the always-on _generate_structured_data call since they're cheap), a 20-30
+    turn podcast script is expensive enough that it must NOT run on every legal turn. Only
+    ilovelawyer-app's hidden Audio Overview trigger message matches this."""
+    return bool(_AUDIO_OVERVIEW_TRIGGER_RE.search(user_input or ""))
+
+
+def _generate_audio_overview_script(legal_response: str, state) -> dict | None:
+    """Extra lightweight LLM call, gated by _wants_audio_overview — produces a two-host
+    back-and-forth discussion of the completed legal analysis, for ilovelawyer-app's Studio
+    Panel Audio Overview tile (rendered to actual speech via AWS Polly on the ilovelawyer-api
+    side, not here). Mirrors _generate_structured_data's shape/error-handling."""
+    try:
+        prompt = (
+            "You are producing the script for a two-host podcast-style discussion of the "
+            "legal analysis below. Return ONLY a JSON object with one key: 'turns'.\n\n"
+            "turns: array of 20-30 alternating dialogue lines, each "
+            "{\"speaker\": \"HOST_A\" or \"HOST_B\", \"text\": str}.\n"
+            "HOST_A introduces topics and asks clarifying questions; HOST_B has the deeper "
+            "analysis and answers them — a natural back-and-forth, not two monologues. "
+            "Cover the case's key facts, legal issues, strengths/weaknesses, and what happens "
+            "next, in conversational spoken language (contractions, no bullet points, no "
+            "markdown, no stage directions) — this text is read aloud verbatim by a "
+            "text-to-speech engine, not displayed as an article.\n\n"
+            f"Legal analysis (first 3000 chars):\n{legal_response[:3000]}"
+        )
+        t0 = time.time()
+        completion = state.openai_client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+        )
+        raw = completion.choices[0].message.content or ""
+        logging.info("_generate_audio_overview_script %.2fs", time.time() - t0)
+        parsed = json.loads(raw)
+        turns = parsed.get("turns") if isinstance(parsed, dict) else None
+        if not isinstance(turns, list) or not turns:
+            return None
+        return {"turns": turns}
+    except Exception as e:
+        logging.warning("_generate_audio_overview_script failed: %s", e)
+        return None
+
+
 def _generate_structured_data(legal_response: str, state) -> dict | None:
     """Second lightweight LLM call to produce TIMELINE and MINDMAP from the completed legal analysis."""
     try:
@@ -3028,6 +3079,16 @@ async def chat_stream(websocket: WebSocket):
                     logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
                     if reasoning:
                         await websocket.send_text(f"[REASONING]{json.dumps(reasoning)}")
+                    # Gated separately from _generate_structured_data above — see
+                    # _wants_audio_overview's docstring for why this can't just be folded in.
+                    if _wants_audio_overview(user_input):
+                        t_ao = time.time()
+                        audio_overview = await asyncio.to_thread(
+                            _generate_audio_overview_script, full_response.strip(), state
+                        )
+                        logging.info("_generate_audio_overview_script %.2fs", time.time() - t_ao)
+                        if audio_overview:
+                            await websocket.send_text(f"[AUDIO_OVERVIEW_DATA]{json.dumps(audio_overview)}")
                 await websocket.send_text("[DONE]")
                 end_sent = True
 
