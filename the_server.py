@@ -35,6 +35,7 @@ from urllib.parse import urljoin
 
 import s3_storage
 from juris_mcp.client import get_client as get_juris_mcp_client
+from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from legal_citations import apply_legal_citation_pipeline, select_related_cases
 from legal_fact_boost import (
     append_critical_doctrine_guards,
@@ -77,6 +78,7 @@ _context.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
 _context.model: str = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 _context.legal_library_url: str = os.getenv("LEGAL_LIBRARY_URL", "").rstrip("/")
 _context.juris_mcp_url: str = os.getenv("JURIS_MCP_URL", "https://juris.ph/mcp").rstrip("/")
+_context.uk_legal_mcp_url: str = os.getenv("UK_LEGAL_MCP_URL", "https://uk-legal-mcp.fly.dev/mcp").rstrip("/")
 _context.temperature: float = 1.0
 _context.informed: bool = True
 _context.show_clues: list = []
@@ -113,6 +115,8 @@ class ChatState:
         self.last_cosmetics_ids_result: list = []
         self.active_case_documents: list = []
         self.case_document_cache: dict = {}
+        # None = not yet synced this process; empty set = this turn has no case docs.
+        self.allowed_case_document_ids = None
         self.document_fetch_error: Optional[dict] = None
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
@@ -378,7 +382,55 @@ def process_persona(user_input: str):
     filtered_tools = None
     addendum_override = None
 
-    if user_input.lower().startswith("[legal ai]"):
+    if user_input.lower().startswith("[legal ai uk]"):
+        persona = "legal_uk"
+        user_input = user_input[13:].strip()
+        legal_uk_whitelist = [
+            "case_law_search",
+            "judgment_get_header",
+            "judgment_get_index",
+            "judgment_get_paragraph",
+            "case_law_grep_judgment",
+            "legislation_search",
+            "legislation_get_toc",
+            "legislation_get_section",
+            "citations_parse",
+            "citations_resolve",
+            "citations_network",
+            "citations_format_oscola",
+            "parliament_search_hansard",
+            "parliament_policy_position_summary",
+            "parliament_find_member",
+            "parliament_member_debates",
+            "parliament_member_interests",
+            "parliament_search_petitions",
+            "parliament_get_debate_divisions",
+            "parliament_get_debate_contributions",
+            "parliament_lookup_by_column",
+            "bills_search_bills",
+            "bills_get_bill",
+            "votes_search_divisions",
+            "votes_get_division",
+            "committees_search_committees",
+            "committees_get_committee",
+            "committees_search_evidence",
+            "hmrc_get_vat_rate",
+            "hmrc_check_mtd_status",
+            "hmrc_search_guidance",
+            "uk_legal_mcp_list_prompts",
+            "uk_legal_mcp_get_prompt",
+            "uk_legal_mcp_list_resources",
+            "uk_legal_mcp_read_resource",
+            "get_case_document",
+        ]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_uk_whitelist]
+        try:
+            with open("resources/prompts/legal_prompt_uk.txt", "r", encoding="utf-8") as f:
+                addendum_override = f.read()
+        except Exception as e:
+            logging.error(f"Failed to load legal_prompt_uk.txt: {e}")
+
+    elif user_input.lower().startswith("[legal ai]"):
         persona = "legal"
         user_input = user_input[10:].strip()
         legal_whitelist = [
@@ -600,9 +652,16 @@ def _generate_structured_data(legal_response: str, state) -> dict | None:
             "return ONLY a JSON object with two keys: 'timeline' and 'mindMap'.\n\n"
             "timeline: array of 3–6 concrete legal steps the user should take.\n"
             "Each item: {\"title\": str, \"description\": str, \"status\": \"pending\", \"requires_previous\": bool}\n\n"
-            "mindMap: tree rooted at the core legal issue.\n"
+            "mindMap: tree rooted at the core legal issue, at least 2 levels deep — "
+            "don't just label the branches, populate them with the actual specifics "
+            "from the analysis below.\n"
             "Shape: {\"id\": \"root\", \"label\": str, \"isRoot\": true, \"children\": [{\"id\": str, \"label\": str, \"children\": [...]}]}\n"
-            "First-level children: Legal Basis, Key Facts, Remedies, Risks, Next Steps. Labels ≤ 6 words.\n\n"
+            "First-level children (fixed, in this order): Legal Basis, Key Facts, Remedies, Risks, Next Steps. Labels ≤ 6 words.\n"
+            "Each first-level node needs 2-4 second-level children drawn from concrete "
+            "details in the analysis (e.g. under Key Facts: specific events/dates; under "
+            "Risks: specific named risks; under Remedies: specific remedies sought) — "
+            "never leave a first-level node's children empty. Add a third level wherever "
+            "the analysis has that much specific detail to break out further.\n\n"
             f"Legal analysis (first 2500 chars):\n{legal_response[:2500]}"
         )
         t0 = time.time()
@@ -968,8 +1027,14 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
     state = _context.sessions.get(session_id)
     if state is None:
         return
+    allowed = [str(_cid) for _cid in (case_document_ids or [])]
+    state.allowed_case_document_ids = set(allowed)
+    # Drop cached docs from other cases so a later get_case_document call cannot revive them.
+    state.case_document_cache = {
+        k: v for k, v in state.case_document_cache.items() if str(k) in state.allowed_case_document_ids
+    }
     state.active_case_documents = []
-    for _cid in case_document_ids or []:
+    for _cid in allowed:
         if _cid in state.case_document_cache:
             state.active_case_documents.append(state.case_document_cache[_cid])
             continue
@@ -1012,6 +1077,16 @@ def execute_function_call(function_call: dict, session_id: str = None):
     try:
         if func_name == "navigate_app" and session_id:
             func_args["session_id"] = session_id
+        if func_name == "get_case_document" and session_id:
+            _cd_state = _context.sessions.get(session_id)
+            _cd_id = str(func_args.get("case_document_id") or "")
+            _allowed = getattr(_cd_state, "allowed_case_document_ids", None) if _cd_state is not None else None
+            if _allowed is not None and _cd_id not in _allowed:
+                return {
+                    "success": False,
+                    "error": "out_of_scope",
+                    "message": "Case document is not attached to this case.",
+                }
         _cached_case_document = None
         if func_name in ("get_case_document", "get_case_document_by_file") and session_id:
             _cd_state = _context.sessions.get(session_id)
@@ -1053,6 +1128,54 @@ def execute_function_call(function_call: dict, session_id: str = None):
                         entry["disposition"] = entry["disposition"] or doc.get("final_disposition") or doc.get("disposition") or ""
                         entry["court_reasoning"] = doc.get("court_reasoning") or ""
                         entry["full_text"] = doc.get("full_text") or doc.get("text") or ""
+                    existing = list(state.last_search_legal_results or [])
+                    existing.append(entry)
+                    state.last_search_legal_results = existing
+        _UK_LEGAL_RESULT_TOOLS = {
+            "case_law_search",
+            "judgment_get_header",
+            "judgment_get_index",
+            "judgment_get_paragraph",
+            "case_law_grep_judgment",
+            "legislation_search",
+            "legislation_get_toc",
+            "legislation_get_section",
+            "citations_parse",
+            "citations_resolve",
+            "citations_network",
+            "citations_format_oscola",
+            "parliament_search_hansard",
+            "parliament_policy_position_summary",
+            "parliament_find_member",
+            "parliament_member_debates",
+            "parliament_member_interests",
+            "parliament_search_petitions",
+            "parliament_get_debate_divisions",
+            "parliament_get_debate_contributions",
+            "parliament_lookup_by_column",
+            "bills_search_bills",
+            "bills_get_bill",
+            "votes_search_divisions",
+            "votes_get_division",
+            "committees_search_committees",
+            "committees_get_committee",
+            "committees_search_evidence",
+            "hmrc_get_vat_rate",
+            "hmrc_check_mtd_status",
+            "hmrc_search_guidance",
+        }
+        if func_name in _UK_LEGAL_RESULT_TOOLS and session_id and isinstance(result, dict) and result.get("success"):
+            # UK Legal MCP result shapes vary wildly by tool (search rows,
+            # single judgment/section objects, deeply-nested Hansard
+            # contributions) — unlike juris.ph's clean search_*/get_* split.
+            # Keep the whole per-call payload as one pool entry and let
+            # collect_tool_result_urls() walk it recursively for citable
+            # URLs, rather than unwrapping per tool shape. Always accumulate
+            # (never overwrite) since a UK turn chains many tool calls.
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                entry = {k: v for k, v in result.items() if k != "success"}
+                if entry:
                     existing = list(state.last_search_legal_results or [])
                     existing.append(entry)
                     state.last_search_legal_results = existing
@@ -1510,7 +1633,7 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
             )
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
             summary=_no_rag_summary)
-    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
     _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
@@ -1581,7 +1704,7 @@ def _legal_model_override(persona: str):
     question, and dispatch to legal_deepseek_chain happens regardless of
     LEGAL_USE_RESPONSES_API (see reason_loop / streaming_reason_loop).
     """
-    if persona != "legal":
+    if persona not in ("legal", "legal_uk"):
         return None, None, None, None
     import llm_provider
     model = os.getenv("LEGAL_CHAT_MODEL", "gpt-5.6-terra")
@@ -1617,7 +1740,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     if persona == "legal" and llm_provider.provider_for_model(_model) == "deepseek":
         import legal_deepseek_chain
         result = legal_deepseek_chain.run_function_chain_deepseek(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
-    elif persona == "legal" and _legal_use_responses_api():
+    elif persona in ("legal", "legal_uk") and _legal_use_responses_api():
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
         result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
@@ -1897,7 +2020,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     if persona == "legal" and llm_provider.provider_for_model(_model) == "deepseek":
         import legal_deepseek_chain
         chain = legal_deepseek_chain.streaming_run_function_chain_deepseek(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
-    elif persona == "legal" and _legal_use_responses_api():
+    elif persona in ("legal", "legal_uk") and _legal_use_responses_api():
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
         chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
@@ -1935,6 +2058,28 @@ async def health_check():
         checks["juris_mcp"] = {
             "status": "error",
             "url": _context.juris_mcp_url,
+            "detail": str(e),
+        }
+        overall = "degraded"
+
+    # UK Legal MCP (live legal source for the [legal ai uk] persona)
+    try:
+        t0 = time.monotonic()
+        probe = get_uk_legal_mcp_client().call_tool(
+            "case_law_search", {"query": "negligence duty of care", "limit": 1}
+        )
+        ok = isinstance(probe, dict)
+        checks["uk_legal_mcp"] = {
+            "status": "ok" if ok else "error",
+            "url": _context.uk_legal_mcp_url,
+            "latency_ms": round((time.monotonic() - t0) * 1000),
+        }
+        if not ok:
+            overall = "degraded"
+    except Exception as e:
+        checks["uk_legal_mcp"] = {
+            "status": "error",
+            "url": _context.uk_legal_mcp_url,
             "detail": str(e),
         }
         overall = "degraded"
@@ -2002,7 +2147,11 @@ async def health_check():
 @app.get("/config")
 async def get_config():
     """Public config for frontend clients — no secrets."""
-    return {"legal_library_url": _context.legal_library_url, "juris_mcp_url": _context.juris_mcp_url}
+    return {
+        "legal_library_url": _context.legal_library_url,
+        "juris_mcp_url": _context.juris_mcp_url,
+        "uk_legal_mcp_url": _context.uk_legal_mcp_url,
+    }
 
 
 @app.get("/version")
@@ -2043,13 +2192,13 @@ def chat(request: ChatRequest):
             existing = list(_context.sessions[session_id].last_search_legal_results or [])
             existing.extend(_prefetch)
             _context.sessions[session_id].last_search_legal_results = existing
-        if session_id and session_id in _context.sessions:
-            sync_active_case_documents(
-                session_id,
-                request.case_document_ids,
-                request.case_document_chunk_ids,
-                request.files,
-            )
+    if persona in ("legal", "legal_uk") and session_id and session_id in _context.sessions:
+        sync_active_case_documents(
+            session_id,
+            request.case_document_ids,
+            request.case_document_chunk_ids,
+            request.files,
+        )
 
     if persona == "garment" and request.weather:
         try:
@@ -2141,7 +2290,7 @@ def chat(request: ChatRequest):
     if request.user_id:
         state.user_id = request.user_id
 
-    if persona == "legal" and state.active_case_documents:
+    if persona in ("legal", "legal_uk") and state.active_case_documents:
         _doc_blocks = "\n".join(
             f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
             for d in state.active_case_documents
@@ -2158,7 +2307,7 @@ def chat(request: ChatRequest):
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -2325,7 +2474,7 @@ def chat(request: ChatRequest):
         user_input=user_input,
     )
     related_cases: list = []
-    if persona == "legal" and state.last_search_legal_results:
+    if persona in ("legal", "legal_uk") and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
         related_cases = select_related_cases(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
@@ -2657,6 +2806,7 @@ async def chat_stream(websocket: WebSocket):
                     existing = list(_context.sessions[session_id].last_search_legal_results or [])
                     existing.extend(_prefetch)
                     _context.sessions[session_id].last_search_legal_results = existing
+            if persona in ("legal", "legal_uk"):
                 sync_active_case_documents(
                     session_id,
                     request.case_document_ids,
@@ -2766,7 +2916,7 @@ async def chat_stream(websocket: WebSocket):
                 )
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
 
-            if persona == "legal" and state.active_case_documents:
+            if persona in ("legal", "legal_uk") and state.active_case_documents:
                 _doc_blocks = "\n".join(
                     f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
                     for d in state.active_case_documents
@@ -2779,7 +2929,7 @@ async def chat_stream(websocket: WebSocket):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _case_doc_injection
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -2861,7 +3011,7 @@ async def chat_stream(websocket: WebSocket):
                     )
                     if persona == "legal":
                         await websocket.send_text(final_text)
-                    if persona == "legal" and state.last_search_legal_results:
+                    if persona in ("legal", "legal_uk") and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                         related_cases = select_related_cases(state.last_search_legal_results)
@@ -2909,7 +3059,7 @@ async def chat_stream(websocket: WebSocket):
                 # Send __END__ now so the client unlocks immediately, then generate
                 # timeline/mindmap in a background thread and send before [DONE].
                 await websocket.send_text(_context.__END__)
-                if persona == "legal" and full_response:
+                if persona in ("legal", "legal_uk") and full_response:
                     t_sd = time.time()
                     structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
                     logging.info("_generate_structured_data %.2fs", time.time() - t_sd)

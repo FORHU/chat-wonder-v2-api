@@ -15,27 +15,51 @@ _BLOCKQUOTE_LINE = re.compile(r"^(?P<prefix>\s*>\s*)(?P<body>.*)$", re.M)
 _QUOTE_CHARS = re.compile(r'[\"“”‘’*_`]')
 
 
+_URL_KEYS = ("url", "page_url", "pdf_url", "xml_url", "resolved_url")
+
+
+def _tna_url_from_uri(uri: str) -> str:
+    """TNA Find Case Law page URL for a bare judgment slug, e.g. 'ewca/civ/2024/1'."""
+    return f"https://caselaw.nationalarchives.gov.uk/{uri.strip('/')}"
+
+
 def collect_tool_result_urls(search_results) -> List[str]:
-    """Unique absolute URLs from search/get tool rows, order preserved."""
+    """Unique absolute URLs from search/get tool rows, order preserved.
+
+    Walks nested dicts/lists — tool payloads vary in shape across juris.ph
+    (flat rows, `document.url`) and the UK Legal MCP (deeply nested Hansard
+    contributions, bare `uri` slugs instead of URLs) — so every citable URL
+    surfaces regardless of which tool produced it.
+    """
     if not search_results:
         return []
     urls: List[str] = []
     seen: Set[str] = set()
-    for r in search_results:
-        if not isinstance(r, dict):
-            continue
-        candidates = [
-            r.get("url"),
-            (r.get("metadata") or {}).get("url") if isinstance(r.get("metadata"), dict) else None,
-        ]
-        doc = r.get("document")
-        if isinstance(doc, dict):
-            candidates.extend([doc.get("url"), doc.get("page_url"), doc.get("pdf_url")])
-        for raw in candidates:
-            url = str(raw or "").strip()
-            if url.startswith("http") and url not in seen:
-                seen.add(url)
-                urls.append(url)
+
+    def add(raw):
+        url = str(raw or "").strip()
+        if url.startswith("http") and url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    def walk(obj, depth=0):
+        if depth > 6 or obj is None:
+            return
+        if isinstance(obj, dict):
+            for key in _URL_KEYS:
+                if obj.get(key):
+                    add(obj[key])
+            uri = obj.get("uri")
+            if isinstance(uri, str) and uri and "://" not in uri:
+                add(_tna_url_from_uri(uri))
+            for value in obj.values():
+                walk(value, depth + 1)
+        elif isinstance(obj, (list, tuple)):
+            for item in obj[:50]:
+                walk(item, depth + 1)
+
+    for row in search_results:
+        walk(row)
     return urls
 
 

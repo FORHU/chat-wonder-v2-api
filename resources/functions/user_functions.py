@@ -540,6 +540,673 @@ def get_case_document_by_file(file_key: str, case_document_chunk_ids: list = Non
     return _case_document_response(file_key, data, case_document_chunk_ids)
 
 
+# ---------------------------------------------------------------------------
+# UK Legal MCP (uk-legal-mcp.fly.dev) — [legal ai uk] persona. See ADR-0003.
+# ---------------------------------------------------------------------------
+
+def _uk_call(tool_name: str, arguments: dict) -> dict:
+    """Call one UK Legal MCP tool and unwrap its JSON-RPC result."""
+    from uk_legal_mcp.client import get_client
+
+    t0 = time.perf_counter()
+    payload = get_client().call_tool(tool_name, arguments)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    _logger.info("uk_legal_mcp %s elapsed=%.0fms", tool_name, elapsed_ms)
+    return payload if isinstance(payload, dict) else {"data": payload}
+
+
+def case_law_search(query: str = None, court: str = None, party: str = None, judge: str = None, from_date: str = None, to_date: str = None, limit: int = 10, page: int = 1) -> dict:
+    """Search UK case law via the UK Legal MCP."""
+    query = (str(query).strip() if query is not None else "")
+    if not query:
+        return {"success": False, "error": "query is required"}
+    args = {}
+    args["query"] = query
+    if court is not None:
+        args["court"] = str(court)
+    if party is not None:
+        args["party"] = str(party)
+    if judge is not None:
+        args["judge"] = str(judge)
+    if from_date is not None:
+        args["from_date"] = str(from_date)
+    if to_date is not None:
+        args["to_date"] = str(to_date)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if page is not None:
+        args["page"] = int(page)
+    try:
+        payload = _uk_call("case_law_search", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"case_law_search failed: {e}"}
+
+
+def judgment_get_header(slug: str = None) -> dict:
+    """Fetch a UK judgment's header metadata by slug."""
+    slug = (str(slug).strip() if slug is not None else "")
+    if not slug:
+        return {"success": False, "error": "slug is required"}
+    args = {}
+    args["slug"] = slug
+    try:
+        payload = _uk_call("judgment_get_header", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"judgment_get_header failed: {e}"}
+
+
+def judgment_get_index(slug: str = None) -> dict:
+    """Fetch a UK judgment's paragraph index by slug."""
+    slug = (str(slug).strip() if slug is not None else "")
+    if not slug:
+        return {"success": False, "error": "slug is required"}
+    args = {}
+    args["slug"] = slug
+    try:
+        payload = _uk_call("judgment_get_index", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"judgment_get_index failed: {e}"}
+
+
+def judgment_get_paragraph(slug: str = None, eId: str = None) -> dict:
+    """Fetch one paragraph of a UK judgment by slug + eId."""
+    slug = (str(slug).strip() if slug is not None else "")
+    if not slug:
+        return {"success": False, "error": "slug is required"}
+    eId = (str(eId).strip() if eId is not None else "")
+    if not eId:
+        return {"success": False, "error": "eId is required"}
+    args = {}
+    args["slug"] = slug
+    args["eId"] = eId
+    try:
+        payload = _uk_call("judgment_get_paragraph", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"judgment_get_paragraph failed: {e}"}
+
+
+def case_law_grep_judgment(slug: str = None, pattern: str = None, case_insensitive: bool = True, max_hits: int = 25) -> dict:
+    """Search within one UK judgment for paragraphs matching a pattern."""
+    slug = (str(slug).strip() if slug is not None else "")
+    if not slug:
+        return {"success": False, "error": "slug is required"}
+    pattern = (str(pattern).strip() if pattern is not None else "")
+    if not pattern:
+        return {"success": False, "error": "pattern is required"}
+    args = {}
+    args["slug"] = slug
+    args["pattern"] = pattern
+    if case_insensitive is not None:
+        args["case_insensitive"] = bool(case_insensitive)
+    if max_hits is not None:
+        args["max_hits"] = int(max_hits)
+    try:
+        payload = _uk_call("case_law_grep_judgment", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"case_law_grep_judgment failed: {e}"}
+
+
+def legislation_search(query: str = None, type: str = None, year: int = None, fulltext: bool = False, limit: int = 20) -> dict:
+    """Search UK Acts and Statutory Instruments via the UK Legal MCP."""
+    query = (str(query).strip() if query is not None else "")
+    if not query:
+        return {"success": False, "error": "query is required"}
+    args = {}
+    args["query"] = query
+    if type is not None:
+        args["type"] = str(type)
+    if year is not None:
+        args["year"] = int(year)
+    if fulltext is not None:
+        args["fulltext"] = bool(fulltext)
+    if limit is not None:
+        args["limit"] = int(limit)
+    try:
+        payload = _uk_call("legislation_search", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"legislation_search failed: {e}"}
+
+
+def legislation_get_toc(type: str = None, year: int = None, number: int = None, offset: int = 0, limit: int = 200) -> dict:
+    """Fetch the table of contents of a UK Act or SI."""
+    type = (str(type).strip() if type is not None else "")
+    if not type:
+        return {"success": False, "error": "type is required"}
+    if year is None:
+        return {"success": False, "error": "year is required"}
+    if number is None:
+        return {"success": False, "error": "number is required"}
+    args = {}
+    args["type"] = type
+    args["year"] = int(year)
+    args["number"] = int(number)
+    if offset is not None:
+        args["offset"] = int(offset)
+    if limit is not None:
+        args["limit"] = int(limit)
+    try:
+        payload = _uk_call("legislation_get_toc", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"legislation_get_toc failed: {e}"}
+
+
+def legislation_get_section(type: str = None, year: int = None, number: int = None, section: str = None, max_chars: int = 10000) -> dict:
+    """Fetch the parsed text of one section of a UK Act or SI."""
+    type = (str(type).strip() if type is not None else "")
+    if not type:
+        return {"success": False, "error": "type is required"}
+    if year is None:
+        return {"success": False, "error": "year is required"}
+    if number is None:
+        return {"success": False, "error": "number is required"}
+    section = (str(section).strip() if section is not None else "")
+    if not section:
+        return {"success": False, "error": "section is required"}
+    args = {}
+    args["type"] = type
+    args["year"] = int(year)
+    args["number"] = int(number)
+    args["section"] = section
+    if max_chars is not None:
+        args["max_chars"] = int(max_chars)
+    try:
+        payload = _uk_call("legislation_get_section", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"legislation_get_section failed: {e}"}
+
+
+def citations_parse(text: str = None, disambiguate: bool = False) -> dict:
+    """Extract and classify OSCOLA-style citations found in free text."""
+    text = (str(text).strip() if text is not None else "")
+    if not text:
+        return {"success": False, "error": "text is required"}
+    args = {}
+    args["text"] = text
+    if disambiguate is not None:
+        args["disambiguate"] = bool(disambiguate)
+    try:
+        payload = _uk_call("citations_parse", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"citations_parse failed: {e}"}
+
+
+def citations_resolve(citation: str = None) -> dict:
+    """Parse and resolve a single OSCOLA citation, confirming it against The National Archives."""
+    citation = (str(citation).strip() if citation is not None else "")
+    if not citation:
+        return {"success": False, "error": "citation is required"}
+    args = {}
+    args["citation"] = citation
+    try:
+        payload = _uk_call("citations_resolve", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"citations_resolve failed: {e}"}
+
+
+def citations_network(case_uri: str = None) -> dict:
+    """Fetch every citation a UK judgment makes (cases, legislation, SIs, retained EU law)."""
+    case_uri = (str(case_uri).strip() if case_uri is not None else "")
+    if not case_uri:
+        return {"success": False, "error": "case_uri is required"}
+    args = {}
+    args["case_uri"] = case_uri
+    try:
+        payload = _uk_call("citations_network", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"citations_network failed: {e}"}
+
+
+def citations_format_oscola(citation_type: str = None, confidence: float = None, court: str = None, year: int = None, number: int = None, resolved_url: str = None, report_series: str = None, volume: int = None, page: int = None, legislation_title: str = None, section: str = None, si_year: int = None, si_number: int = None, raw: str = None) -> dict:
+    """Format an OSCOLA citation string from citations_resolve's output. Never pass hand-guessed fields."""
+    citation_type = (str(citation_type).strip() if citation_type is not None else "")
+    if not citation_type:
+        return {"success": False, "error": "citation_type is required"}
+    if confidence is None:
+        return {"success": False, "error": "confidence is required"}
+    args = {}
+    args["citation_type"] = citation_type
+    args["confidence"] = float(confidence)
+    if court is not None:
+        args["court"] = str(court)
+    if year is not None:
+        args["year"] = int(year)
+    if number is not None:
+        args["number"] = int(number)
+    if resolved_url is not None:
+        args["resolved_url"] = str(resolved_url)
+    if report_series is not None:
+        args["report_series"] = str(report_series)
+    if volume is not None:
+        args["volume"] = int(volume)
+    if page is not None:
+        args["page"] = int(page)
+    if legislation_title is not None:
+        args["legislation_title"] = str(legislation_title)
+    if section is not None:
+        args["section"] = str(section)
+    if si_year is not None:
+        args["si_year"] = int(si_year)
+    if si_number is not None:
+        args["si_number"] = int(si_number)
+    if raw is not None:
+        args["raw"] = str(raw)
+    try:
+        payload = _uk_call("citations_format_oscola", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"citations_format_oscola failed: {e}"}
+
+
+def parliament_search_hansard(query: str = None, house: str = 'both', from_date: str = None, to_date: str = None, member_id: int = None, contribution_type: str = 'Spoken', text_mode: str = 'preview', limit: int = 20, offset: int = 0) -> dict:
+    """Search Hansard debate contributions by phrase, date, house, or member."""
+    query = (str(query).strip() if query is not None else "")
+    if not query:
+        return {"success": False, "error": "query is required"}
+    args = {}
+    args["query"] = query
+    if house is not None:
+        args["house"] = str(house)
+    if from_date is not None:
+        args["from_date"] = str(from_date)
+    if to_date is not None:
+        args["to_date"] = str(to_date)
+    if member_id is not None:
+        args["member_id"] = int(member_id)
+    if contribution_type is not None:
+        args["contribution_type"] = str(contribution_type)
+    if text_mode is not None:
+        args["text_mode"] = str(text_mode)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if offset is not None:
+        args["offset"] = int(offset)
+    try:
+        payload = _uk_call("parliament_search_hansard", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_search_hansard failed: {e}"}
+
+
+def parliament_policy_position_summary(topic: str = None, house: str = 'both', from_date: str = None, to_date: str = None, max_debates_scanned: int = 200) -> dict:
+    """Aggregate Hansard debate-level signals on a topic without reading every contribution."""
+    topic = (str(topic).strip() if topic is not None else "")
+    if not topic:
+        return {"success": False, "error": "topic is required"}
+    args = {}
+    args["topic"] = topic
+    if house is not None:
+        args["house"] = str(house)
+    if from_date is not None:
+        args["from_date"] = str(from_date)
+    if to_date is not None:
+        args["to_date"] = str(to_date)
+    if max_debates_scanned is not None:
+        args["max_debates_scanned"] = int(max_debates_scanned)
+    try:
+        payload = _uk_call("parliament_policy_position_summary", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_policy_position_summary failed: {e}"}
+
+
+def parliament_find_member(name: str = None) -> dict:
+    """Look up a Member of Parliament or Lord by name to get their integer member_id."""
+    name = (str(name).strip() if name is not None else "")
+    if not name:
+        return {"success": False, "error": "name is required"}
+    args = {}
+    args["name"] = name
+    try:
+        payload = _uk_call("parliament_find_member", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_find_member failed: {e}"}
+
+
+def parliament_member_debates(member_id: int = None, topic: str = None, limit: int = 20, offset: int = 0) -> dict:
+    """Find contributions where a specific member used a topic phrase verbatim."""
+    if member_id is None:
+        return {"success": False, "error": "member_id is required"}
+    args = {}
+    args["member_id"] = int(member_id)
+    if topic is not None:
+        args["topic"] = str(topic)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if offset is not None:
+        args["offset"] = int(offset)
+    try:
+        payload = _uk_call("parliament_member_debates", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_member_debates failed: {e}"}
+
+
+def parliament_member_interests(member_id: int = None, category: str = None, limit: int = 20, max_description_chars: int = 500, offset: int = 0) -> dict:
+    """Fetch a member's registered financial interests."""
+    if member_id is None:
+        return {"success": False, "error": "member_id is required"}
+    args = {}
+    args["member_id"] = int(member_id)
+    if category is not None:
+        args["category"] = str(category)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if max_description_chars is not None:
+        args["max_description_chars"] = int(max_description_chars)
+    if offset is not None:
+        args["offset"] = int(offset)
+    try:
+        payload = _uk_call("parliament_member_interests", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_member_interests failed: {e}"}
+
+
+def parliament_search_petitions(query: str = None, state: str = 'all', limit: int = 20, offset: int = 0) -> dict:
+    """Search UK Parliament petitions by keyword."""
+    query = (str(query).strip() if query is not None else "")
+    if not query:
+        return {"success": False, "error": "query is required"}
+    args = {}
+    args["query"] = query
+    if state is not None:
+        args["state"] = str(state)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if offset is not None:
+        args["offset"] = int(offset)
+    try:
+        payload = _uk_call("parliament_search_petitions", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_search_petitions failed: {e}"}
+
+
+def parliament_get_debate_divisions(debate_ext_id: str = None) -> dict:
+    """Fetch the formal votes (divisions) held within a debate."""
+    debate_ext_id = (str(debate_ext_id).strip() if debate_ext_id is not None else "")
+    if not debate_ext_id:
+        return {"success": False, "error": "debate_ext_id is required"}
+    args = {}
+    args["debate_ext_id"] = debate_ext_id
+    try:
+        payload = _uk_call("parliament_get_debate_divisions", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_get_debate_divisions failed: {e}"}
+
+
+def parliament_get_debate_contributions(debate_ext_id: str = None, member_id: int = None) -> dict:
+    """Fetch verbatim contributions from a debate, optionally filtered to one member."""
+    debate_ext_id = (str(debate_ext_id).strip() if debate_ext_id is not None else "")
+    if not debate_ext_id:
+        return {"success": False, "error": "debate_ext_id is required"}
+    args = {}
+    args["debate_ext_id"] = debate_ext_id
+    if member_id is not None:
+        args["member_id"] = int(member_id)
+    try:
+        payload = _uk_call("parliament_get_debate_contributions", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_get_debate_contributions failed: {e}"}
+
+
+def parliament_lookup_by_column(column_number: str = None, volume_number: int = None, house: str = 'both') -> dict:
+    """Resolve an OSCOLA-style Hansard column citation to its debate."""
+    column_number = (str(column_number).strip() if column_number is not None else "")
+    if not column_number:
+        return {"success": False, "error": "column_number is required"}
+    if volume_number is None:
+        return {"success": False, "error": "volume_number is required"}
+    args = {}
+    args["column_number"] = column_number
+    args["volume_number"] = int(volume_number)
+    if house is not None:
+        args["house"] = str(house)
+    try:
+        payload = _uk_call("parliament_lookup_by_column", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"parliament_lookup_by_column failed: {e}"}
+
+
+def bills_search_bills(query: str = None, house: str = None, session: int = None, stage: str = None, limit: int = 20, offset: int = 0) -> dict:
+    """Search UK parliamentary bills by keyword, session, house, or stage."""
+    query = (str(query).strip() if query is not None else "")
+    if not query:
+        return {"success": False, "error": "query is required"}
+    args = {}
+    args["query"] = query
+    if house is not None:
+        args["house"] = str(house)
+    if session is not None:
+        args["session"] = int(session)
+    if stage is not None:
+        args["stage"] = str(stage)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if offset is not None:
+        args["offset"] = int(offset)
+    try:
+        payload = _uk_call("bills_search_bills", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"bills_search_bills failed: {e}"}
+
+
+def bills_get_bill(bill_id: int = None, max_summary_chars: int = 5000) -> dict:
+    """Fetch full detail for a UK parliamentary bill by bill_id."""
+    if bill_id is None:
+        return {"success": False, "error": "bill_id is required"}
+    args = {}
+    args["bill_id"] = int(bill_id)
+    if max_summary_chars is not None:
+        args["max_summary_chars"] = int(max_summary_chars)
+    try:
+        payload = _uk_call("bills_get_bill", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"bills_get_bill failed: {e}"}
+
+
+def votes_search_divisions(query: str = None, house: str = 'Commons', from_date: str = None, to_date: str = None, member_id: int = None, limit: int = 25, offset: int = 0) -> dict:
+    """Search Commons or Lords formal votes by topic, date, or member."""
+    args = {}
+    if query is not None:
+        args["query"] = str(query)
+    if house is not None:
+        args["house"] = str(house)
+    if from_date is not None:
+        args["from_date"] = str(from_date)
+    if to_date is not None:
+        args["to_date"] = str(to_date)
+    if member_id is not None:
+        args["member_id"] = int(member_id)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if offset is not None:
+        args["offset"] = int(offset)
+    try:
+        payload = _uk_call("votes_search_divisions", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"votes_search_divisions failed: {e}"}
+
+
+def votes_get_division(division_id: int = None, house: str = 'Commons') -> dict:
+    """Fetch the full member-by-member voting record for a division."""
+    if division_id is None:
+        return {"success": False, "error": "division_id is required"}
+    args = {}
+    args["division_id"] = int(division_id)
+    if house is not None:
+        args["house"] = str(house)
+    try:
+        payload = _uk_call("votes_get_division", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"votes_get_division failed: {e}"}
+
+
+def committees_search_committees(query: str = None, house: str = None, active_only: bool = True, limit: int = 100) -> dict:
+    """Search or list UK parliamentary select committees."""
+    args = {}
+    if query is not None:
+        args["query"] = str(query)
+    if house is not None:
+        args["house"] = str(house)
+    if active_only is not None:
+        args["active_only"] = bool(active_only)
+    if limit is not None:
+        args["limit"] = int(limit)
+    try:
+        payload = _uk_call("committees_search_committees", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"committees_search_committees failed: {e}"}
+
+
+def committees_get_committee(committee_id: int = None) -> dict:
+    """Fetch a select committee's metadata and current membership."""
+    if committee_id is None:
+        return {"success": False, "error": "committee_id is required"}
+    args = {}
+    args["committee_id"] = int(committee_id)
+    try:
+        payload = _uk_call("committees_get_committee", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"committees_get_committee failed: {e}"}
+
+
+def committees_search_evidence(committee_id: int = None, evidence_type: str = 'both', limit: int = 20, max_title_chars: int = 300, offset: int = 0) -> dict:
+    """Fetch oral and written evidence submitted to a select committee."""
+    if committee_id is None:
+        return {"success": False, "error": "committee_id is required"}
+    args = {}
+    args["committee_id"] = int(committee_id)
+    if evidence_type is not None:
+        args["evidence_type"] = str(evidence_type)
+    if limit is not None:
+        args["limit"] = int(limit)
+    if max_title_chars is not None:
+        args["max_title_chars"] = int(max_title_chars)
+    if offset is not None:
+        args["offset"] = int(offset)
+    try:
+        payload = _uk_call("committees_search_evidence", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"committees_search_evidence failed: {e}"}
+
+
+def hmrc_get_vat_rate(commodity_code: str = None) -> dict:
+    """Look up the UK VAT rate category for a commodity or service description."""
+    commodity_code = (str(commodity_code).strip() if commodity_code is not None else "")
+    if not commodity_code:
+        return {"success": False, "error": "commodity_code is required"}
+    args = {}
+    args["commodity_code"] = commodity_code
+    try:
+        payload = _uk_call("hmrc_get_vat_rate", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"hmrc_get_vat_rate failed: {e}"}
+
+
+def hmrc_check_mtd_status(vrn: str = None) -> dict:
+    """Check a UK business's Making Tax Digital VAT mandate status by VRN."""
+    vrn = (str(vrn).strip() if vrn is not None else "")
+    if not vrn:
+        return {"success": False, "error": "vrn is required"}
+    args = {}
+    args["vrn"] = vrn
+    try:
+        payload = _uk_call("hmrc_check_mtd_status", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"hmrc_check_mtd_status failed: {e}"}
+
+
+def hmrc_search_guidance(query: str = None, limit: int = 10) -> dict:
+    """Search GOV.UK for official HMRC tax guidance by topic."""
+    query = (str(query).strip() if query is not None else "")
+    if not query:
+        return {"success": False, "error": "query is required"}
+    args = {}
+    args["query"] = query
+    if limit is not None:
+        args["limit"] = int(limit)
+    try:
+        payload = _uk_call("hmrc_search_guidance", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"hmrc_search_guidance failed: {e}"}
+
+
+def uk_legal_mcp_list_prompts() -> dict:
+    """List the UK Legal MCP's available named prompts."""
+    args = {}
+    try:
+        payload = _uk_call("list_prompts", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"uk_legal_mcp_list_prompts failed: {e}"}
+
+
+def uk_legal_mcp_get_prompt(name: str = None, arguments: dict = None) -> dict:
+    """Fetch one of the UK Legal MCP's named prompts by name."""
+    name = (str(name).strip() if name is not None else "")
+    if not name:
+        return {"success": False, "error": "name is required"}
+    args = {}
+    args["name"] = name
+    if arguments is not None:
+        args["arguments"] = arguments
+    try:
+        payload = _uk_call("get_prompt", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"uk_legal_mcp_get_prompt failed: {e}"}
+
+
+def uk_legal_mcp_list_resources() -> dict:
+    """List the UK Legal MCP's available resources and resource templates."""
+    args = {}
+    try:
+        payload = _uk_call("list_resources", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"uk_legal_mcp_list_resources failed: {e}"}
+
+
+def uk_legal_mcp_read_resource(uri: str = None) -> dict:
+    """Read one UK Legal MCP resource by its exact URI."""
+    uri = (str(uri).strip() if uri is not None else "")
+    if not uri:
+        return {"success": False, "error": "uri is required"}
+    args = {}
+    args["uri"] = uri
+    try:
+        payload = _uk_call("read_resource", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"uk_legal_mcp_read_resource failed: {e}"}
+
+
 def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict:
     """Provide legal information and recommendations for a given legal issue."""
     import llm_provider
