@@ -660,16 +660,22 @@ def _generate_audio_overview_script(legal_response: str, state) -> dict | None:
     try:
         prompt = (
             "You are producing the script for a two-host podcast-style discussion of the "
-            "legal analysis below. Return ONLY a JSON object with one key: 'turns'.\n\n"
-            "turns: array of 20-30 alternating dialogue lines, each "
+            "legal analysis below — aim for a genuinely thorough episode (roughly 10-14 "
+            "minutes spoken aloud), not a quick summary. Return ONLY a JSON object with one "
+            "key: 'turns'.\n\n"
+            "turns: array of 35-45 alternating dialogue lines, each "
             "{\"speaker\": \"HOST_A\" or \"HOST_B\", \"text\": str}.\n"
+            "Each turn's text should be 2-4 full sentences (not a one-liner) — hosts should "
+            "explain their reasoning, give examples, and build on what the other just said.\n"
             "HOST_A introduces topics and asks clarifying questions; HOST_B has the deeper "
             "analysis and answers them — a natural back-and-forth, not two monologues. "
             "Cover the case's key facts, legal issues, strengths/weaknesses, and what happens "
             "next, in conversational spoken language (contractions, no bullet points, no "
             "markdown, no stage directions) — this text is read aloud verbatim by a "
-            "text-to-speech engine, not displayed as an article.\n\n"
-            f"Legal analysis (first 3000 chars):\n{legal_response[:3000]}"
+            "text-to-speech engine, not displayed as an article. Don't rush to wrap up early; "
+            "use the full turn count to dig into details, counterarguments, and practical "
+            "implications before the hosts sign off.\n\n"
+            f"Legal analysis (first 6000 chars):\n{legal_response[:6000]}"
         )
         t0 = time.time()
         completion = state.openai_client.chat.completions.create(
@@ -679,6 +685,7 @@ def _generate_audio_overview_script(legal_response: str, state) -> dict | None:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.4,
+            max_tokens=6000,
         )
         raw = completion.choices[0].message.content or ""
         logging.info("_generate_audio_overview_script %.2fs", time.time() - t0)
