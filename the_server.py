@@ -271,6 +271,10 @@ class ChatRequest(BaseModel):
     csets: Optional[int] = None
     case_document_ids: Optional[List[str]] = None
     case_document_chunk_ids: Optional[List[str]] = None
+    # ilovelawyer-api's only signal for "this is a UK request" — see process_persona.
+    # It always sends the plain "[legal ai]" text tag regardless of jurisdiction; this field
+    # is what actually distinguishes a UK request from the PH default.
+    jurisdiction: Optional[str] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -373,15 +377,70 @@ def _extract_meeting_destination(text: str) -> str | None:
     return None
 
 
-def process_persona(user_input: str):
-    """Detect [legal ai] persona tag. Returns (persona, cleaned_input, filtered_tools, addendum_override)."""
+def process_persona(user_input: str, jurisdiction: str = None):
+    """Detect [legal ai] persona tag. Returns (persona, cleaned_input, filtered_tools, addendum_override).
+
+    `jurisdiction` is ilovelawyer-api's only signal for a UK request — it always sends the plain
+    "[legal ai]" text tag regardless of jurisdiction (see LEGAL_TAG in its chatWonder.constants.ts),
+    so a jurisdiction of "UK" on that same tag routes to legal_uk exactly like an explicit
+    "[legal ai uk]" tag would.
+    """
     persona = "auto"
     filtered_tools = None
     addendum_override = None
+    _uk_jurisdiction = (jurisdiction or "").strip().upper() == "UK"
 
     if user_input.lower().startswith("[legal ai uk]"):
         persona = "legal_uk"
         user_input = user_input[13:].strip()
+        legal_uk_whitelist = [
+            "case_law_search",
+            "judgment_get_header",
+            "judgment_get_index",
+            "judgment_get_paragraph",
+            "case_law_grep_judgment",
+            "legislation_search",
+            "legislation_get_toc",
+            "legislation_get_section",
+            "citations_parse",
+            "citations_resolve",
+            "citations_network",
+            "citations_format_oscola",
+            "parliament_search_hansard",
+            "parliament_policy_position_summary",
+            "parliament_find_member",
+            "parliament_member_debates",
+            "parliament_member_interests",
+            "parliament_search_petitions",
+            "parliament_get_debate_divisions",
+            "parliament_get_debate_contributions",
+            "parliament_lookup_by_column",
+            "bills_search_bills",
+            "bills_get_bill",
+            "votes_search_divisions",
+            "votes_get_division",
+            "committees_search_committees",
+            "committees_get_committee",
+            "committees_search_evidence",
+            "hmrc_get_vat_rate",
+            "hmrc_check_mtd_status",
+            "hmrc_search_guidance",
+            "uk_legal_mcp_list_prompts",
+            "uk_legal_mcp_get_prompt",
+            "uk_legal_mcp_list_resources",
+            "uk_legal_mcp_read_resource",
+            "get_case_document",
+        ]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_uk_whitelist]
+        try:
+            with open("resources/prompts/legal_prompt_uk.txt", "r", encoding="utf-8") as f:
+                addendum_override = f.read()
+        except Exception as e:
+            logging.error(f"Failed to load legal_prompt_uk.txt: {e}")
+
+    elif user_input.lower().startswith("[legal ai]") and _uk_jurisdiction:
+        persona = "legal_uk"
+        user_input = user_input[10:].strip()
         legal_uk_whitelist = [
             "case_law_search",
             "judgment_get_header",
@@ -2200,7 +2259,7 @@ def chat(request: ChatRequest):
     session_id = request.session_id
     user_input = request.user_input or request.user_history_select or ""
 
-    persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
+    persona, user_input, filtered_tools, addendum_override = process_persona(user_input, request.jurisdiction)
     if persona == "legal":
         user_input, _prefetch = prepare_legal_turn(user_input)
         if _prefetch and session_id and session_id in _context.sessions:
@@ -2809,7 +2868,7 @@ async def chat_stream(websocket: WebSocket):
                 await websocket.send_text(_context.__END__)
                 continue
 
-            persona, user_input, filtered_tools, addendum_override = process_persona(user_input)
+            persona, user_input, filtered_tools, addendum_override = process_persona(user_input, request.jurisdiction)
             if persona == "legal":
                 user_input, _prefetch = prepare_legal_turn(user_input)
                 if _prefetch and session_id and session_id in _context.sessions:
