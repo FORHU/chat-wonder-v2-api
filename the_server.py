@@ -711,6 +711,18 @@ def _wants_audio_overview(user_input: str) -> bool:
     return bool(_AUDIO_OVERVIEW_TRIGGER_RE.search(user_input or ""))
 
 
+def _extract_json_object(raw: str) -> dict | list:
+    """Tolerant JSON parse for LLM output: strips a ```json fence (or any leading/trailing
+    prose the model added despite instructions) by slicing between the first '{' and last '}'
+    before parsing, rather than requiring `raw` to already be clean JSON. Mirrors the frontend's
+    ilovelawyer-api response-parser.ts safeJsonParse, which needs the same tolerance for the
+    same reason. Raises (like json.loads) if nothing parseable is found."""
+    start = raw.find("{")
+    end = raw.rfind("}")
+    candidate = raw[start : end + 1] if start != -1 and end != -1 and end > start else raw
+    return json.loads(candidate)
+
+
 def _generate_audio_overview_script(legal_response: str, state) -> dict | None:
     """Extra lightweight LLM call, gated by _wants_audio_overview — produces a two-host
     back-and-forth discussion of the completed legal analysis, for ilovelawyer-app's Studio
@@ -744,11 +756,16 @@ def _generate_audio_overview_script(legal_response: str, state) -> dict | None:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.4,
-            max_tokens=6000,
+            # 35-45 turns of 2-4 full sentences each, plus JSON overhead, can run close to (or
+            # past) a tighter cap once the model leans toward the "genuinely thorough" end of
+            # the prompt — a truncated completion is invalid JSON, which json.loads rejects
+            # outright. Headroom here, not the ~6000 estimate, is what keeps this from silently
+            # failing on longer scripts.
+            max_tokens=8000,
         )
         raw = completion.choices[0].message.content or ""
         logging.info("_generate_audio_overview_script %.2fs", time.time() - t0)
-        parsed = json.loads(raw)
+        parsed = _extract_json_object(raw)
         turns = parsed.get("turns") if isinstance(parsed, dict) else None
         if not isinstance(turns, list) or not turns:
             return None
