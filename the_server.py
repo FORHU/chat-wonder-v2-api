@@ -77,8 +77,13 @@ if os.path.exists(user_env_path):
 _context.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
 _context.model: str = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 _context.legal_library_url: str = os.getenv("LEGAL_LIBRARY_URL", "").rstrip("/")
-_context.juris_mcp_url: str = os.getenv("JURIS_MCP_URL", "https://juris.ph/mcp").rstrip("/")
-_context.uk_legal_mcp_url: str = os.getenv("UK_LEGAL_MCP_URL", "https://uk-legal-mcp.fly.dev/mcp").rstrip("/")
+
+# os.getenv(key, default) only falls back when the key is absent, not when it's set to an
+# empty string — the deploy env has these declared-but-empty, so use `or` (matching how
+# juris_mcp/client.py and uk_legal_mcp/client.py themselves resolve their real URL) so this
+# display-only field doesn't show blank while the actual client is happily using the default.
+_context.juris_mcp_url: str = (os.getenv("JURIS_MCP_URL") or "https://juris.ph/mcp").rstrip("/")
+_context.uk_legal_mcp_url: str = (os.getenv("UK_LEGAL_MCP_URL") or "https://uk-legal-mcp.fly.dev/mcp").rstrip("/")
 _context.temperature: float = 1.0
 _context.informed: bool = True
 _context.show_clues: list = []
