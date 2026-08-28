@@ -395,57 +395,10 @@ def process_persona(user_input: str, jurisdiction: str = None):
     addendum_override = None
     _uk_jurisdiction = (jurisdiction or "").strip().upper() == "UK"
 
-    if user_input.lower().startswith("[legal ai uk]"):
+    _explicit_uk_tag = user_input.lower().startswith("[legal ai uk]")
+    if _explicit_uk_tag or (user_input.lower().startswith("[legal ai]") and _uk_jurisdiction):
         persona = "legal_uk"
-        user_input = user_input[13:].strip()
-        legal_uk_whitelist = [
-            "case_law_search",
-            "judgment_get_header",
-            "judgment_get_index",
-            "judgment_get_paragraph",
-            "case_law_grep_judgment",
-            "legislation_search",
-            "legislation_get_toc",
-            "legislation_get_section",
-            "citations_parse",
-            "citations_resolve",
-            "citations_network",
-            "citations_format_oscola",
-            "parliament_search_hansard",
-            "parliament_policy_position_summary",
-            "parliament_find_member",
-            "parliament_member_debates",
-            "parliament_member_interests",
-            "parliament_search_petitions",
-            "parliament_get_debate_divisions",
-            "parliament_get_debate_contributions",
-            "parliament_lookup_by_column",
-            "bills_search_bills",
-            "bills_get_bill",
-            "votes_search_divisions",
-            "votes_get_division",
-            "committees_search_committees",
-            "committees_get_committee",
-            "committees_search_evidence",
-            "hmrc_get_vat_rate",
-            "hmrc_check_mtd_status",
-            "hmrc_search_guidance",
-            "uk_legal_mcp_list_prompts",
-            "uk_legal_mcp_get_prompt",
-            "uk_legal_mcp_list_resources",
-            "uk_legal_mcp_read_resource",
-            "get_case_document",
-        ]
-        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_uk_whitelist]
-        try:
-            with open("resources/prompts/legal_prompt_uk.txt", "r", encoding="utf-8") as f:
-                addendum_override = f.read()
-        except Exception as e:
-            logging.error(f"Failed to load legal_prompt_uk.txt: {e}")
-
-    elif user_input.lower().startswith("[legal ai]") and _uk_jurisdiction:
-        persona = "legal_uk"
-        user_input = user_input[10:].strip()
+        user_input = user_input[13:].strip() if _explicit_uk_tag else user_input[10:].strip()
         legal_uk_whitelist = [
             "case_law_search",
             "judgment_get_header",
@@ -2593,7 +2546,7 @@ def chat(request: ChatRequest):
     _context.sessions[session_id] = state
 
     reasoning = None
-    if persona == "legal" and final_text:
+    if persona in ("legal", "legal_uk") and final_text:
         reasoning = _generate_reasoning_explanation(
             user_input, final_text, state.last_search_legal_results, state.last_turn_tool_log, state,
         )
@@ -3166,7 +3119,7 @@ async def chat_stream(websocket: WebSocket):
                     )
                     logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
                     if reasoning:
-                        await websocket.send_text(f"[REASONING]{json.dumps(reasoning)}")
+                        await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
                     # Gated separately from _generate_structured_data above — see
                     # _wants_audio_overview's docstring for why this can't just be folded in.
                     if _wants_audio_overview(user_input):
