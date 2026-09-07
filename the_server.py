@@ -1676,6 +1676,50 @@ def _describe_tool_args(tool_name: str, arguments: str) -> str:
     return ""
 
 
+def _trace_label_for_call(tool_name: str, args: dict) -> str:
+    """Short, user-facing label for a '[TRACE]' start frame — a compact,
+    plain-language echo of what _describe_tool_args already explains at length.
+    """
+    try:
+        if tool_name == "search_jurisprudence":
+            q = args.get("query", "")
+            return f"Knowledge Search: {q}" if q else "Knowledge Search"
+        if tool_name == "search_republic_acts":
+            q = args.get("query", "")
+            return f"Legislation Search: {q}" if q else "Legislation Search"
+        if tool_name == "get_case":
+            ident = args.get("case_number") or args.get("id") or ""
+            return f"Fetching case: {ident}" if ident else "Fetching case"
+        if tool_name == "get_republic_act":
+            ident = args.get("ra_number") or args.get("id") or ""
+            return f"Fetching Republic Act: {ident}" if ident else "Fetching Republic Act"
+        if tool_name == "get_legal_recommendation":
+            issue = args.get("legal_issue", "")
+            return f"Researching: {issue[:80]}" if issue else "Researching"
+        if tool_name == "generate_legal_document":
+            doc_type = args.get("document_type", "document")
+            return f"Drafting {doc_type}"
+        if tool_name == "analyze_document":
+            s3_key = args.get("s3_key", "")
+            fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
+            return f"Analyzing: {fname}" if fname else "Analyzing document"
+    except Exception:
+        pass
+    return f"Running {tool_name}"
+
+
+def _trace_count_for_result(tool_name: str, result) -> "int | None":
+    """Result count for a '[TRACE]' result frame, e.g. rendered as '— 12 sources'."""
+    try:
+        if tool_name in ("search_jurisprudence", "search_republic_acts") and isinstance(result, dict):
+            return len(result.get("results", []))
+        if tool_name == "search_nearby_places" and isinstance(result, dict):
+            return len(result.get("places", []))
+    except Exception:
+        pass
+    return None
+
+
 def _broadcast_retrieval_context(state, tools, addendum_override, session_id, query: str = "", persona: str = "auto"):
     rag_sources = getattr(state, "source_metadata", [])
     if rag_sources:
@@ -1988,6 +2032,8 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         broadcast_trace("action", f"Executing `{function_call['name']}`...", session_id,
             summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.")
         await asyncio.sleep(0)
+        _trace_step_id = f"{iteration}:{function_call['name']}"
+        yield f"[TRACE]{json.dumps({'id': _trace_step_id, 'phase': 'start', 'tool': function_call['name'], 'label': _trace_label_for_call(function_call['name'], cur_args if isinstance(cur_args, dict) else {})})}[/TRACE]"
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
 
@@ -2012,6 +2058,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         broadcast_trace("action", f"Result from `{function_call['name']}`:\n{_rp[:300]}", session_id,
             summary=f"'{function_call['name']}' completed. {_ctx}")
         await asyncio.sleep(0)
+        yield f"[TRACE]{json.dumps({'id': _trace_step_id, 'phase': 'result', 'tool': function_call['name'], 'count': _trace_count_for_result(function_call['name'], result)})}[/TRACE]"
         broadcast_trace("memory", f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}", session_id,
             summary=f"The AI stored the result from '{function_call['name']}'. This confirmed knowledge will be used when composing the final response.")
         await asyncio.sleep(0)
@@ -3033,6 +3080,12 @@ async def chat_stream(websocket: WebSocket):
                             "arguments": args_parsed,
                         }))
                         break
+                    # Glass-box research steps bypass the legal persona's buffering below —
+                    # they aren't answer text, so they carry no citation-gating risk, and the
+                    # whole point is to fill the silent window while full_response is withheld.
+                    if chunk.startswith("[TRACE]"):
+                        await websocket.send_text(chunk)
+                        continue
                     if _ws_t_first_chunk is None:
                         _ws_t_first_chunk = time.time()
                     # Legal answers must pass through citation gating/doctrine guards

@@ -401,6 +401,8 @@ async def streaming_run_function_chain_responses(
         _context,
         _describe_tool_args,
         _summarize_tool_result,
+        _trace_count_for_result,
+        _trace_label_for_call,
         broadcast_trace,
         execute_function_call,
     )
@@ -573,6 +575,8 @@ async def streaming_run_function_chain_responses(
             summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.",
         )
         await asyncio.sleep(0)
+        _trace_step_id = f"{iteration}:{function_call['name']}"
+        yield f"[TRACE]{json.dumps({'id': _trace_step_id, 'phase': 'start', 'tool': function_call['name'], 'label': _trace_label_for_call(function_call['name'], cur_args if isinstance(cur_args, dict) else {})})}[/TRACE]"
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
         result = await asyncio.to_thread(execute_function_call, function_call, session_id=session_id)
@@ -594,6 +598,7 @@ async def streaming_run_function_chain_responses(
             summary=f"'{function_call['name']}' completed. {_ctx}",
         )
         await asyncio.sleep(0)
+        yield f"[TRACE]{json.dumps({'id': _trace_step_id, 'phase': 'result', 'tool': function_call['name'], 'count': _trace_count_for_result(function_call['name'], result)})}[/TRACE]"
         broadcast_trace(
             "memory",
             f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}",
