@@ -124,6 +124,14 @@
               "type": "string"
             },
             "description": "Optional — restrict to this specific set of chunk ids instead of the whole document."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Optional — page through this document's chunks starting at this position (0-based), for a document too large to read in one call. Use with limit."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Optional — max chunks to return starting at offset. Omit both offset and limit to get the whole document (or the whole relevance-filtered chunk set). If the response's has_more is true, call again with offset=next_offset to continue reading."
           }
         },
         "required": [
