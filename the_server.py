@@ -1031,7 +1031,7 @@ def summarize_conversation(state, new_history: str):
     except Exception as e:
         logging.error(f"Conversation summary failed: {e}")
 
-def prepare_chat_messages(state, query: str, addendum_override: str = None):
+def prepare_chat_messages(state, query: str, addendum_override: str = None, persona: str = "auto"):
     prevs = ""
     if state.prompt:
         conversations = []
@@ -1052,6 +1052,12 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None):
 
     context = ("\n\n[Past Conversation]\n" + prevs) if prevs else ""
     language, _ = langid.classify(query)
+    # langid is unreliable on short queries: e.g. "uk law" classifies as 'id' (Indonesian),
+    # producing an Indonesian answer for an English UK-law question. legal_uk serves
+    # English-language UK jurisdictions, so don't let a short/noisy guess override that
+    # unless there's enough text for the detector to have a real signal.
+    if persona == "legal_uk" and len(query.split()) < 5:
+        language = "en"
 
     system_content = ""
     if addendum_override:
@@ -1925,7 +1931,7 @@ def _legal_model_override(persona: str):
 
 
 def reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
-    messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
+    messages = prepare_chat_messages(state, query, addendum_override=addendum_override, persona=persona)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
@@ -2202,7 +2208,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             logging.warning("Forced final-answer completion failed: %s", e)
 
 async def streaming_reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
-    messages = prepare_chat_messages(state, query, addendum_override=addendum_override)
+    messages = prepare_chat_messages(state, query, addendum_override=addendum_override, persona=persona)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
