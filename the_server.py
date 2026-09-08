@@ -1117,6 +1117,12 @@ def clean_function_definitions(manifest_list: list) -> list:
             cleaned.append({k: v for k, v in item["function"].items() if k != "strict"})
     return cleaned
 
+# Token budget for accumulated active_case_documents text (see its use in execute_function_call's
+# get_case_document handling below) — replaces a flat 10-document count cap that either wasted
+# headroom on a handful of large documents or discarded whole documents past the 10th regardless
+# of how little text each one actually contributed.
+_CASE_DOCUMENT_TOKEN_BUDGET = int(os.getenv("CASE_DOCUMENT_TOKEN_BUDGET", "40000"))
+
 def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None):
     """Replace this turn's active case docs.
 
@@ -1141,7 +1147,7 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
         if _cid in state.case_document_cache:
             state.active_case_documents.append(state.case_document_cache[_cid])
             continue
-        execute_function_call(
+        _result = execute_function_call(
             {
                 "name": "get_case_document",
                 "arguments": json.dumps({
@@ -1151,6 +1157,29 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
             },
             session_id=session_id,
         )
+        # get_case_document's success-but-no-text case (chunks_found: 0 — this document is
+        # attached but none of its chunks were included in this turn's excerpt sample) is
+        # normally invisible: execute_function_call's own get_case_document side-effect only
+        # populates active_case_documents/case_document_cache when result["text"] is truthy, and
+        # this loop previously discarded the return value entirely, so the model never learned
+        # the document exists at all — indistinguishable from it not being attached. Register a
+        # stand-in entry here so the model sees an honest "no excerpt was sampled" note instead
+        # of silence, matching what get_case_document already tells a caller that does inspect
+        # its response — it just never got to.
+        if (
+            isinstance(_result, dict)
+            and _result.get("success")
+            and not _result.get("text")
+            and _cid not in state.case_document_cache
+        ):
+            _stand_in = {
+                "id": _cid,
+                "name": _result.get("name") or "",
+                "text": f"[{_result.get('message') or 'No content available for this document in this turn.'}]",
+                "chunk_count": 0,
+            }
+            state.case_document_cache[_cid] = _stand_in
+            state.active_case_documents.append(_stand_in)
 
 def execute_function_call(function_call: dict, session_id: str = None):
     func_name = function_call.get("name")
@@ -1310,11 +1339,19 @@ def execute_function_call(function_call: dict, session_id: str = None):
                 _cd_id = result.get("id") or func_args.get("case_document_id")
                 if result.get("success") and result.get("text"):
                     entry = {"id": _cd_id, "name": result.get("name") or "", "text": result["text"], "chunk_count": result.get("chunk_count", 0)}
+                    entry["_token_count"] = calculate_tokens(entry["text"])
                     state.case_document_cache[_cd_id] = entry
                     active = [d for d in state.active_case_documents if d.get("id") != _cd_id]
                     active.append(entry)
-                    if len(active) > 10:
-                        active = active[-10:]
+                    # Evict oldest-first until the accumulated text fits a token budget, not a
+                    # flat document-count cap — a count cap either wasted budget capping a
+                    # handful of small documents at 10 when 30 would easily fit, or discarded
+                    # whole documents once past 10 regardless of how little text each
+                    # contributed. ilovelawyer-api's per-document chunk floor (see
+                    # DocumentChunkRepo.findRelevantByCase) means most documents now contribute
+                    # only a few chunks each, so a token budget scales far better than a count.
+                    while len(active) > 1 and sum(d.get("_token_count", 0) for d in active) > _CASE_DOCUMENT_TOKEN_BUDGET:
+                        active.pop(0)
                     state.active_case_documents = active
                 elif not result.get("success"):
                     state.document_fetch_error = {"case_document_id": _cd_id, "message": result.get("message") or result.get("error")}
