@@ -1703,18 +1703,114 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
             s3_key = args.get("s3_key", "")
             fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
             return f"Analyzing: {fname}" if fname else "Analyzing document"
+        # legal_uk persona (resources/functions/user_functions.manifest) — these never had
+        # _describe_tool_args coverage either (glass-box trace text fell back to generic
+        # phrasing for all of them); mapped here for the first time.
+        if tool_name == "case_law_search":
+            q = args.get("query", "")
+            return f"Case Law Search: {q}" if q else "Case Law Search"
+        if tool_name == "judgment_get_header":
+            slug = args.get("slug", "")
+            return f"Fetching judgment: {slug}" if slug else "Fetching judgment"
+        if tool_name == "judgment_get_index":
+            slug = args.get("slug", "")
+            return f"Indexing judgment: {slug}" if slug else "Indexing judgment"
+        if tool_name == "judgment_get_paragraph":
+            slug = args.get("slug", "")
+            return f"Reading judgment: {slug}" if slug else "Reading judgment"
+        if tool_name == "case_law_grep_judgment":
+            pattern = args.get("pattern", "")
+            return f'Searching judgment for: "{pattern}"' if pattern else "Searching judgment"
+        if tool_name == "legislation_search":
+            q = args.get("query", "")
+            return f"Legislation Search: {q}" if q else "Legislation Search"
+        if tool_name == "legislation_get_toc":
+            ltype, year, number = args.get("type", ""), args.get("year", ""), args.get("number", "")
+            ident = f"{ltype} {year}/{number}".strip()
+            return f"Fetching contents: {ident}" if ltype else "Fetching table of contents"
+        if tool_name == "legislation_get_section":
+            section = args.get("section", "")
+            return f"Fetching section {section}" if section else "Fetching legislation section"
+        if tool_name == "citations_parse":
+            return "Parsing citations"
+        if tool_name == "citations_resolve":
+            citation = args.get("citation", "")
+            return f"Resolving citation: {citation}" if citation else "Resolving citation"
+        if tool_name == "citations_network":
+            return "Fetching citation network"
+        if tool_name == "citations_format_oscola":
+            return "Formatting citation"
+        if tool_name == "parliament_search_hansard":
+            q = args.get("query", "")
+            return f"Hansard Search: {q}" if q else "Hansard Search"
+        if tool_name == "parliament_policy_position_summary":
+            return "Summarizing policy position"
+        if tool_name == "parliament_find_member":
+            return "Looking up member of parliament"
+        if tool_name in ("parliament_member_debates", "parliament_member_interests"):
+            return "Fetching member's parliamentary record"
+        if tool_name == "parliament_search_petitions":
+            q = args.get("query", "")
+            return f"Petition Search: {q}" if q else "Petition Search"
+        if tool_name in ("parliament_get_debate_divisions", "parliament_get_debate_contributions", "parliament_lookup_by_column"):
+            return "Fetching Hansard debate details"
+        if tool_name == "bills_search_bills":
+            q = args.get("query", "")
+            return f"Bill Search: {q}" if q else "Bill Search"
+        if tool_name == "bills_get_bill":
+            return "Fetching bill details"
+        if tool_name == "votes_search_divisions":
+            q = args.get("query", "")
+            return f"Vote Search: {q}" if q else "Vote Search"
+        if tool_name == "votes_get_division":
+            return "Fetching vote details"
+        if tool_name == "committees_search_committees":
+            q = args.get("query", "")
+            return f"Committee Search: {q}" if q else "Committee Search"
+        if tool_name == "committees_get_committee":
+            return "Fetching committee details"
+        if tool_name == "committees_search_evidence":
+            q = args.get("query", "")
+            return f"Committee Evidence Search: {q}" if q else "Committee Evidence Search"
+        if tool_name == "hmrc_get_vat_rate":
+            return "Checking VAT rate"
+        if tool_name == "hmrc_check_mtd_status":
+            return "Checking Making Tax Digital status"
+        if tool_name == "hmrc_search_guidance":
+            q = args.get("query", "")
+            return f"HMRC Guidance Search: {q}" if q else "HMRC Guidance Search"
+        if tool_name.startswith("uk_legal_mcp_"):
+            return "Checking legal reference tools"
     except Exception:
         pass
-    return f"Running {tool_name}"
+    # Last-resort fallback for any tool not mapped above — still readable
+    # ("Running legislation search") rather than a raw snake_case identifier.
+    return f"Running {tool_name.replace('_', ' ')}"
 
 
 def _trace_count_for_result(tool_name: str, result) -> "int | None":
     """Result count for a '[TRACE]' result frame, e.g. rendered as '— 12 sources'."""
+    if not isinstance(result, dict):
+        return None
     try:
-        if tool_name in ("search_jurisprudence", "search_republic_acts") and isinstance(result, dict):
+        if tool_name in ("search_jurisprudence", "search_republic_acts"):
             return len(result.get("results", []))
-        if tool_name == "search_nearby_places" and isinstance(result, dict):
+        if tool_name == "search_nearby_places":
             return len(result.get("places", []))
+        if tool_name == "case_law_grep_judgment":
+            return len(result.get("hits", result.get("matches", [])))
+        # Generic fallback for every other search-style tool (mostly legal_uk, whose exact
+        # result-payload shape comes from an external MCP server we don't control here) —
+        # look for the first list under a common "results container" key, or a total count.
+        for key in ("results", "items", "matches", "judgments", "hits", "sections",
+                    "members", "divisions", "bills", "committees", "petitions", "contributions"):
+            val = result.get(key)
+            if isinstance(val, list):
+                return len(val)
+        for key in ("total", "total_items", "count", "total_count"):
+            val = result.get(key)
+            if isinstance(val, int):
+                return val
     except Exception:
         pass
     return None
