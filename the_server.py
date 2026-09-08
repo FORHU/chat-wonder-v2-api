@@ -311,6 +311,10 @@ class AnalyzeS3DocumentRequest(BaseModel):
     filename: Optional[str] = None
     session_id: Optional[str] = None
 
+class CategorizeDocumentRequest(BaseModel):
+    text: str
+    filename: Optional[str] = None
+
 class SynthesizeDocumentsRequest(BaseModel):
     summaries: List[str]
 
@@ -3521,6 +3525,46 @@ async def generate_document_upload_url(request: DocumentUploadUrlRequest):
         raise HTTPException(status_code=500, detail="Failed to generate S3 upload URL. Is S3 configured?")
 
     return {"success": True, "s3_key": s3_key, "url": presigned_url, "content_type": content_type}
+
+
+@app.post("/api/legal/categorize-document")
+async def categorize_document(request: CategorizeDocumentRequest):
+    """AI-assigned category for an uploaded case document — a short, free-form label the
+    model picks itself (no fixed taxonomy, never user-supplied). Called by ilovelawyer-api's
+    extraction pipeline right after text extraction, alongside chunking/embedding. Always
+    returns 200 (success: false on failure) so a categorization miss never surfaces as an
+    HTTP error to a caller that's treating this as best-effort."""
+    if not _context.openai_api_key:
+        return {"success": False, "category": None}
+    try:
+        client = OpenAI(api_key=_context.openai_api_key)
+        prompt = (
+            "You are categorizing an uploaded legal case document. Based on its content, "
+            "return ONLY a JSON object with one key: 'category' — a short (2-5 word) label "
+            "for what this document IS (e.g. \"Employment Contract\", \"Court Pleading\", "
+            "\"Demand Letter\", \"Medical Record\", \"Correspondence\", \"Affidavit\"). "
+            "Choose the label yourself — there is no fixed list. Be specific but concise.\n\n"
+            f"Filename: {request.filename or 'unknown'}\n\n"
+            f"Document text (first 3000 chars):\n{request.text[:3000]}"
+        )
+        completion = client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=50,
+        )
+        raw = completion.choices[0].message.content or ""
+        parsed = _extract_json_object(raw)
+        category = parsed.get("category") if isinstance(parsed, dict) else None
+        if not isinstance(category, str) or not category.strip():
+            return {"success": False, "category": None}
+        return {"success": True, "category": category.strip()}
+    except Exception as e:
+        logging.warning(f"[Categorize Document] failed: {e}")
+        return {"success": False, "category": None}
 
 
 @app.post("/api/legal/analyze-document")
