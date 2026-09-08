@@ -122,6 +122,9 @@ class ChatState:
         self.case_document_cache: dict = {}
         # None = not yet synced this process; empty set = this turn has no case docs.
         self.allowed_case_document_ids = None
+        # Every attached document's id/name/category, whether or not its chunks made this
+        # turn's cut — see docs/adr/0005. Set by sync_active_case_documents.
+        self.case_document_manifest: list = []
         self.document_fetch_error: Optional[dict] = None
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
@@ -276,6 +279,10 @@ class ChatRequest(BaseModel):
     csets: Optional[int] = None
     case_document_ids: Optional[List[str]] = None
     case_document_chunk_ids: Optional[List[str]] = None
+    # Every attached document's id/name/category, regardless of whether its chunks were
+    # selected into this turn's context — see docs/adr/0005. Lets the model know an exhibit
+    # exists (and fetch it via get_case_document) even when it didn't make the relevance cut.
+    case_document_manifest: Optional[List[dict]] = None
     # ilovelawyer-api's only signal for "this is a UK request" — see process_persona.
     # It always sends the plain "[legal ai]" text tag regardless of jurisdiction; this field
     # is what actually distinguishes a UK request from the PH default.
@@ -1117,19 +1124,30 @@ def clean_function_definitions(manifest_list: list) -> list:
             cleaned.append({k: v for k, v in item["function"].items() if k != "strict"})
     return cleaned
 
-def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None):
+# Token budget for accumulated active_case_documents text (see its use in execute_function_call's
+# get_case_document handling below) — replaces a flat 10-document count cap that either wasted
+# headroom on a handful of large documents or discarded whole documents past the 10th regardless
+# of how little text each one actually contributed.
+_CASE_DOCUMENT_TOKEN_BUDGET = int(os.getenv("CASE_DOCUMENT_TOKEN_BUDGET", "40000"))
+
+def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None, case_document_manifest=None):
     """Replace this turn's active case docs.
 
     Sessions are reused across consultations/cases on the client. Without a full replace,
     old documents stay in active_case_documents and keep being injected into later turns.
     Passing an empty list clears them (new case with no READY docs yet).
     Passing None means the caller did not send the field — leave session state alone.
+
+    case_document_manifest (id/name/category for every attached document, whether or not its
+    chunks made this turn's cut — see docs/adr/0005) is stored unconditionally, even when
+    case_document_ids is unchanged, so the model always knows the full exhibit set exists.
     """
     if case_document_ids is None:
         return
     state = _context.sessions.get(session_id)
     if state is None:
         return
+    state.case_document_manifest = case_document_manifest or []
     allowed = [str(_cid) for _cid in case_document_ids]
     state.allowed_case_document_ids = set(allowed)
     # Drop cached docs from other cases so a later get_case_document call cannot revive them.
@@ -1141,7 +1159,7 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
         if _cid in state.case_document_cache:
             state.active_case_documents.append(state.case_document_cache[_cid])
             continue
-        execute_function_call(
+        _result = execute_function_call(
             {
                 "name": "get_case_document",
                 "arguments": json.dumps({
@@ -1151,6 +1169,58 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
             },
             session_id=session_id,
         )
+        # get_case_document's success-but-no-text case (chunks_found: 0 — this document is
+        # attached but none of its chunks were included in this turn's excerpt sample) is
+        # normally invisible: execute_function_call's own get_case_document side-effect only
+        # populates active_case_documents/case_document_cache when result["text"] is truthy, and
+        # this loop previously discarded the return value entirely, so the model never learned
+        # the document exists at all — indistinguishable from it not being attached. Register a
+        # stand-in entry here so the model sees an honest "no excerpt was sampled" note instead
+        # of silence, matching what get_case_document already tells a caller that does inspect
+        # its response — it just never got to.
+        if (
+            isinstance(_result, dict)
+            and _result.get("success")
+            and not _result.get("text")
+            and _cid not in state.case_document_cache
+        ):
+            _stand_in = {
+                "id": _cid,
+                "name": _result.get("name") or "",
+                "text": f"[{_result.get('message') or 'No content available for this document in this turn.'}]",
+                "chunk_count": 0,
+            }
+            state.case_document_cache[_cid] = _stand_in
+            state.active_case_documents.append(_stand_in)
+
+def _build_case_document_injection(state) -> str:
+    """Case-document system-prompt block: a manifest of every attached exhibit (so the model
+    knows the full exhibit set exists even for one whose content didn't make this turn's
+    relevance/budget cut — see docs/adr/0005), followed by the full-text blocks of whichever
+    documents actually made it into active_case_documents."""
+    _manifest = state.case_document_manifest or []
+    _active_ids = {d.get("id") for d in state.active_case_documents}
+    _manifest_lines = "\n".join(
+        f"- {m.get('name') or 'Untitled'} (id: {m.get('id')})"
+        + (f" — category: {m['category']}" if m.get("category") else "")
+        + ("" if m.get("id") in _active_ids else " — not yet fetched into context; call get_case_document with this id if relevant")
+        for m in _manifest
+    )
+    _doc_blocks = "\n".join(
+        f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
+        for d in state.active_case_documents
+    )
+    _manifest_block = (
+        f"\n\n[CASE FILE — every document attached to this case]\n{_manifest_lines}\n"
+        if _manifest_lines else ""
+    )
+    return (
+        _manifest_block +
+        "\n\n[CASE DOCUMENTS — files the user uploaded to their own case. "
+        "Reference them directly when relevant; do NOT treat them as public "
+        "legal precedent or jurisprudence.]\n" + _doc_blocks
+    )
+
 
 def execute_function_call(function_call: dict, session_id: str = None):
     func_name = function_call.get("name")
@@ -1310,11 +1380,19 @@ def execute_function_call(function_call: dict, session_id: str = None):
                 _cd_id = result.get("id") or func_args.get("case_document_id")
                 if result.get("success") and result.get("text"):
                     entry = {"id": _cd_id, "name": result.get("name") or "", "text": result["text"], "chunk_count": result.get("chunk_count", 0)}
+                    entry["_token_count"] = calculate_tokens(entry["text"])
                     state.case_document_cache[_cd_id] = entry
                     active = [d for d in state.active_case_documents if d.get("id") != _cd_id]
                     active.append(entry)
-                    if len(active) > 10:
-                        active = active[-10:]
+                    # Evict oldest-first until the accumulated text fits a token budget, not a
+                    # flat document-count cap — a count cap either wasted budget capping a
+                    # handful of small documents at 10 when 30 would easily fit, or discarded
+                    # whole documents once past 10 regardless of how little text each
+                    # contributed. ilovelawyer-api's per-document chunk floor (see
+                    # DocumentChunkRepo.findRelevantByCase) means most documents now contribute
+                    # only a few chunks each, so a token budget scales far better than a count.
+                    while len(active) > 1 and sum(d.get("_token_count", 0) for d in active) > _CASE_DOCUMENT_TOKEN_BUDGET:
+                        active.pop(0)
                     state.active_case_documents = active
                 elif not result.get("success"):
                     state.document_fetch_error = {"case_document_id": _cd_id, "message": result.get("message") or result.get("error")}
@@ -1935,7 +2013,10 @@ def _legal_model_override(persona: str):
         os.getenv("LEGAL_CHAT_MODEL", "gpt-5.6-terra"),
         reasoning_effort,
         temperature,
-        int(os.getenv("LEGAL_MAX_CHAINS", "12")),
+        # Raised from 12: the case-document diligence instruction (legal_prompt.txt/legal_prompt_uk.txt)
+        # now routinely asks the model to fetch manifest-listed exhibits on demand mid-turn,
+        # on top of jurisprudence searches — a document-heavy turn needs headroom for both.
+        int(os.getenv("LEGAL_MAX_CHAINS", "20")),
     )
 
 
@@ -2404,6 +2485,7 @@ def chat(request: ChatRequest):
             session_id,
             request.case_document_ids,
             request.case_document_chunk_ids,
+            request.case_document_manifest,
         )
 
     if persona == "garment" and request.weather:
@@ -2496,17 +2578,8 @@ def chat(request: ChatRequest):
     if request.user_id:
         state.user_id = request.user_id
 
-    if persona in ("legal", "legal_uk") and state.active_case_documents:
-        _doc_blocks = "\n".join(
-            f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
-            for d in state.active_case_documents
-        )
-        _case_doc_injection = (
-            "\n\n[CASE DOCUMENTS — files the user uploaded to their own case. "
-            "Reference them directly when relevant; do NOT treat them as public "
-            "legal precedent or jurisprudence.]\n" + _doc_blocks
-        )
-        addendum_override = (addendum_override or "You are a helpful assistant.") + _case_doc_injection
+    if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
+        addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
 
     if not _context.openai_api_key:
         raise HTTPException(status_code=400, detail="API key is required.")
@@ -3013,6 +3086,7 @@ async def chat_stream(websocket: WebSocket):
                     session_id,
                     request.case_document_ids,
                     request.case_document_chunk_ids,
+                    request.case_document_manifest,
                 )
 
             # Inject frontend-provided weather for garment persona
@@ -3117,17 +3191,8 @@ async def chat_stream(websocket: WebSocket):
                 )
                 addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
 
-            if persona in ("legal", "legal_uk") and state.active_case_documents:
-                _doc_blocks = "\n".join(
-                    f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
-                    for d in state.active_case_documents
-                )
-                _case_doc_injection = (
-                    "\n\n[CASE DOCUMENTS — files the user uploaded to their own case. "
-                    "Reference them directly when relevant; do NOT treat them as public "
-                    "legal precedent or jurisprudence.]\n" + _doc_blocks
-                )
-                addendum_override = (addendum_override or "You are a helpful assistant.") + _case_doc_injection
+            if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
+                addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
             _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())

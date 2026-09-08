@@ -418,10 +418,16 @@ def get_republic_act(
         }
 
 
-def get_case_document(case_document_id: str, case_document_chunk_ids: list = None) -> dict:
+def get_case_document(case_document_id: str, case_document_chunk_ids: list = None, offset: int = 0, limit: int = None) -> dict:
     """Fetch a user's own uploaded case document (contract, pleading, etc.) from
     ilovelawyer-api by id. Private to the uploading user — never treat this content
-    as public jurisprudence or a Legal Citation."""
+    as public jurisprudence or a Legal Citation.
+
+    offset/limit page through the document's chunks (ordered by chunkIndex) when it's too
+    large to read in one call — e.g. a 300-page exhibit fetched in full (no
+    case_document_chunk_ids filter). Omit both for the normal case: either the relevance-
+    filtered chunk set, or a document small enough to return whole. When has_more is true,
+    call again with offset=next_offset to continue reading the same document."""
     if not case_document_id:
         return {"success": False, "error": "Provide case_document_id"}
 
@@ -460,6 +466,16 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
         chunks = [c for c in raw_chunks if c.get("id") in wanted]
 
     chunks = sorted(chunks, key=lambda c: c.get("chunkIndex", 0))
+    total_chunks = len(chunks)
+    has_more = False
+    next_offset = None
+    if limit is not None:
+        _offset = max(0, int(offset or 0))
+        _limit = max(1, int(limit))
+        page = chunks[_offset:_offset + _limit]
+        has_more = _offset + _limit < total_chunks
+        next_offset = _offset + _limit if has_more else None
+        chunks = page
     text = "\n\n".join(c.get("chunkText", "") for c in chunks).strip()
 
     if not text:
@@ -491,6 +507,9 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
         "name": name,
         "text": text,
         "chunk_count": len(chunks),
+        "total_chunks": total_chunks,
+        "has_more": has_more,
+        "next_offset": next_offset,
     }
 
 
