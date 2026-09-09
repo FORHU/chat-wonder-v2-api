@@ -1130,7 +1130,7 @@ def clean_function_definitions(manifest_list: list) -> list:
 # of how little text each one actually contributed.
 _CASE_DOCUMENT_TOKEN_BUDGET = int(os.getenv("CASE_DOCUMENT_TOKEN_BUDGET", "40000"))
 
-def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None, case_document_manifest=None):
+async def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None, case_document_manifest=None):
     """Replace this turn's active case docs.
 
     Sessions are reused across consultations/cases on the client. Without a full replace,
@@ -1141,6 +1141,13 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
     case_document_manifest (id/name/category for every attached document, whether or not its
     chunks made this turn's cut — see docs/adr/0005) is stored unconditionally, even when
     case_document_ids is unchanged, so the model always knows the full exhibit set exists.
+
+    Each not-yet-cached document is fetched via get_case_document, one at a time (same order
+    as `allowed`, preserved for the token-budget eviction below) — but off the event loop via
+    asyncio.to_thread, since get_case_document's own HTTP call (urllib, timeout=10) is fully
+    blocking. Without that, a case with many documents — or one whose ilovelawyer-api backend
+    is slow/unreachable, each fetch then burning its full 10s timeout — froze the *entire*
+    server for every other session for as long as this loop ran, not just this one's turn.
     """
     if case_document_ids is None:
         return
@@ -1159,7 +1166,8 @@ def sync_active_case_documents(session_id: str, case_document_ids, case_document
         if _cid in state.case_document_cache:
             state.active_case_documents.append(state.case_document_cache[_cid])
             continue
-        _result = execute_function_call(
+        _result = await asyncio.to_thread(
+            execute_function_call,
             {
                 "name": "get_case_document",
                 "arguments": json.dumps({
@@ -2481,12 +2489,15 @@ def chat(request: ChatRequest):
             existing.extend(_prefetch)
             _context.sessions[session_id].last_search_legal_results = existing
     if persona in ("legal", "legal_uk") and session_id and session_id in _context.sessions:
-        sync_active_case_documents(
+        # Plain `def chat` runs in Starlette's threadpool, not the main event loop, so this
+        # thread has none of its own to await onto — asyncio.run gives sync_active_case_documents
+        # a loop to offload get_case_document's blocking HTTP calls onto (see its docstring).
+        asyncio.run(sync_active_case_documents(
             session_id,
             request.case_document_ids,
             request.case_document_chunk_ids,
             request.case_document_manifest,
-        )
+        ))
 
     if persona == "garment" and request.weather:
         try:
@@ -3082,7 +3093,7 @@ async def chat_stream(websocket: WebSocket):
                     existing.extend(_prefetch)
                     _context.sessions[session_id].last_search_legal_results = existing
             if persona in ("legal", "legal_uk"):
-                sync_active_case_documents(
+                await sync_active_case_documents(
                     session_id,
                     request.case_document_ids,
                     request.case_document_chunk_ids,

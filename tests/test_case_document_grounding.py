@@ -11,6 +11,7 @@ Covers two fixes made alongside ilovelawyer-api's per-document chunk floor:
 No live OpenAI/juris.ph/ilovelawyer-api calls — get_case_document is monkey-patched per test.
 """
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -40,7 +41,7 @@ class NoChunksSampledTests(unittest.TestCase):
             }
 
         with patch.object(srv, "get_case_document", fake_get_case_document):
-            srv.sync_active_case_documents(session_id, ["doc-d"], ["some-other-chunk-id"])
+            asyncio.run(srv.sync_active_case_documents(session_id, ["doc-d"], ["some-other-chunk-id"]))
 
         ids = [d["id"] for d in state.active_case_documents]
         self.assertIn("doc-d", ids, "document silently vanished instead of getting a stand-in")
@@ -55,7 +56,7 @@ class NoChunksSampledTests(unittest.TestCase):
             return {"success": True, "id": case_document_id, "name": "Exhibit A", "text": "actual content", "chunk_count": 3}
 
         with patch.object(srv, "get_case_document", fake_get_case_document):
-            srv.sync_active_case_documents(session_id, ["doc-a"], None)
+            asyncio.run(srv.sync_active_case_documents(session_id, ["doc-a"], None))
 
         entry = next(d for d in state.active_case_documents if d["id"] == "doc-a")
         self.assertEqual(entry["text"], "actual content")
@@ -71,7 +72,7 @@ class TokenBudgetCapTests(unittest.TestCase):
             return {"success": True, "id": case_document_id, "name": case_document_id, "text": "short excerpt", "chunk_count": 1}
 
         with patch.object(srv, "get_case_document", fake_get_case_document):
-            srv.sync_active_case_documents(session_id, doc_ids, None)
+            asyncio.run(srv.sync_active_case_documents(session_id, doc_ids, None))
 
         self.assertEqual(
             len(state.active_case_documents),
@@ -91,7 +92,7 @@ class TokenBudgetCapTests(unittest.TestCase):
             return {"success": True, "id": case_document_id, "name": case_document_id, "text": big_text, "chunk_count": 50}
 
         with patch.object(srv, "get_case_document", fake_get_case_document):
-            srv.sync_active_case_documents(session_id, doc_ids, None)
+            asyncio.run(srv.sync_active_case_documents(session_id, doc_ids, None))
 
         surviving_ids = [d["id"] for d in state.active_case_documents]
         self.assertNotIn("big-0", surviving_ids, "oldest large document should have been evicted")
