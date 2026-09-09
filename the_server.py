@@ -1142,12 +1142,17 @@ async def sync_active_case_documents(session_id: str, case_document_ids, case_do
     chunks made this turn's cut — see docs/adr/0005) is stored unconditionally, even when
     case_document_ids is unchanged, so the model always knows the full exhibit set exists.
 
-    Each not-yet-cached document is fetched via get_case_document, one at a time (same order
-    as `allowed`, preserved for the token-budget eviction below) — but off the event loop via
-    asyncio.to_thread, since get_case_document's own HTTP call (urllib, timeout=10) is fully
-    blocking. Without that, a case with many documents — or one whose ilovelawyer-api backend
-    is slow/unreachable, each fetch then burning its full 10s timeout — froze the *entire*
-    server for every other session for as long as this loop ran, not just this one's turn.
+    Does NOT proactively fetch every attached document — only reuses what's already in
+    case_document_cache from an earlier get_case_document call this session. ilovelawyer-api
+    already inlines the relevance-ranked excerpts into document_context before this is even
+    called, so eagerly re-fetching all of case_document_ids here was mostly redundant network
+    work: for a case with many documents, this loop used to call get_case_document once per
+    document, sequentially, and get_case_document's own HTTP call can take up to its full 10s
+    timeout — for an 80+ document case that's up to ten-plus minutes on every single turn.
+    The model still has everything it needs to reach for a specific document beyond what's
+    inlined: the manifest below tells it which documents exist and aren't yet in context, and
+    it can call the get_case_document tool itself mid-generation — that's a separate code path
+    (the model's own function-calling loop → execute_function_call), untouched by this change.
     """
     if case_document_ids is None:
         return
@@ -1161,45 +1166,18 @@ async def sync_active_case_documents(session_id: str, case_document_ids, case_do
     state.case_document_cache = {
         k: v for k, v in state.case_document_cache.items() if str(k) in state.allowed_case_document_ids
     }
-    state.active_case_documents = []
-    for _cid in allowed:
-        if _cid in state.case_document_cache:
-            state.active_case_documents.append(state.case_document_cache[_cid])
-            continue
-        _result = await asyncio.to_thread(
-            execute_function_call,
-            {
-                "name": "get_case_document",
-                "arguments": json.dumps({
-                    "case_document_id": _cid,
-                    "case_document_chunk_ids": case_document_chunk_ids,
-                }),
-            },
-            session_id=session_id,
-        )
-        # get_case_document's success-but-no-text case (chunks_found: 0 — this document is
-        # attached but none of its chunks were included in this turn's excerpt sample) is
-        # normally invisible: execute_function_call's own get_case_document side-effect only
-        # populates active_case_documents/case_document_cache when result["text"] is truthy, and
-        # this loop previously discarded the return value entirely, so the model never learned
-        # the document exists at all — indistinguishable from it not being attached. Register a
-        # stand-in entry here so the model sees an honest "no excerpt was sampled" note instead
-        # of silence, matching what get_case_document already tells a caller that does inspect
-        # its response — it just never got to.
-        if (
-            isinstance(_result, dict)
-            and _result.get("success")
-            and not _result.get("text")
-            and _cid not in state.case_document_cache
-        ):
-            _stand_in = {
-                "id": _cid,
-                "name": _result.get("name") or "",
-                "text": f"[{_result.get('message') or 'No content available for this document in this turn.'}]",
-                "chunk_count": 0,
-            }
-            state.case_document_cache[_cid] = _stand_in
-            state.active_case_documents.append(_stand_in)
+    # Only reuse what's already cached from an earlier get_case_document call this session —
+    # no network calls here. A document not yet in cache simply isn't pre-populated; the
+    # manifest (_build_case_document_injection) tells the model it exists and how to fetch it
+    # if it decides it's actually relevant.
+    candidates = [state.case_document_cache[_cid] for _cid in allowed if _cid in state.case_document_cache]
+    # Same token-budget cap execute_function_call applies when the model fetches a document
+    # itself — reused entries aren't exempt just because they didn't need a fresh fetch this
+    # turn. Without this, a session that accumulates several large cached documents over many
+    # turns would dump all of them back into active_case_documents uncapped on every later turn.
+    while len(candidates) > 1 and sum(d.get("_token_count", 0) for d in candidates) > _CASE_DOCUMENT_TOKEN_BUDGET:
+        candidates.pop(0)
+    state.active_case_documents = candidates
 
 def _build_case_document_injection(state) -> str:
     """Case-document system-prompt block: a manifest of every attached exhibit (so the model
