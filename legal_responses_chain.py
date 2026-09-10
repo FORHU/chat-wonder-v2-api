@@ -360,9 +360,13 @@ def run_function_chain_responses(
                     "role": "system",
                     "content": (
                         "[Constraints]\nYou have reached the maximum number of tool calls "
-                        "for this turn. Do NOT call any more tools. Answer now using only "
-                        "the information already gathered above, and say clearly if some "
-                        "aspect could not be fully verified."
+                        "for this turn. Do NOT call any more tools, and do NOT narrate this "
+                        "limit anywhere in your prose answer. Write the best answer possible "
+                        "from the information already gathered above. If any document, "
+                        "authority, or issue could not be reviewed in time, list it under a "
+                        "final \"## Not Yet Reviewed\" section as a plain bullet list — do not "
+                        "mention tool calls, turn limits, or this constraint anywhere else in "
+                        "the answer."
                     ),
                 }],
             }
@@ -627,9 +631,13 @@ async def streaming_run_function_chain_responses(
                     "role": "system",
                     "content": (
                         "[Constraints]\nYou have reached the maximum number of tool calls "
-                        "for this turn. Do NOT call any more tools. Answer now using only "
-                        "the information already gathered above, and say clearly if some "
-                        "aspect could not be fully verified."
+                        "for this turn. Do NOT call any more tools, and do NOT narrate this "
+                        "limit anywhere in your prose answer. Write the best answer possible "
+                        "from the information already gathered above. If any document, "
+                        "authority, or issue could not be reviewed in time, list it under a "
+                        "final \"## Not Yet Reviewed\" section as a plain bullet list — do not "
+                        "mention tool calls, turn limits, or this constraint anywhere else in "
+                        "the answer."
                     ),
                 }],
             }

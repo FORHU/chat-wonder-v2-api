@@ -1566,9 +1566,13 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
                     "role": "system",
                     "content": (
                         "[Constraints]\nYou have reached the maximum number of tool calls "
-                        "for this turn. Do NOT call any more tools. Answer now using only "
-                        "the information already gathered above, and say clearly if some "
-                        "aspect could not be fully verified."
+                        "for this turn. Do NOT call any more tools, and do NOT narrate this "
+                        "limit anywhere in your prose answer. Write the best answer possible "
+                        "from the information already gathered above. If any document, "
+                        "authority, or issue could not be reviewed in time, list it under a "
+                        "final \"## Not Yet Reviewed\" section as a plain bullet list — do not "
+                        "mention tool calls, turn limits, or this constraint anywhere else in "
+                        "the answer."
                     ),
                 }],
                 n=1,
@@ -1972,7 +1976,7 @@ def _legal_use_responses_api() -> bool:
     return os.getenv("LEGAL_USE_RESPONSES_API", "true").strip().lower() not in ("false", "0", "no")
 
 
-def _legal_model_override(persona: str):
+def _legal_model_override(persona: str, state=None):
     """Legal answers use a stronger model, not the default persona config.
 
     gpt-5.6-terra rejects function tools on /v1/chat/completions unless
@@ -1995,14 +1999,23 @@ def _legal_model_override(persona: str):
     # temperature is meaningless/rejected once real reasoning_effort is in play
     # on /v1/responses; only the Chat Completions fallback path uses it.
     temperature = None if (use_responses and reasoning_effort != "none") else float(os.getenv("LEGAL_TEMPERATURE", "0.2"))
+    # Raised from 12: the case-document diligence instruction (legal_prompt.txt/legal_prompt_uk.txt)
+    # now routinely asks the model to fetch manifest-listed exhibits on demand mid-turn,
+    # on top of jurisprudence searches — a document-heavy turn needs headroom for both.
+    base_max_chains = int(os.getenv("LEGAL_MAX_CHAINS", "20"))
+    # A flat ceiling starves large diligence audits: reviewing every attached exhibit plus
+    # resolving/formatting several authorities (citations_resolve + citations_format_oscola
+    # is 2 calls each) can need 30-40+ tool calls on its own for a 15-20 document case, well
+    # past 20 — the model then hits the forced-completion fallback below mid-audit and
+    # silently skips documents/authorities instead of finishing the job. Scale headroom with
+    # how many exhibits are actually attached to this case.
+    manifest_len = len(getattr(state, "case_document_manifest", None) or []) if state is not None else 0
+    max_chains = min(base_max_chains + (2 * manifest_len), int(os.getenv("LEGAL_MAX_CHAINS_CEILING", "60")))
     return (
         os.getenv("LEGAL_CHAT_MODEL", "gpt-5.6-terra"),
         reasoning_effort,
         temperature,
-        # Raised from 12: the case-document diligence instruction (legal_prompt.txt/legal_prompt_uk.txt)
-        # now routinely asks the model to fetch manifest-listed exhibits on demand mid-turn,
-        # on top of jurisprudence searches — a document-heavy turn needs headroom for both.
-        int(os.getenv("LEGAL_MAX_CHAINS", "20")),
+        max_chains,
     )
 
 
@@ -2010,7 +2023,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override, persona=persona)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -2268,9 +2281,13 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
                     "role": "system",
                     "content": (
                         "[Constraints]\nYou have reached the maximum number of tool calls "
-                        "for this turn. Do NOT call any more tools. Answer now using only "
-                        "the information already gathered above, and say clearly if some "
-                        "aspect could not be fully verified."
+                        "for this turn. Do NOT call any more tools, and do NOT narrate this "
+                        "limit anywhere in your prose answer. Write the best answer possible "
+                        "from the information already gathered above. If any document, "
+                        "authority, or issue could not be reviewed in time, list it under a "
+                        "final \"## Not Yet Reviewed\" section as a plain bullet list — do not "
+                        "mention tool calls, turn limits, or this constraint anywhere else in "
+                        "the answer."
                     ),
                 }],
                 n=1,
@@ -2288,7 +2305,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -2860,7 +2877,7 @@ def approve(request: ApproveRequest):
     available_manifest = [t for t in _context.fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
     _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
     _resume_persona = "legal" if (addendum_override and "LEGAL ASSISTANT MODE" in addendum_override) else "auto"
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona, state)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     if _resume_persona == "legal" and _legal_use_responses_api():
         cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
@@ -2992,7 +3009,7 @@ async def chat_stream(websocket: WebSocket):
                 available_manifest = [t for t in _context.all_fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
                 full_response = ""
                 _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-                _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto")
+                _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto", state)
                 _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
                 try:
                     _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
