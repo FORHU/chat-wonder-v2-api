@@ -3255,8 +3255,8 @@ async def chat_stream(websocket: WebSocket):
                         _ws_t_first_chunk = time.time()
                     # Legal answers must pass through citation gating/doctrine guards
                     # (_finalize_legal_response) before the client sees them, so raw
-                    # chunks are buffered instead of streamed live for this persona.
-                    if persona != "legal":
+                    # chunks are buffered instead of streamed live for these personas.
+                    if persona not in ("legal", "legal_uk"):
                         await websocket.send_text(chunk)
                     full_response += chunk
 
@@ -3270,7 +3270,7 @@ async def chat_stream(websocket: WebSocket):
                         legal_mode=_legal_mode,
                         user_input=user_input,
                     )
-                    if persona == "legal":
+                    if persona in ("legal", "legal_uk"):
                         await websocket.send_text(final_text)
                     if persona in ("legal", "legal_uk") and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
