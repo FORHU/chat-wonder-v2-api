@@ -528,6 +528,20 @@ def _uk_call(tool_name: str, arguments: dict) -> dict:
     return payload if isinstance(payload, dict) else {"data": payload}
 
 
+def _uk_result_rows(payload: dict):
+    """First list of result rows under a common container key, or None.
+
+    uk-legal-mcp.fly.dev's exact payload shape is an external server we don't
+    control (see the_server.py's _trace_count_for_result), so probe the same
+    common keys rather than assuming one fixed shape.
+    """
+    for key in ("results", "items", "matches", "sections"):
+        val = payload.get(key)
+        if isinstance(val, list):
+            return val
+    return None
+
+
 def case_law_search(query: str = None, court: str = None, party: str = None, judge: str = None, from_date: str = None, to_date: str = None, limit: int = 10, page: int = 1) -> dict:
     """Search UK case law via the UK Legal MCP."""
     query = (str(query).strip() if query is not None else "")
@@ -641,6 +655,11 @@ def legislation_search(query: str = None, type: str = None, year: int = None, fu
         args["limit"] = int(limit)
     try:
         payload = _uk_call("legislation_search", args)
+        rows = _uk_result_rows(payload)
+        if rows is not None:
+            from uk_legal_mcp.scoring import fill_missing_scores
+
+            fill_missing_scores(rows, query)
         return {"success": True, **payload}
     except Exception as e:
         return {"success": False, "error": str(e), "message": f"legislation_search failed: {e}"}
