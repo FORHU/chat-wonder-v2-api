@@ -125,7 +125,7 @@ def _normalize_url(url: str) -> str:
     return str(url or "").strip().rstrip("/")
 
 
-def _allowed_set(search_results) -> Set[str]:
+def allowed_url_set(search_results) -> Set[str]:
     return {_normalize_url(u) for u in collect_tool_result_urls(search_results)}
 
 
@@ -198,6 +198,21 @@ def quote_appears_in_corpus(quote_body: str, corpus_norm: str, *, min_len: int =
     return False
 
 
+def is_unverified_blockquote(body: str, corpus_norm: str) -> bool:
+    """True when a blockquote body must be grounded in retrieved text but isn't.
+
+    Shared by strip_unverified_blockquotes (rewrite) and legal_verify.audit_legal_draft
+    (report) so both apply the same exemptions: lines carrying a link / legal-ref
+    anchor and short bodies are never treated as unverified.
+    """
+    if re.search(r"\[.+\]\(.+\)", body) or re.search(r'class="legal-ref', body):
+        return False
+    bare = _normalize_quote_text(body)
+    if len(bare) < 24:
+        return False
+    return not quote_appears_in_corpus(body, corpus_norm)
+
+
 def strip_unverified_blockquotes(
     text: str,
     search_results,
@@ -212,12 +227,7 @@ def strip_unverified_blockquotes(
 
     def repl(m: re.Match) -> str:
         body = m.group("body")
-        if re.search(r"\[.+\]\(.+\)", body) or re.search(r'class="legal-ref', body):
-            return m.group(0)
-        bare = _normalize_quote_text(body)
-        if len(bare) < 24:
-            return m.group(0)
-        if quote_appears_in_corpus(body, corpus):
+        if not is_unverified_blockquote(body, corpus):
             return m.group(0)
         stripped[0] += 1
         return (
@@ -257,6 +267,23 @@ def repair_legal_source_links(
     return repaired
 
 
+def classify_href(href: str, allowed: Set[str]) -> str:
+    """Cite-gate verdict for one markdown href against the normalized allowed pool.
+
+    Returns "skip" (not a gateable href — anchors, mailto, bare text), "ok",
+    "truncated" (placeholder like `juris.ph/case/...`), or "unverified".
+    Shared by gate_unverified_legal_urls (rewrite) and legal_verify (report).
+    """
+    h = (href or "").strip()
+    if not _is_gateable_href(h):
+        return "skip"
+    if _is_truncated_href(h):
+        return "truncated"
+    if _normalize_url(h) in allowed:
+        return "ok"
+    return "unverified"
+
+
 def gate_unverified_legal_urls(
     text: str,
     search_results,
@@ -266,18 +293,13 @@ def gate_unverified_legal_urls(
     if not text or not isinstance(text, str):
         return text
 
-    allowed = _allowed_set(search_results)
+    allowed = allowed_url_set(search_results)
     gated = [0]
 
     def repl(m: re.Match) -> str:
-        label, href = m.group(1), m.group(2).strip()
-        if not _is_gateable_href(href):
-            return m.group(0)
-        if _is_truncated_href(href):
-            gated[0] += 1
-            return label
-        norm = _normalize_url(href)
-        if norm in allowed:
+        label, href = m.group(1), m.group(2)
+        verdict = classify_href(href, allowed)
+        if verdict in ("skip", "ok"):
             return m.group(0)
         gated[0] += 1
         return label

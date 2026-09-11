@@ -36,6 +36,7 @@ from urllib.parse import urljoin
 import s3_storage
 from juris_mcp.client import get_client as get_juris_mcp_client
 from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
+from uk_legal_mcp import urls as uk_urls
 from legal_citations import apply_legal_citation_pipeline, select_related_cases
 from legal_fact_boost import (
     append_critical_doctrine_guards,
@@ -43,6 +44,7 @@ from legal_fact_boost import (
     prepare_legal_turn,
 )
 import legal_responses_chain
+from legal_verify import DRAFT_DISCARD, inject_verifier_feedback, make_legal_verifier, verifier_trace_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -882,65 +884,6 @@ def _search_results_to_source_metadata(results: list) -> list:
 
 
 def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) -> str:
-    """Repair /sources/ leftovers, strip unverified quotes, cite-gate URLs, HTML-format."""
-
-    def on_repair(reason: str):
-        logging.info("[legal-citation] rewrote /sources/ links to juris.ph URLs")
-        increment_metric_counter(
-            "legal.citation_repair.count",
-            value=1,
-            tags={"reason": reason},
-            session_id=None,
-        )
-
-    def on_gate(reason: str):
-        logging.info("[legal-citation] demoted unverified citation URL(s)")
-        increment_metric_counter(
-            "legal.citation_gate.count",
-            value=1,
-            tags={"reason": reason},
-            session_id=None,
-        )
-
-    def on_strip_quote(reason: str):
-        logging.info("[legal-citation] removed unverified blockquote(s)")
-        increment_metric_counter(
-            "legal.citation_quote_strip.count",
-            value=1,
-            tags={"reason": reason},
-            session_id=None,
-        )
-
-    return apply_legal_citation_pipeline(
-        text,
-        search_results,
-        legal_mode=legal_mode,
-        on_repair=on_repair,
-        on_gate=on_gate,
-        on_strip_quote=on_strip_quote,
-    )
-
-
-def _finalize_legal_response(
-    text: str,
-    search_results,
-    *,
-    legal_mode: bool,
-    user_input: str = "",
-) -> str:
-    """Citation pipeline + ensure prefetched controlling authorities are named."""
-    out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode)
-    if legal_mode:
-        out = append_missing_prefetched_mentions(out, search_results)
-        out = append_critical_doctrine_guards(out, user_input)
-        # Re-run HTML link format for any appended markdown cites
-        from legal_citations import format_legal_citation_links, gate_unverified_legal_urls
-
-        out = gate_unverified_legal_urls(out, search_results)
-        out = format_legal_citation_links(out)
-    return out
-
-def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) -> str:
     def on_repair(reason: str):
         logging.info("[legal-citation] repaired /sources/ link(s)")
         increment_metric_counter("legal.citation_repair.count", value=1, tags={"reason": reason}, session_id=None)
@@ -1248,11 +1191,33 @@ def execute_function_call(function_call: dict, session_id: str = None):
             "get_case",
             "get_republic_act",
         }
+        # The pool persists for the session; bound it so a long consultation
+        # doesn't grow the cite-gate/quote corpus without limit.
+        _LEGAL_POOL_MAX = int(os.getenv("LEGAL_POOL_MAX", "300"))
         if func_name in _LEGAL_RESULT_TOOLS and session_id and isinstance(result, dict) and result.get("success"):
             state = _context.sessions.get(session_id)
             if state is not None:
                 if func_name.startswith("search_"):
-                    state.last_search_legal_results = result.get("results", [])
+                    # Accumulate, never overwrite (same posture as the UK pool below).
+                    # Overwriting wiped every earlier search row AND every vetted get_*
+                    # entry the moment the model ran one more search — confirmed live:
+                    # the cite gate then demoted 17-20 legitimately retrieved citations
+                    # per turn. Rows already in the pool (by id) are kept as-is so a
+                    # vetted get_* entry is never replaced by a thinner search row.
+                    existing = list(state.last_search_legal_results or [])
+                    seen_ids = {
+                        str(r.get("id") or r.get("item_id") or "")
+                        for r in existing if isinstance(r, dict)
+                    }
+                    for row in result.get("results", []) or []:
+                        if not isinstance(row, dict):
+                            continue
+                        rid = str(row.get("id") or row.get("item_id") or "")
+                        if rid and rid in seen_ids:
+                            continue
+                        seen_ids.add(rid)
+                        existing.append(row)
+                    state.last_search_legal_results = existing[-_LEGAL_POOL_MAX:]
                 else:
                     # Merge get_* into citation pool for URL repair / metadata
                     entry = {
@@ -1319,6 +1284,13 @@ def execute_function_call(function_call: dict, session_id: str = None):
             # (never overwrite) since a UK turn chains many tool calls.
             state = _context.sessions.get(session_id)
             if state is not None:
+                # Give section fetches / resolved section citations a real
+                # legislation.gov.uk section URL (the MCP returns none / a search
+                # page) — mutates `result` so the model cites it and the pool holds it.
+                if func_name == "legislation_get_section":
+                    uk_urls.enrich_section_result(result, func_args if isinstance(func_args, dict) else {})
+                elif func_name == "citations_resolve":
+                    uk_urls.enrich_resolve_result(result, state.last_search_legal_results or [])
                 entry = {k: v for k, v in result.items() if k != "success"}
                 if entry:
                     existing = list(state.last_search_legal_results or [])
@@ -1392,7 +1364,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
 # Reason loop (non-streaming, collects full response)
 # ---------------------------------------------------------------------------
 
-def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False):
+def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False, verify=None):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -1400,6 +1372,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
     last_tool = None
     tool_log = []
     state.last_turn_tool_log = tool_log
+    refine_round = 0
 
     def perform_chat(msgs):
         args = {
@@ -1422,13 +1395,19 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             args["parallel_tool_calls"] = False
         return state.openai_client.chat.completions.create(**args)
 
-    for _ in range(max_chains):
+    # One extra iteration is reserved for a verify->refine round only: a draft produced
+    # on the last research iteration can still be audited and revised, while the
+    # tool-call cap itself stays at max_chains.
+    _budget = max_chains + (1 if verify else 0)
+    for iteration in range(_budget):
+        if iteration >= max_chains and refine_round == 0:
+            break
         function_call = {"name": None, "arguments": ""}
         if last_tool:
             _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
         else:
             _cycle_summary = "The AI is working through the question, deciding whether it needs to use a tool or can answer directly."
-        broadcast_trace("cognition", f"Cycle {_ + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id,
+        broadcast_trace("cognition", f"Cycle {iteration + 1} — reasoning over {len(messages)} messages (model: {_context.model})", session_id,
             summary=_cycle_summary)
         stream_resp = perform_chat(messages)
         last_response = ""
@@ -1488,7 +1467,19 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             full_response = last_response.strip()
 
         if not function_call["name"]:
-            break
+            # Verify→refine (legal personas only; see legal_verify.make_legal_verifier).
+            feedback = (
+                verify(full_response, refine_round)
+                if (verify and full_response and iteration < _budget - 1)
+                else None
+            )
+            if not feedback:
+                break
+            refine_round += 1
+            _vt, _vs = verifier_trace_text(feedback, refine_round)
+            broadcast_trace("control", _vt, session_id, summary=_vs)
+            inject_verifier_feedback(messages, full_response, feedback)
+            continue
 
         # HITL gate
         if not (_context.manual_auto_approval or auto_approval):
@@ -2029,6 +2020,8 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     # auto-approves function calls, so /chat and the websocket path never
     # surface a pending_approval response.
     _auto_approval = True
+    if persona in ("legal", "legal_uk"):
+        _chain_kwargs["verify"] = make_legal_verifier(state)
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
@@ -2064,7 +2057,7 @@ async def _astream_llm(perform_chat_fn, messages):
         yield item
 
 
-async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False):
+async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False, verify=None):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -2073,6 +2066,9 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
     tool_log = []
     state.last_turn_tool_log = tool_log
     _chain_start = time.time()
+    refine_round = 0
+    _verify_step_id = None  # open [TRACE] self-check step awaiting its 'result' frame
+    _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
 
     def perform_chat(msgs):
         args = {
@@ -2092,7 +2088,13 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             args["parallel_tool_calls"] = False
         return state.openai_client.chat.completions.create(**args)
 
-    for iteration in range(max_chains):
+    # One extra iteration is reserved for a verify->refine round only: a draft produced
+    # on the last research iteration can still be audited and revised, while the
+    # tool-call cap itself stays at max_chains.
+    _budget = max_chains + (1 if verify else 0)
+    for iteration in range(_budget):
+        if iteration >= max_chains and refine_round == 0:
+            break
         function_call = {"name": None, "arguments": ""}
         if last_tool:
             _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
@@ -2196,8 +2198,33 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         if last_response.strip():
             full_response = last_response.strip()
 
+        if _verify_step_id and last_response.strip():
+            # Revised text arrived — flip the self-check research step to done.
+            yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'result', 'tool': 'self_check'})}[/TRACE]"
+            _verify_step_id = None
+            _discarded_draft = None
+
         if not function_call["name"]:
-            break
+            # Verify→refine (legal personas only; see legal_verify.make_legal_verifier).
+            feedback = (
+                verify(full_response, refine_round)
+                if (verify and full_response and iteration < _budget - 1)
+                else None
+            )
+            if not feedback:
+                break
+            refine_round += 1
+            _vt, _vs = verifier_trace_text(feedback, refine_round)
+            broadcast_trace("control", _vt, session_id, summary=_vs)
+            await asyncio.sleep(0)
+            # The draft was already yielded; chat_stream buffers legal text server-side,
+            # so tell it to drop that buffer before the revised answer streams in.
+            yield DRAFT_DISCARD
+            _discarded_draft = full_response
+            _verify_step_id = f"verify:{refine_round}"
+            yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'start', 'tool': 'self_check', 'label': f'Self-check: revising {feedback.summary}'})}[/TRACE]"
+            inject_verifier_feedback(messages, full_response, feedback)
+            continue
 
         # HITL gate: emit pending_approval event and stop streaming
         if not (_context.manual_auto_approval or auto_approval):
@@ -2296,9 +2323,17 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             forced_text = (forced.choices[0].message.content or "").strip()
             if forced_text:
                 full_response = forced_text
+                _discarded_draft = None
                 yield forced_text
         except Exception as e:
             logging.warning("Forced final-answer completion failed: %s", e)
+
+    if _discarded_draft:
+        # Revise round ran out of iterations without producing text: re-yield the
+        # rejected draft (the consumer dropped it) so the finalizer gates it as before.
+        yield _discarded_draft
+    if _verify_step_id:
+        yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'result', 'tool': 'self_check'})}[/TRACE]"
 
 async def streaming_reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override, persona=persona)
@@ -2311,6 +2346,8 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     # auto-approves function calls, so /chat and the websocket path never
     # surface a pending_approval response.
     _auto_approval = True
+    if persona in ("legal", "legal_uk"):
+        _chain_kwargs["verify"] = make_legal_verifier(state)
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
@@ -2879,6 +2916,8 @@ def approve(request: ApproveRequest):
     _resume_persona = "legal" if (addendum_override and "LEGAL ASSISTANT MODE" in addendum_override) else "auto"
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona, state)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+    if _resume_persona == "legal":
+        _chain_kwargs["verify"] = make_legal_verifier(state)
     if _resume_persona == "legal" and _legal_use_responses_api():
         cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
     else:
@@ -3011,6 +3050,8 @@ async def chat_stream(websocket: WebSocket):
                 _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
                 _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto", state)
                 _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+                if _legal_mode:
+                    _chain_kwargs["verify"] = make_legal_verifier(state)
                 try:
                     _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
                     if _legal_mode and _legal_use_responses_api():
@@ -3036,6 +3077,12 @@ async def chat_stream(websocket: WebSocket):
                                 "arguments": args_parsed,
                             }))
                             break
+                        if chunk == DRAFT_DISCARD:
+                            full_response = ""
+                            continue
+                        if chunk.startswith("[TRACE]"):
+                            await websocket.send_text(chunk)
+                            continue
                         # Legal answers are buffered and sent post-finalize below,
                         # same as the main streaming path — see _finalize_legal_response.
                         if not _legal_mode:
@@ -3262,6 +3309,11 @@ async def chat_stream(websocket: WebSocket):
                             "arguments": args_parsed,
                         }))
                         break
+                    # Verify→refine rejected the buffered legal draft; drop it so only the
+                    # revised answer (or the re-yielded draft fallback) reaches the finalizer.
+                    if chunk == DRAFT_DISCARD:
+                        full_response = ""
+                        continue
                     # Glass-box research steps bypass the legal persona's buffering below —
                     # they aren't answer text, so they carry no citation-gating risk, and the
                     # whole point is to fill the silent window while full_response is withheld.

@@ -28,6 +28,8 @@ import asyncio
 import json
 from typing import List, Optional
 
+from legal_verify import DRAFT_DISCARD, Verifier, inject_verifier_feedback, verifier_trace_text
+
 
 def to_responses_tools(chat_completions_tools: Optional[list]) -> list:
     """Flatten {"type": "function", "function": {...}} -> Responses tool shape."""
@@ -171,6 +173,7 @@ def run_function_chain_responses(
     reasoning_effort: str = None,
     temperature: float = None,
     auto_approval: bool = False,
+    verify: Optional[Verifier] = None,
 ):
     """Legal-persona equivalent of the_server.run_function_chain(), on /v1/responses
     instead of /v1/chat/completions, so real reasoning_effort can be combined
@@ -211,14 +214,21 @@ def run_function_chain_responses(
             args["parallel_tool_calls"] = False
         return state.openai_client.responses.create(**args)
 
-    for _ in range(max_chains):
+    refine_round = 0
+    # One extra iteration is reserved for a verify->refine round only: a draft produced
+    # on the last research iteration can still be audited and revised, while the
+    # tool-call cap itself stays at max_chains.
+    _budget = max_chains + (1 if verify else 0)
+    for iteration in range(_budget):
+        if iteration >= max_chains and refine_round == 0:
+            break
         if last_tool:
             _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
         else:
             _cycle_summary = "The AI is working through the question, deciding whether it needs to use a tool or can answer directly."
         broadcast_trace(
             "cognition",
-            f"Cycle {_ + 1} — reasoning over {len(input_items)} items (model: {model}, reasoning_effort: {reasoning_effort})",
+            f"Cycle {iteration + 1} — reasoning over {len(input_items)} items (model: {model}, reasoning_effort: {reasoning_effort})",
             session_id,
             summary=_cycle_summary,
         )
@@ -271,7 +281,20 @@ def run_function_chain_responses(
             full_response = last_response.strip()
 
         if not function_call:
-            break
+            # Verify→refine: give the model one chance to fix citations the finalizer
+            # would otherwise silently gate. Needs a spare iteration to revise in.
+            feedback = (
+                verify(full_response, refine_round)
+                if (verify and full_response and iteration < _budget - 1)
+                else None
+            )
+            if not feedback:
+                break
+            refine_round += 1
+            _vt, _vs = verifier_trace_text(feedback, refine_round)
+            broadcast_trace("control", _vt, session_id, summary=_vs)
+            inject_verifier_feedback(input_items, full_response, feedback)
+            continue
 
         # HITL gate
         if not (_context.manual_auto_approval or auto_approval):
@@ -393,6 +416,7 @@ async def streaming_run_function_chain_responses(
     reasoning_effort: str = None,
     temperature: float = None,
     auto_approval: bool = False,
+    verify: Optional[Verifier] = None,
 ):
     """Streaming (async generator) counterpart of run_function_chain_responses,
     structurally mirroring the_server.streaming_run_function_chain -- same
@@ -418,6 +442,9 @@ async def streaming_run_function_chain_responses(
     last_tool = None
     tool_log = []
     state.last_turn_tool_log = tool_log
+    refine_round = 0
+    _verify_step_id = None  # open [TRACE] self-check step awaiting its 'result' frame
+    _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
 
     def perform_responses_call(items):
         args = {
@@ -433,7 +460,13 @@ async def streaming_run_function_chain_responses(
             args["parallel_tool_calls"] = False
         return state.openai_client.responses.create(**args)
 
-    for iteration in range(max_chains):
+    # One extra iteration is reserved for a verify->refine round only: a draft produced
+    # on the last research iteration can still be audited and revised, while the
+    # tool-call cap itself stays at max_chains.
+    _budget = max_chains + (1 if verify else 0)
+    for iteration in range(_budget):
+        if iteration >= max_chains and refine_round == 0:
+            break
         if last_tool:
             _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
         else:
@@ -535,8 +568,34 @@ async def streaming_run_function_chain_responses(
         if last_response.strip():
             full_response = last_response.strip()
 
+        if _verify_step_id and last_response.strip():
+            # Revised text arrived — flip the self-check research step to done.
+            yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'result', 'tool': 'self_check'})}[/TRACE]"
+            _verify_step_id = None
+            _discarded_draft = None
+
         if not function_call:
-            break
+            # Verify→refine: give the model one chance to fix citations the finalizer
+            # would otherwise silently gate. Needs a spare iteration to revise in.
+            feedback = (
+                verify(full_response, refine_round)
+                if (verify and full_response and iteration < _budget - 1)
+                else None
+            )
+            if not feedback:
+                break
+            refine_round += 1
+            _vt, _vs = verifier_trace_text(feedback, refine_round)
+            broadcast_trace("control", _vt, session_id, summary=_vs)
+            await asyncio.sleep(0)
+            # The draft was already yielded; chat_stream buffers legal text server-side,
+            # so tell it to drop that buffer before the revised answer streams in.
+            yield DRAFT_DISCARD
+            _discarded_draft = full_response
+            _verify_step_id = f"verify:{refine_round}"
+            yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'start', 'tool': 'self_check', 'label': f'Self-check: revising {feedback.summary}'})}[/TRACE]"
+            inject_verifier_feedback(input_items, full_response, feedback)
+            continue
 
         # HITL gate: emit pending_approval event and stop streaming
         if not (_context.manual_auto_approval or auto_approval):
@@ -647,8 +706,16 @@ async def streaming_run_function_chain_responses(
             forced_text = (forced.output_text or "").strip()
             if forced_text:
                 full_response = forced_text
+                _discarded_draft = None
                 yield forced_text
         except Exception as e:
             import logging
 
             logging.warning("Forced final-answer completion (responses API) failed: %s", e)
+
+    if _discarded_draft:
+        # Revise round ran out of iterations without producing text: re-yield the
+        # rejected draft (the consumer dropped it) so the finalizer gates it as before.
+        yield _discarded_draft
+    if _verify_step_id:
+        yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'result', 'tool': 'self_check'})}[/TRACE]"

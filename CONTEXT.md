@@ -46,6 +46,10 @@ _Avoid_: Anycase issuance corpus, general “Philippine law” without an MCP hi
 A user-facing reference to a retrieved document, expressed as the juris.ph shareable page URL (optionally paired with the official PDF link). Not a local `/sources/{id}` library path.
 _Avoid_: numeric DB item_id, LEGAL_LIBRARY_URL sources links
 
+**Legal Result Pool**
+`state.last_search_legal_results`: every row/record a legal tool returned this session, for both tenants. Always accumulated (search rows deduped by id; get_* entries appended), never overwritten, bounded by `LEGAL_POOL_MAX`. It is the allowed set for the Cite Gate and the corpus for quote verification. Confirmed live: overwriting on each PH `search_*` call wiped vetted `get_case` entries and cost 17–20 legitimate citations per turn.
+_Avoid_: `state.last_search_legal_results = result["results"]`; resetting the pool mid-turn
+
 **Cite Gate**
 Post-response filter in legal mode: markdown links whose href is not an exact URL from the current tool-result pool (including truncated `juris.ph/case/...` placeholders) are demoted to plain link text. Implemented in `legal_citations.py`.
 _Avoid_: leaving phantom juris.ph hrefs in the final answer
@@ -92,6 +96,16 @@ _Avoid_: a narrowed subset matching the PH Legal Tool count; an umbrella facade 
 A user-facing reference to a UK judgment, legislation section, or Hansard contribution, formatted per OSCOLA convention (via `citations_format_oscola`/`citations_resolve`), using the source's own public URL (e.g. National Archives judgment URI, legislation.gov.uk, hansard.parliament.uk).
 _Avoid_: juris.ph-style plain URL citation for UK sources, inventing an OSCOLA citation without resolving it first
 
+**UK Section URL**
+The canonical `https://www.legislation.gov.uk/{type}/{year}/{number}/section/{n}` page. The UK Legal MCP returns no URL on `legislation_get_section` and a `/search?title=` page as `citations_resolve`'s `resolved_url` for sections, so `uk_legal_mcp/urls.py` synthesises the section URL from the call args / earlier search rows before the result reaches the model or the Legal Result Pool. Fetched sections are cited directly (`<Act> <year>, s <n>` → that `url`), reserving `citations_resolve`/`citations_format_oscola` for case law.
+_Avoid_: linking section citations to a `/search?title=` page; spending 2 tool calls per already-fetched section
+
 **UK MCP Client**
 The shared generic MCP client (`mcp_client.py`) instantiated against the UK Legal MCP, with no Cloudflare UA spoofing (unlike the Juris MCP Client). See ADR-0003 for why the transport layer is shared with the PH client rather than duplicated.
 _Avoid_: a second hand-copied Streamable HTTP client with its own retry/unwrap logic
+
+## Legal answer verification (PH + UK)
+
+**Verifier Feedback Loop**
+Inside the tool-calling loop, when the legal model stops calling tools and produces a draft, the same checks the Cite Gate and quote-strip run post-hoc are run on the draft (`legal_verify.audit_legal_draft`). If anything would be demoted, the draft plus a `[VERIFIER …]` system message (what failed, how to fix it, the retrieved title→URL pool) is appended and the model revises. Bounded by `LEGAL_VERIFY_MAX_ROUNDS` (default 1; `0` disables — rollback lever). The post-hoc finalizer stays as the safety net for whatever survives. In the streaming path the chain yields `__DRAFT_DISCARD__` so `chat_stream` drops the buffered draft; a `self_check` `[TRACE]` step shows the revision in the research-step list.
+_Avoid_: silently gating a citation the model was never told about; unbounded revise rounds; running the loop for non-legal personas; streaming legal draft text live (the discard only works because legal text is buffered server-side)
