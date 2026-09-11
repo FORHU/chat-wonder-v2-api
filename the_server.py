@@ -3389,36 +3389,46 @@ async def chat_stream(websocket: WebSocket):
                 # Send __END__ now so the client unlocks immediately, then generate
                 # timeline/mindmap in a background thread and send before [DONE].
                 await websocket.send_text(_context.__END__)
-                if persona in ("legal", "legal_uk") and full_response:
-                    t_sd = time.time()
-                    structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
-                    logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
-                    if structured:
-                        await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
-                    t_re = time.time()
-                    reasoning = await asyncio.to_thread(
-                        _generate_reasoning_explanation,
-                        user_input,
-                        final_text,
-                        state.last_search_legal_results,
-                        state.last_turn_tool_log,
-                        state,
-                    )
-                    logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
-                    if reasoning:
-                        await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
-                    # Gated separately from _generate_structured_data above — see
-                    # _wants_audio_overview's docstring for why this can't just be folded in.
-                    if _wants_audio_overview(user_input):
-                        t_ao = time.time()
-                        audio_overview = await asyncio.to_thread(
-                            _generate_audio_overview_script, full_response.strip(), state
-                        )
-                        logging.info("_generate_audio_overview_script %.2fs", time.time() - t_ao)
-                        if audio_overview:
-                            await websocket.send_text(f"[AUDIO_OVERVIEW_DATA]{json.dumps(audio_overview)}")
-                await websocket.send_text("[DONE]")
                 end_sent = True
+                # Everything past __END__ is extras on top of an answer the client already has.
+                # A failure here must not become "[Error] ..." (see the except below): ilovelawyer-api
+                # treated any [Error] frame as a failed turn and never persisted the reply, so the
+                # user watched a full answer stream in and then found it gone from history.
+                try:
+                    if persona in ("legal", "legal_uk") and full_response:
+                        t_sd = time.time()
+                        structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
+                        logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
+                        if structured:
+                            await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
+                        t_re = time.time()
+                        reasoning = await asyncio.to_thread(
+                            _generate_reasoning_explanation,
+                            user_input,
+                            final_text,
+                            state.last_search_legal_results,
+                            state.last_turn_tool_log,
+                            state,
+                        )
+                        logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
+                        if reasoning:
+                            await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
+                        # Gated separately from _generate_structured_data above — see
+                        # _wants_audio_overview's docstring for why this can't just be folded in.
+                        if _wants_audio_overview(user_input):
+                            t_ao = time.time()
+                            audio_overview = await asyncio.to_thread(
+                                _generate_audio_overview_script, full_response.strip(), state
+                            )
+                            logging.info("_generate_audio_overview_script %.2fs", time.time() - t_ao)
+                            if audio_overview:
+                                await websocket.send_text(f"[AUDIO_OVERVIEW_DATA]{json.dumps(audio_overview)}")
+                except Exception as e:
+                    logging.warning(
+                        "/chat-stream [%s] post-__END__ extras failed after %.2fs session=%s (answer already delivered): %s",
+                        persona, time.time() - _ws_t_start, session_id, e,
+                    )
+                await websocket.send_text("[DONE]")
 
             except Exception as e:
                 logging.warning(
