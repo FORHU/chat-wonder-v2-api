@@ -2196,7 +2196,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk"):
-        _chain_kwargs["verify"] = make_legal_verifier(state)
+        _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
@@ -2522,7 +2522,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk"):
-        _chain_kwargs["verify"] = make_legal_verifier(state)
+        _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
@@ -3099,7 +3099,7 @@ def approve(request: ApproveRequest):
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona, state)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     if _resume_persona == "legal":
-        _chain_kwargs["verify"] = make_legal_verifier(state)
+        _chain_kwargs["verify"] = make_legal_verifier(state, query=_resume_query)
     if _resume_persona == "legal" and _legal_use_responses_api():
         cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
     else:
@@ -3233,10 +3233,10 @@ async def chat_stream(websocket: WebSocket):
                 _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
                 _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto", state)
                 _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
+                _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
                 if _legal_mode:
-                    _chain_kwargs["verify"] = make_legal_verifier(state)
+                    _chain_kwargs["verify"] = make_legal_verifier(state, query=_resume_query)
                 try:
-                    _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
                     if _legal_mode and _legal_use_responses_api():
                         _resume_chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
                     else:

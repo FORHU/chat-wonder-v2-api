@@ -73,6 +73,144 @@ def count_contradiction_resolutions(text: str) -> int:
     return len(_PROBATIVE_PHRASE.findall(text))
 
 
+
+# --- Authorities the user's own question names ------------------------------------------
+# Precision over recall: every pattern here needs a strong "this is a case name" signal, because
+# a false positive costs a full revise round on a real client turn. Recall gaps are acceptable —
+# a name we fail to extract simply isn't checked, which is today's behaviour.
+_AUTH_W = r"(?:R|[A-Z][\w'’-]+)"
+_AUTH_SUFFIX = r"(?:plc|Ltd|LLP|Inc|Limited|Co)"
+# One case-name side: up to three capitalised words, optionally one connector + one or two more
+# words, optionally a corporate suffix. Bounded so "A v B and C v D" splits into two names.
+_AUTH_NAME = (
+    rf"{_AUTH_W}(?: {_AUTH_W}){{0,2}}(?: (?:and|&|de|of|le) {_AUTH_W}(?: {_AUTH_W})?)?"
+    rf"(?: {_AUTH_SUFFIX})?"
+)
+_AUTH_V = re.compile(rf"\b({_AUTH_NAME}) v\.? ({_AUTH_NAME})\b")
+_AUTH_LEADING_WORDS = {
+    "in", "see", "apply", "applying", "consider", "considering", "address", "discuss", "does",
+    "is", "was", "under", "per", "following", "cf", "compare", "contrast", "distinguish",
+    "whether", "how", "why", "what", "did", "can", "should", "also", "and", "but", "the",
+    "on", "for", "with", "from", "against", "citing", "given", "unlike", "like", "then",
+}
+_AUTH_PAREN_LIST = re.compile(r"\(([^()]{3,160})\)")
+_AUTH_SLASH_LINE = re.compile(r"\b([A-Z][\w'’-]{2,}(?:/[A-Z][\w'’-]{2,})+)(?: line| principles| approach)?\b")
+_AUTH_PURPOSES = re.compile(rf"\b({_AUTH_NAME}) purposes\b")
+_AUTH_STOP = {
+    "crown court", "employment tribunal", "high court", "court of appeal", "supreme court",
+    "full code", "full code test", "england", "wales", "scotland", "northern ireland",
+    "united kingdom", "part", "parts", "sch", "cpr", "pace", "hswa", "cja", "era", "gdpr", "dpa",
+    "act", "regulations", "cps", "hse", "met office", "the", "and", "or", "of",
+}
+
+
+_AUTH_CONNECTORS = ("and", "&", "de", "of", "le", "v")
+
+
+def _clean_authority(name: str) -> str:
+    words = re.sub(r"\s+", " ", name).strip(" .,;:").split()
+    while words and words[0].lower() in _AUTH_CONNECTORS:
+        words.pop(0)
+    while words and words[-1].lower() in _AUTH_CONNECTORS:
+        words.pop()
+    return " ".join(words).replace("&", "and")
+
+
+def _looks_like_authority(name: str) -> bool:
+    if not name or any(ch.isdigit() for ch in name):
+        return False
+    if name.lower() in _AUTH_STOP:
+        return False
+    words = name.split()
+    if len(words) > 8:
+        return False
+    return all(w[0].isupper() or w in ("and", "de", "of", "le", "v", "plc", "the") for w in words)
+
+
+def extract_named_authorities(query: str) -> List[str]:
+    """Case names the user's message itself cites, in order of appearance, deduped.
+
+    Catches `A v B`, `(Donoghue; Caparo)`-style parenthetical lists, `Hedley/Caparo`
+    slash pairs and `… for Denton purposes`. Deliberately misses looser forms (see the
+    note above the patterns).
+    """
+    if not query:
+        return []
+    found: List[str] = []
+
+    def add(n: str) -> None:
+        n = _clean_authority(n)
+        if _looks_like_authority(n) and n.lower() not in {f.lower() for f in found}:
+            found.append(n)
+
+    pos = 0
+    while True:
+        m = _AUTH_V.search(query, pos)
+        if not m:
+            break
+        left = m.group(1).split()
+        if "R" in left:
+            left = ["R"]
+        while len(left) > 1 and left[0].lower() in _AUTH_LEADING_WORDS:
+            left.pop(0)
+        right = m.group(2)
+        # "A v B and C v D": the connector clause of B is really the start of the next case
+        # name whenever another " v " follows immediately — give it back and rescan from there.
+        if " and " in right and re.match(r"\s+v\.?\s", query[m.end():]):
+            right = right.rsplit(" and ", 1)[0]
+            pos = m.start(2) + len(right)
+        else:
+            pos = m.end()
+        add(f"{' '.join(left)} v {right}")
+    for m in _AUTH_PAREN_LIST.finditer(query):
+        inner = m.group(1)
+        if ";" not in inner:
+            continue
+        cleaned = [_clean_authority(p) for p in inner.split(";")]
+        if all(_looks_like_authority(c) for c in cleaned):
+            for c in cleaned:
+                add(c)
+    for m in _AUTH_SLASH_LINE.finditer(query):
+        for part in m.group(1).split("/"):
+            add(part)
+    for m in _AUTH_PURPOSES.finditer(query):
+        add(m.group(1))
+    return found
+
+
+def _authority_tokens(name: str) -> List[str]:
+    """Distinctive surname-like tokens a draft must contain to count as addressing `name`."""
+    skip = {"and", "de", "of", "le", "v", "r", "the", "bank", "plc", "ltd", "limited", "co"}
+    return [w for w in name.split() if w.lower() not in skip and len(w) >= 4]
+
+
+def missing_named_authorities(draft: str, names: List[str]) -> List[str]:
+    """Names from extract_named_authorities that the draft never mentions (case-insensitive;
+    a name counts as mentioned when its distinctive token(s) appear as whole words)."""
+    if not names:
+        return []
+    if not draft:
+        return list(names)
+    text = draft.replace("&", "and")
+
+    def present(side: str) -> bool:
+        if side == "R":  # the Crown — never distinctive
+            return False
+        # The first distinctive word is the short form lawyers actually use ("Caparo" for
+        # "Caparo Industries plc"), so that alone establishes presence.
+        token = (_authority_tokens(side) or [side])[0]
+        return bool(re.search(rf"\b{re.escape(token)}\b", text, re.I))
+
+    missing = []
+    for name in names:
+        # "Caparo Industries plc v Dickman" is addressed by "Caparo" alone — lawyers cite by the
+        # short form of either party, so either side counts.
+        sides = [p.strip() for p in re.split(r"\bv\b", name, maxsplit=1)]
+        if not any(present(side) for side in sides if side):
+            missing.append(name)
+    return missing
+
+
 @dataclass
 class AuditReport:
     unverified_urls: List[Tuple[str, str]] = field(default_factory=list)
@@ -83,6 +221,9 @@ class AuditReport:
     # 0 = the contradiction-sweep check is disabled for this turn (no case-document bundle to
     # sweep) — set by make_legal_verifier from state.case_document_manifest, never guessed here.
     min_contradiction_resolutions: int = 0
+    # Authorities the user's question named that the draft never mentions (see
+    # extract_named_authorities); empty when the question named none.
+    missing_authorities: List[str] = field(default_factory=list)
 
     @property
     def contradiction_deficit(self) -> bool:
@@ -94,7 +235,11 @@ class AuditReport:
     @property
     def has_issues(self) -> bool:
         return bool(
-            self.unverified_urls or self.truncated_urls or self.unverified_quotes or self.contradiction_deficit
+            self.unverified_urls
+            or self.truncated_urls
+            or self.unverified_quotes
+            or self.contradiction_deficit
+            or self.missing_authorities
         )
 
     @property
@@ -109,6 +254,8 @@ class AuditReport:
             parts.append(f"{len(self.unverified_quotes)} unverified quotation(s)")
         if self.contradiction_deficit:
             parts.append(f"only {self.contradiction_resolutions}/{self.min_contradiction_resolutions} contradictions resolved")
+        if self.missing_authorities:
+            parts.append(f"{len(self.missing_authorities)} user-named authority(ies) not addressed")
         return ", ".join(parts) or "no issues"
 
 
@@ -157,7 +304,13 @@ def collect_tool_result_citables(search_results) -> List[Tuple[str, str]]:
     return out
 
 
-def audit_legal_draft(text: str, search_results, *, min_contradiction_resolutions: int = 0) -> AuditReport:
+def audit_legal_draft(
+    text: str,
+    search_results,
+    *,
+    min_contradiction_resolutions: int = 0,
+    named_authorities: Optional[List[str]] = None,
+) -> AuditReport:
     """Report (never rewrite) every citation link / blockquote the finalizer would demote, plus
     (when min_contradiction_resolutions > 0 — see AuditReport) whether the draft shows enough
     resolved contradictions to look like a real sweep happened."""
@@ -184,6 +337,7 @@ def audit_legal_draft(text: str, search_results, *, min_contradiction_resolution
             report.unverified_quotes.append(body.strip())
 
     report.contradiction_resolutions = count_contradiction_resolutions(text)
+    report.missing_authorities = missing_named_authorities(text, named_authorities or [])
     return report
 
 
@@ -243,6 +397,23 @@ def build_verifier_feedback(report: AuditReport, *, max_allowed: int = 30) -> st
             f"sentence stating which side is more probative and why."
         )
 
+    if report.missing_authorities:
+        lines.append("")
+        lines.append("Authorities the user's question itself names but the draft never mentions:")
+        for name in report.missing_authorities:
+            lines.append(f"- {name}")
+        lines.append(
+            "A user-named authority must be addressed BY NAME — never silently dropped because "
+            "it could not be hyperlinked. For each: (a) search for it (PH: search_jurisprudence; "
+            "UK: case_law_search with the case name) and, if the tool returns the judgment or a "
+            "modern judgment that discusses it, read the relevant paragraph and state its "
+            "proposition from that retrieved text; (b) if no retrievable source discusses it, "
+            "still name it in plain text WITHOUT a hyperlink, say that it could not be "
+            "retrieved, and confine yourself to how it bears on the question; (c) if it is not "
+            "in point, say expressly why it is distinguished. Never fabricate a URL, neutral "
+            "citation, or holding for it."
+        )
+
     if report.allowed:
         lines.append("")
         lines.append("Retrieved sources this turn (title — URL):")
@@ -287,7 +458,7 @@ def verify_max_rounds_from_env() -> int:
         return 1
 
 
-def make_legal_verifier(state, *, max_rounds: Optional[int] = None) -> Optional[Verifier]:
+def make_legal_verifier(state, *, max_rounds: Optional[int] = None, query: str = "") -> Optional[Verifier]:
     """Closure the chain loops call with (draft_text, rounds_done) when the model
     stops calling tools. Returns feedback text to inject, or None to accept the
     draft. Reads state.last_search_legal_results at call time because the pool
@@ -295,6 +466,7 @@ def make_legal_verifier(state, *, max_rounds: Optional[int] = None) -> Optional[
     rounds = verify_max_rounds_from_env() if max_rounds is None else max_rounds
     if rounds <= 0:
         return None
+    named = extract_named_authorities(query)
 
     def verify(draft: str, rounds_done: int) -> Optional[VerifierFeedback]:
         from the_server import increment_metric_counter
@@ -309,12 +481,14 @@ def make_legal_verifier(state, *, max_rounds: Optional[int] = None) -> Optional[
             draft,
             getattr(state, "last_search_legal_results", None),
             min_contradiction_resolutions=min_contradictions,
+            named_authorities=named,
         )
         tags = {
             "round": str(rounds_done),
             "urls": str(report.url_issue_count),
             "quotes": str(len(report.unverified_quotes)),
             "contradictions": str(report.contradiction_resolutions),
+            "missing_authorities": str(len(report.missing_authorities)),
         }
         if not report.has_issues:
             if rounds_done > 0:

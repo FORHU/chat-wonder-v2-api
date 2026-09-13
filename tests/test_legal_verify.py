@@ -23,7 +23,9 @@ from legal_verify import (
     build_verifier_feedback,
     collect_tool_result_citables,
     count_contradiction_resolutions,
+    extract_named_authorities,
     make_legal_verifier,
+    missing_named_authorities,
 )
 
 POOL = [
@@ -140,12 +142,96 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn("and 35 more", msg)
 
 
+class NamedAuthorityTests(unittest.TestCase):
+    def test_a_v_b_forms(self):
+        q = "Apply R v Sussex Justices and Caparo Industries plc v Dickman here."
+        self.assertEqual(extract_named_authorities(q), ["R v Sussex Justices", "Caparo Industries plc v Dickman"])
+
+    def test_sentence_leading_word_stripped(self):
+        self.assertEqual(extract_named_authorities("In Donoghue v Stevenson the court held..."), ["Donoghue v Stevenson"])
+
+    def test_trailing_connector_not_captured(self):
+        self.assertEqual(
+            extract_named_authorities("What did Donoghue v Stevenson and the Caparo test decide?"),
+            ["Donoghue v Stevenson"],
+        )
+
+    def test_parenthetical_semicolon_list(self):
+        q = "Does the exception apply where the solicitor refused to advise (Donoghue; Caparo; Hedley Byrne)?"
+        self.assertEqual(extract_named_authorities(q), ["Donoghue", "Caparo", "Hedley Byrne"])
+
+    def test_slash_pair_and_purposes(self):
+        q = "Address the Hedley/Caparo line and whether this was an obvious mistake for Denton purposes."
+        self.assertEqual(extract_named_authorities(q), ["Hedley", "Caparo", "Denton"])
+
+    def test_ordinary_client_questions_yield_nothing(self):
+        for q in [
+            "My landlord in England and Wales served a section 21 notice (Housing Act 1988; Deregulation Act 2015).",
+            "Can I appeal to the Employment Tribunal? The Crown Court (Leeds) hearing is next week.",
+            "Please review the contract (Parts 1-3; Schedule 2) and the invoice.",
+            "I want to sue my employer, Meridian Structures Ltd, for unfair dismissal.",
+            "",
+        ]:
+            self.assertEqual(extract_named_authorities(q), [], q)
+
+    def test_missing_uses_distinctive_tokens_case_insensitively(self):
+        names = extract_named_authorities("(Donoghue; Caparo; Hedley Byrne)")
+        self.assertEqual(missing_named_authorities("the DONOGHUE principle and Hedley Byrne apply", names), ["Caparo"])
+
+    def test_either_party_short_form_counts_for_a_v_b(self):
+        names = extract_named_authorities("Consider Caparo Industries plc v Dickman.")
+        self.assertEqual(missing_named_authorities("Dickman confirms the three-stage test.", names), [])
+        self.assertEqual(missing_named_authorities("Caparo confirms the three-stage test.", names), [])
+        self.assertEqual(missing_named_authorities("Some other case confirms the test.", names), names)
+
+    def test_crown_side_never_counts(self):
+        names = extract_named_authorities("Apply R v Sussex Justices.")
+        self.assertEqual(missing_named_authorities("R v Somebody Else is the leading case.", names), names)
+
+    def test_no_names_means_no_check(self):
+        self.assertEqual(missing_named_authorities("anything", []), [])
+        r = audit_legal_draft(GOOD, POOL)
+        self.assertEqual(r.missing_authorities, [])
+        self.assertFalse(r.has_issues)
+
+    def test_audit_flags_missing_and_feedback_explains(self):
+        names = ["Donoghue v Stevenson", "Caparo"]
+        r = audit_legal_draft(GOOD + " Caparo applies.", POOL, named_authorities=names)
+        self.assertEqual(r.missing_authorities, ["Donoghue v Stevenson"])
+        self.assertTrue(r.has_issues)
+        self.assertIn("1 user-named authority(ies) not addressed", r.summary())
+        fb = build_verifier_feedback(r)
+        self.assertIn("- Donoghue v Stevenson", fb)
+        self.assertIn("WITHOUT a hyperlink", fb)
+        self.assertNotIn("- Caparo", fb)
+
+    def test_feedback_omits_section_when_all_addressed(self):
+        r = audit_legal_draft(GOOD + " Donoghue and Caparo both apply.", POOL, named_authorities=["Donoghue", "Caparo"])
+        self.assertFalse(r.has_issues)
+        self.assertNotIn("user's question itself names", build_verifier_feedback(r))
+
+
 class MakeVerifierTests(unittest.TestCase):
     def _state(self):
         return SimpleNamespace(last_search_legal_results=list(POOL))
 
     def test_clean_draft_returns_none(self):
         verify = make_legal_verifier(self._state(), max_rounds=1)
+        self.assertIsNone(verify(GOOD, 0))
+
+    def test_query_named_authority_missing_triggers_feedback(self):
+        verify = make_legal_verifier(self._state(), max_rounds=1, query="How does Donoghue v Stevenson apply?")
+        fb = verify(GOOD, 0)
+        self.assertIsNotNone(fb)
+        self.assertIn("not addressed", fb.summary)
+        self.assertIn("Donoghue v Stevenson", fb.message)
+
+    def test_query_named_authority_present_is_clean(self):
+        verify = make_legal_verifier(self._state(), max_rounds=1, query="How does Donoghue v Stevenson apply?")
+        self.assertIsNone(verify(GOOD + " Donoghue governs.", 0))
+
+    def test_query_without_authorities_is_unchanged(self):
+        verify = make_legal_verifier(self._state(), max_rounds=1, query="Can I appeal to the Employment Tribunal?")
         self.assertIsNone(verify(GOOD, 0))
 
     def test_bad_draft_returns_feedback_then_exhausts(self):
