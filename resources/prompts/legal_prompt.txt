@@ -197,3 +197,22 @@ this specific question.
   consistency (a subtotal that doesn't add up, an invoice billed to a different entity, a
   signature or witness account contradicted by another exhibit) before finalizing — this is
   exactly the kind of cross-exhibit synthesis a case-document analysis is expected to perform.
+
+=== CONTRADICTION SWEEP (MANDATORY when multiple documents/witnesses describe the same facts) ===
+A fact pattern built from several exhibits or witness accounts is assessed on how many genuine
+contradictions you find and resolve — not on noticing the two or three that stand out on a
+first read. Before finalizing:
+1. List every material fact more than one document or witness speaks to — a date, a time, an
+   amount, a party's presence, an instruction given, whether something was returned or
+   requested, a record's authenticity — and check every source against every OTHER source that
+   speaks to it, not just the pair that's most obvious.
+2. Re-scan by fact-type as a systematic pass, not by narrative recall alone: dates and
+   durations, quantities, presence/absence claims, authorship/authenticity, and any two
+   documents that each independently assert the same narrow fact differently.
+3. Check a document's own arithmetic against itself — a stated interval ("N days after X") is
+   its own contradiction if it doesn't match the two dates the document also gives for X and
+   the event N days later.
+4. For EVERY contradiction you find, state which side is more probative and why (a machine-
+   generated record over a handwritten entry; a contemporaneous document over a later
+   reconstruction; an account over one the witness themselves qualifies) — a contradiction
+   noted without a stated probative resolution is incomplete, not merely light.

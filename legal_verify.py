@@ -47,16 +47,55 @@ Verifier = Callable[[str, int], Optional[VerifierFeedback]]
 DRAFT_DISCARD = "__DRAFT_DISCARD__"
 
 
+# Phrases the CONTRADICTION SWEEP prompt rule (legal_prompt_uk.txt / legal_prompt.txt) asks the
+# model to use when it resolves a contradiction ("state which side is more probative and why").
+# A lexical heuristic, not a semantic check — it can't verify the resolution is actually
+# correct, or credit a genuinely thorough answer that happens to phrase things differently. Kept
+# deliberately generous (many phrasings) and paired with a modest threshold (see
+# DEFAULT_MIN_CONTRADICTION_RESOLUTIONS) precisely because it's a proxy, not a ground truth —
+# the goal is to catch a draft that plainly did no sweep at all, not to police wording.
+_PROBATIVE_PHRASE = re.compile(
+    r"\b(?:is more probative than|is (?:the )?more (?:probative|reliable|persuasive)|"
+    r"is less (?:probative|reliable|persuasive)|is preferred (?:to|over)|"
+    r"is to be preferred (?:to|over)|should be preferred (?:to|over)|outweighs|"
+    r"carries (?:more|greater) weight than|takes precedence over|is the more reliable\b)",
+    re.I,
+)
+
+DEFAULT_MIN_CONTRADICTION_RESOLUTIONS = 6
+
+
+def count_contradiction_resolutions(text: str) -> int:
+    """Heuristic count of resolved contradictions — see _PROBATIVE_PHRASE. Exported (rather
+    than kept private) so it's directly unit-testable without going through AuditReport."""
+    if not text:
+        return 0
+    return len(_PROBATIVE_PHRASE.findall(text))
+
+
 @dataclass
 class AuditReport:
     unverified_urls: List[Tuple[str, str]] = field(default_factory=list)
     truncated_urls: List[Tuple[str, str]] = field(default_factory=list)
     unverified_quotes: List[str] = field(default_factory=list)
     allowed: List[Tuple[str, str]] = field(default_factory=list)
+    contradiction_resolutions: int = 0
+    # 0 = the contradiction-sweep check is disabled for this turn (no case-document bundle to
+    # sweep) — set by make_legal_verifier from state.case_document_manifest, never guessed here.
+    min_contradiction_resolutions: int = 0
+
+    @property
+    def contradiction_deficit(self) -> bool:
+        return (
+            self.min_contradiction_resolutions > 0
+            and self.contradiction_resolutions < self.min_contradiction_resolutions
+        )
 
     @property
     def has_issues(self) -> bool:
-        return bool(self.unverified_urls or self.truncated_urls or self.unverified_quotes)
+        return bool(
+            self.unverified_urls or self.truncated_urls or self.unverified_quotes or self.contradiction_deficit
+        )
 
     @property
     def url_issue_count(self) -> int:
@@ -68,6 +107,8 @@ class AuditReport:
             parts.append(f"{self.url_issue_count} unverified citation link(s)")
         if self.unverified_quotes:
             parts.append(f"{len(self.unverified_quotes)} unverified quotation(s)")
+        if self.contradiction_deficit:
+            parts.append(f"only {self.contradiction_resolutions}/{self.min_contradiction_resolutions} contradictions resolved")
         return ", ".join(parts) or "no issues"
 
 
@@ -116,9 +157,14 @@ def collect_tool_result_citables(search_results) -> List[Tuple[str, str]]:
     return out
 
 
-def audit_legal_draft(text: str, search_results) -> AuditReport:
-    """Report (never rewrite) every citation link / blockquote the finalizer would demote."""
-    report = AuditReport(allowed=collect_tool_result_citables(search_results))
+def audit_legal_draft(text: str, search_results, *, min_contradiction_resolutions: int = 0) -> AuditReport:
+    """Report (never rewrite) every citation link / blockquote the finalizer would demote, plus
+    (when min_contradiction_resolutions > 0 — see AuditReport) whether the draft shows enough
+    resolved contradictions to look like a real sweep happened."""
+    report = AuditReport(
+        allowed=collect_tool_result_citables(search_results),
+        min_contradiction_resolutions=min_contradiction_resolutions,
+    )
     if not text or not isinstance(text, str):
         return report
 
@@ -136,6 +182,8 @@ def audit_legal_draft(text: str, search_results) -> AuditReport:
         body = m.group("body")
         if is_unverified_blockquote(body, corpus):
             report.unverified_quotes.append(body.strip())
+
+    report.contradiction_resolutions = count_contradiction_resolutions(text)
     return report
 
 
@@ -179,6 +227,20 @@ def build_verifier_feedback(report: AuditReport, *, max_allowed: int = 30) -> st
             "For each: either fetch the passage and quote it verbatim (PH: get_case with "
             "full text; UK: judgment_get_paragraph / legislation_get_section), or rewrite "
             "it as a paraphrase without blockquote formatting."
+        )
+
+    if report.contradiction_deficit:
+        lines.append("")
+        lines.append(
+            f"Contradiction sweep: the draft states a probative resolution (\"X is more "
+            f"probative/reliable than Y, because...\") for only about "
+            f"{report.contradiction_resolutions} contradiction(s). A case-document set with "
+            f"multiple exhibits and witness accounts usually has considerably more than that. "
+            f"Re-scan by fact-type — dates and durations, quantities, presence/absence claims, "
+            f"authorship/authenticity, and a document's own internal arithmetic — checking "
+            f"every source against every OTHER source that speaks to the same fact, not just "
+            f"the pair that's most obvious. For each new contradiction you find, add one "
+            f"sentence stating which side is more probative and why."
         )
 
     if report.allowed:
@@ -237,8 +299,23 @@ def make_legal_verifier(state, *, max_rounds: Optional[int] = None) -> Optional[
     def verify(draft: str, rounds_done: int) -> Optional[VerifierFeedback]:
         from the_server import increment_metric_counter
 
-        report = audit_legal_draft(draft, getattr(state, "last_search_legal_results", None))
-        tags = {"round": str(rounds_done), "urls": str(report.url_issue_count), "quotes": str(len(report.unverified_quotes))}
+        # Only meaningful when there's an actual case-document bundle to sweep for cross-
+        # document contradictions — a plain legal question with no attached exhibits has
+        # nothing to sweep, and demanding the phrasing anyway would just force pointless
+        # revise rounds on unrelated turns.
+        manifest_len = len(getattr(state, "case_document_manifest", None) or [])
+        min_contradictions = DEFAULT_MIN_CONTRADICTION_RESOLUTIONS if manifest_len >= 2 else 0
+        report = audit_legal_draft(
+            draft,
+            getattr(state, "last_search_legal_results", None),
+            min_contradiction_resolutions=min_contradictions,
+        )
+        tags = {
+            "round": str(rounds_done),
+            "urls": str(report.url_issue_count),
+            "quotes": str(len(report.unverified_quotes)),
+            "contradictions": str(report.contradiction_resolutions),
+        }
         if not report.has_issues:
             if rounds_done > 0:
                 logging.info("[legal-verify] revise round %d resolved all issues", rounds_done)

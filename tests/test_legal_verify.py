@@ -17,10 +17,12 @@ from unittest.mock import patch
 import the_server as srv
 import legal_responses_chain
 from legal_verify import (
+    DEFAULT_MIN_CONTRADICTION_RESOLUTIONS,
     DRAFT_DISCARD,
     audit_legal_draft,
     build_verifier_feedback,
     collect_tool_result_citables,
+    count_contradiction_resolutions,
     make_legal_verifier,
 )
 
@@ -80,6 +82,47 @@ class AuditTests(unittest.TestCase):
         )
 
 
+class ContradictionSweepTests(unittest.TestCase):
+    def test_counts_probative_phrasings(self):
+        text = (
+            "The crane logger is more reliable than the struck-through daily-log entry. "
+            "The contemporaneous email is preferred over the later reconstruction. "
+            "D08 Version B outweighs Version A."
+        )
+        self.assertEqual(count_contradiction_resolutions(text), 3)
+
+    def test_zero_for_text_with_no_probative_language(self):
+        self.assertEqual(count_contradiction_resolutions("The parties dispute the timeline."), 0)
+
+    def test_check_disabled_when_threshold_is_zero(self):
+        r = audit_legal_draft("no probative language at all", POOL, min_contradiction_resolutions=0)
+        self.assertFalse(r.contradiction_deficit)
+        self.assertFalse(r.has_issues)
+
+    def test_deficit_flagged_below_threshold(self):
+        r = audit_legal_draft(GOOD, POOL, min_contradiction_resolutions=6)
+        self.assertTrue(r.contradiction_deficit)
+        self.assertTrue(r.has_issues)
+        self.assertIn("0/6 contradictions resolved", r.summary())
+
+    def test_no_deficit_once_threshold_is_met(self):
+        text = " X is more probative than Y." * 6
+        r = audit_legal_draft(text, POOL, min_contradiction_resolutions=6)
+        self.assertFalse(r.contradiction_deficit)
+        self.assertFalse(r.has_issues)
+
+    def test_feedback_includes_contradiction_sweep_guidance_when_deficient(self):
+        r = audit_legal_draft(GOOD, POOL, min_contradiction_resolutions=6)
+        msg = build_verifier_feedback(r)
+        self.assertIn("Contradiction sweep", msg)
+        self.assertIn("0", msg)
+
+    def test_feedback_omits_contradiction_section_when_check_disabled(self):
+        r = audit_legal_draft(GOOD, POOL, min_contradiction_resolutions=0)
+        msg = build_verifier_feedback(r)
+        self.assertNotIn("Contradiction sweep", msg)
+
+
 class FeedbackTests(unittest.TestCase):
     def test_feedback_lists_failures_and_allowed_pool(self):
         r = audit_legal_draft(BAD + "\n" + BAD_QUOTE, POOL)
@@ -124,6 +167,31 @@ class MakeVerifierTests(unittest.TestCase):
             verify = make_legal_verifier(self._state())
             self.assertIsNotNone(verify(BAD, 1))
             self.assertIsNone(verify(BAD, 2))
+
+    def _state_with_manifest(self, size):
+        return SimpleNamespace(last_search_legal_results=list(POOL), case_document_manifest=[{}] * size)
+
+    def test_contradiction_check_fires_with_case_bundle_and_thin_sweep(self):
+        verify = make_legal_verifier(self._state_with_manifest(5), max_rounds=1)
+        fb = verify(GOOD, 0)
+        self.assertIsNotNone(fb)
+        self.assertIn("Contradiction sweep", fb.message)
+
+    def test_contradiction_check_silent_once_sweep_is_thorough(self):
+        thorough = GOOD + " X is more probative than Y." * DEFAULT_MIN_CONTRADICTION_RESOLUTIONS
+        verify = make_legal_verifier(self._state_with_manifest(5), max_rounds=1)
+        self.assertIsNone(verify(thorough, 0))
+
+    def test_contradiction_check_disabled_with_no_case_bundle(self):
+        # No manifest attribute at all (a plain legal question, no exhibits) — must not demand
+        # contradiction-resolution phrasing that makes no sense outside a document set.
+        verify = make_legal_verifier(self._state(), max_rounds=1)
+        self.assertIsNone(verify(GOOD, 0))
+
+    def test_contradiction_check_disabled_with_single_document(self):
+        # One document alone has nothing to be cross-checked against.
+        verify = make_legal_verifier(self._state_with_manifest(1), max_rounds=1)
+        self.assertIsNone(verify(GOOD, 0))
 
     def test_pool_read_at_call_time(self):
         """A revise round may retrieve the missing authority; the re-audit must see it."""

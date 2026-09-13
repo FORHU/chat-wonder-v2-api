@@ -153,6 +153,41 @@ class UkDoctrineGuardTests(unittest.TestCase):
         out = append_uk_doctrine_guards("ERA 1996 s.43B protects disclosures.", q)
         self.assertIn("Northern Ireland has its own mirror legislation", out)
 
+    def test_pace_uk_wide_overstatement_corrected(self):
+        text = "PACE 1984, including s.78, applies throughout the United Kingdom."
+        out = append_uk_doctrine_guards(text, "Is the confession admissible under PACE s.78?")
+        self.assertIn("PACE 1984", out)
+        self.assertIn("England & Wales only", out)
+
+    def test_pace_uk_wide_overstatement_corrected_when_pace_and_1984_are_not_adjacent(self):
+        # Regression: the Brackenmoor rerun wrote "PACE" in a heading and, several lines later,
+        # "Police and Criminal Evidence Act 1984" only in a citation link — never "PACE 1984"
+        # together — so the original adjacency-requiring regex never fired. This is the exact
+        # shape that slipped through.
+        text = (
+            "## Section 78 PACE\n\n"
+            "It applies throughout the United Kingdom. "
+            '<a href="...">Police and Criminal Evidence Act 1984, s 78 Law</a>'
+        )
+        out = append_uk_doctrine_guards(text, "Is the confession admissible under PACE s.78?")
+        self.assertIn("England & Wales only", out)
+
+    def test_pace_guard_silent_when_extent_already_correct(self):
+        text = "PACE 1984, including s.78, extends to England and Wales only."
+        out = append_uk_doctrine_guards(text, "Is the confession admissible under PACE s.78?")
+        self.assertEqual(out, text)
+
+    def test_cdm_2015_northern_ireland_overstatement_corrected(self):
+        text = "The Construction (Design and Management) Regulations 2015 apply throughout England, Wales, Scotland and Northern Ireland."
+        out = append_uk_doctrine_guards(text, "Does CDM 2015 impose duties on the principal contractor?")
+        self.assertIn("Great Britain", out)
+        self.assertIn("Northern Ireland", out)
+
+    def test_cdm_2015_guard_silent_when_extent_already_correct(self):
+        text = "CDM 2015 applies in Great Britain; Northern Ireland has its own separate regulations."
+        out = append_uk_doctrine_guards(text, "Does CDM 2015 impose duties on the principal contractor?")
+        self.assertEqual(out, text)
+
     def test_ph_guards_do_not_fire_on_uk_defamation_via_finalizer(self):
         text = "Defamation claim under the Defamation Act 2013 — serious harm must be shown."
         out = srv._finalize_legal_response(text, [], legal_mode=True, user_input="online libel about my business in Leeds", jurisdiction="UK")

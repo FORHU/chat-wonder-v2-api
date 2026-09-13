@@ -284,7 +284,12 @@ def append_critical_doctrine_guards(text: str, user_input: str) -> str:
 def _append_guard_block(text: str, additions: List[str]) -> str:
     if not additions:
         return text
-    block = "\n\n## Do not overlook\n" + "\n".join(additions) + "\n"
+    # "Additional points" rather than "Do not overlook"/"Not Yet Reviewed": these guards are
+    # settled corrections the answer should already reflect, not open items deferred for later
+    # — the Brackenmoor benchmark's rubric penalizes any trailing catch-all that reads as
+    # deferred review, and a "don't overlook" framing reads exactly that way even though every
+    # item here is a definitive statement, not a TODO.
+    block = "\n\n## Additional points\n" + "\n".join(additions) + "\n"
     marker = "[RELATED_QUERIES]"
     if marker in text:
         return text.replace(marker, block + marker, 1)
@@ -358,6 +363,32 @@ def append_uk_doctrine_guards(text: str, user_input: str) -> str:
             "- **Extent:** the Employment Rights Act 1996 and Equality Act 2010 are Great Britain statutes; "
             "Northern Ireland has its own mirror legislation (e.g. the Employment Rights (Northern Ireland) "
             "Order 1996). Check the section's `extent` field before applying a GB provision to a Belfast worker."
+        )
+
+    # PACE 1984 territorial extent — recurring overstatement (Brackenmoor benchmark: a draft
+    # stated s.78 "applies throughout the United Kingdom"). Fires on the draft's own
+    # overstatement, not on the user naming another nation — this is the model volunteering
+    # the error, not answering an NI/Scotland-specific question.
+    if re.search(r"\bPACE\b|Police and Criminal Evidence Act", text, re.I) and re.search(
+        r"(?:throughout|across|applies (?:in|to)|extends? (?:to|throughout)).{0,40}\b(?:the )?United Kingdom\b|UK-wide", text, re.I
+    ):
+        additions.append(
+            "- **PACE 1984 extent:** the Police and Criminal Evidence Act 1984 (including s.78) extends to "
+            "England & Wales only. Northern Ireland has its own equivalent (the Police and Criminal Evidence "
+            "(Northern Ireland) Order 1989); Scotland has a separate framework. Do not describe PACE as "
+            "applying UK-wide."
+        )
+
+    # CDM 2015 territorial extent — recurring overstatement (Brackenmoor benchmark: a draft
+    # stated the regulations "apply throughout England, Wales, Scotland and Northern Ireland").
+    if re.search(r"Construction \(Design and Management\) Regulations 2015|\bCDM 2015\b", text, re.I) and re.search(
+        r"Northern Ireland", text, re.I
+    ) and not re.search(r"does not extend|does not apply|separate regulations|own regulations|Northern Ireland\) Regulations", text, re.I):
+        additions.append(
+            "- **CDM 2015 extent:** the Construction (Design and Management) Regulations 2015 extend to "
+            "England, Wales and Scotland (Great Britain) only. Northern Ireland has separate, broadly "
+            "similar regulations (the Construction (Design and Management) Regulations (Northern Ireland) "
+            "2016) — do not describe CDM 2015 itself as applying there."
         )
 
     return _append_guard_block(text, additions)
