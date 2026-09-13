@@ -278,6 +278,10 @@ def append_critical_doctrine_guards(text: str, user_input: str) -> str:
             "without requiring a resignation — verify with current jurisprudence."
         )
 
+    return _append_guard_block(text, additions)
+
+
+def _append_guard_block(text: str, additions: List[str]) -> str:
     if not additions:
         return text
     block = "\n\n## Do not overlook\n" + "\n".join(additions) + "\n"
@@ -288,6 +292,75 @@ def append_critical_doctrine_guards(text: str, user_input: str) -> str:
     if disclaimer in text:
         return text.replace(disclaimer, block + "\n" + disclaimer, 1)
     return text.rstrip() + block
+
+
+def append_uk_doctrine_guards(text: str, user_input: str) -> str:
+    """
+    England & Wales counterpart of append_critical_doctrine_guards — topic-triggered reminders
+    for points the Brackenmoor benchmark showed the model hedging or omitting. Same posture:
+    light, never exhaustive, only fires when the answer is silent on the point. Each guard is
+    a "verify" nudge, not a holding — the model must still fetch the section if it relies on it.
+    """
+    if not text:
+        return text
+    u = user_input or ""
+    both = f"{u}\n{text}"
+    additions: List[str] = []
+
+    # Whistleblowing dismissal with no qualifying service: burden and remedies.
+    if re.search(r"103A|protected disclosure|whistleblow", both, re.I) and re.search(
+        r"less than two years|no qualifying service|without qualifying service|1 year|one year|qualifying period", both, re.I
+    ):
+        if not re.search(r"burden", text, re.I):
+            additions.append(
+                "- **Burden without qualifying service:** where the employee lacks two years' service the "
+                "s.98 route is closed and it is for the *claimant* to prove that the protected disclosure was "
+                "the reason or principal reason for dismissal (the *Smith v Hayle Town Council* / *Kuzel v Roche* "
+                "line) — verify against current authority before relying on it."
+            )
+        if not re.search(r"uncapped|no statutory cap|124\(1A\)|207A|ACAS uplift|injury to feelings", text, re.I):
+            additions.append(
+                "- **Remedies to state, not hedge:** a s.103A compensatory award is not subject to the ordinary "
+                "statutory cap (ERA 1996 s.124(1A)); a s.207A TULRCA 1992 uplift of up to 25% may apply for an "
+                "unreasonable failure to follow the ACAS Code; s.47B detriment can carry injury-to-feelings "
+                "damages. Fetch the sections before quoting figures."
+            )
+
+    # Data Protection Act 2018: Part 3 is law-enforcement processing only.
+    if re.search(r"Data Protection Act 2018|DPA 2018", both, re.I) and re.search(
+        r"\bss?\.?\s*3[5-9]\b|\bs\.?\s*40\b|sections? 35|Part 3", both, re.I
+    ) and not re.search(r"competent authorit|law[- ]enforcement processing|Part 3 .{0,40}(does not|not) apply", text, re.I):
+        additions.append(
+            "- **DPA 2018 Part 3 does not apply to a private employer:** ss.29–81 govern processing by "
+            "*competent authorities* for law-enforcement purposes. An employer's monitoring of staff is "
+            "general processing under the UK GDPR and DPA 2018 Part 2 — say so rather than analysing "
+            "ss.35–40 as if they governed."
+        )
+
+    # Documentary hearsay in criminal proceedings: the business-records route.
+    if re.search(r"hearsay", both, re.I) and re.search(
+        r"business record|Met Office|certif(?:ied|icate)|ledger|register|log\b|invoice", both, re.I
+    ) and not re.search(r"\b117\b", text):
+        additions.append(
+            "- **Business documents:** in the Crown Court a record created or received in the course of a "
+            "trade, business or public office is admissible under **CJA 2003 s.117** (subject to s.117(6)–(7) "
+            "reliability exclusion); s.114(1)(d) is the residual interests-of-justice route. Identify the "
+            "route, do not leave the record's admissibility as an open question."
+        )
+
+    # Territorial extent: GB employment statutes do not reach Northern Ireland automatically.
+    if re.search(r"Northern Ireland|Belfast|Derry|Londonderry", u, re.I) and re.search(
+        r"Employment Rights Act 1996|ERA 1996|Equality Act 2010", both, re.I
+    ) and not re.search(
+        r"does not extend|does not apply|separate legislation|Northern Ireland\) Order|mirror|equivalent legislation|own legislation|extent", text, re.I
+    ):
+        additions.append(
+            "- **Extent:** the Employment Rights Act 1996 and Equality Act 2010 are Great Britain statutes; "
+            "Northern Ireland has its own mirror legislation (e.g. the Employment Rights (Northern Ireland) "
+            "Order 1996). Check the section's `extent` field before applying a GB provision to a Belfast worker."
+        )
+
+    return _append_guard_block(text, additions)
 
 
 def append_missing_prefetched_mentions(text: str, search_results) -> str:

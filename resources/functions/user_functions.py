@@ -498,19 +498,42 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
             "message": _empty_message,
         }
 
+    truncated = False
     if len(text) > _CASE_DOCUMENT_CHAR_CAP:
         text = text[:_CASE_DOCUMENT_CHAR_CAP].rstrip() + "\n\n[...truncated...]"
+        truncated = True
 
-    return {
+    # A relevance-filtered, paged or char-capped read is NOT the document. Say so explicitly:
+    # confirmed on the Brackenmoor benchmark that the model otherwise treats the filtered slice
+    # as the whole exhibit ("D01 ... contains paragraphs 1-21 but not paragraph 25") and never
+    # re-fetches — losing paragraphs the question cited by number.
+    document_chunk_count = len(raw_chunks)
+    partial = bool(case_document_chunk_ids and len(chunks) < document_chunk_count) or has_more or truncated
+    result = {
         "success": True,
         "id": case_document_id,
         "name": name,
         "text": text,
         "chunk_count": len(chunks),
         "total_chunks": total_chunks,
+        "document_chunk_count": document_chunk_count,
+        "partial": partial,
         "has_more": has_more,
         "next_offset": next_offset,
     }
+    if partial:
+        if has_more:
+            how = f"call again with offset={next_offset} to continue"
+        elif case_document_chunk_ids:
+            how = "call again WITHOUT case_document_chunk_ids to read the whole document"
+        else:
+            how = "call again with offset/limit to page through the rest"
+        result["note"] = (
+            f"PARTIAL: {len(chunks)} of {document_chunk_count} chunks returned. Do not treat this as "
+            f"the complete document — if the question refers to a paragraph, part or item you cannot "
+            f"see here, {how}."
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

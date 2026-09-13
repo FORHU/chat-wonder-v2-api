@@ -110,7 +110,7 @@
     "persona": "legal",
     "function": {
       "name": "get_case_document",
-      "description": "Fetch a case document the user has uploaded to their own case in ilovelawyer (e.g. a contract, pleading, or other case file). This is the user's own private material, NOT public jurisprudence — never cite it as a Legal Citation or treat it as precedent. Call this when the conversation references a specific case_document_id, or when the user asks about a document they've attached to their case.",
+      "description": "Fetch a case document the user has uploaded to their own case in ilovelawyer (e.g. a contract, pleading, or other case file). This is the user's own private material, NOT public jurisprudence — never cite it as a Legal Citation or treat it as precedent. Call this when the conversation references a specific case_document_id, or when the user asks about a document they've attached to their case. The result includes `partial`: when true, only a relevance-filtered or paged slice of the document was returned (see `note`) — never characterise a paragraph, part or item you cannot see; call again without case_document_chunk_ids (or with the given offset) to read the whole document.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -123,7 +123,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Optional — restrict to this specific set of chunk ids instead of the whole document."
+            "description": "Optional — restrict to this specific set of chunk ids instead of the whole document. Omit it to read the full document; a filtered read is marked partial=true in the result."
           },
           "offset": {
             "type": "integer",

@@ -310,9 +310,25 @@ def gate_unverified_legal_urls(
     return out
 
 
+_BUNDLE_REFS_IN_LABEL = re.compile(
+    r"\[((?:D\d{2}[^\];]*;\s*)+)([^\]]+ (?:Law|Jurisprudence))\]\((https?://[^)]+)\)"
+)
+
+
+def split_bundle_refs_out_of_labels(text: str) -> str:
+    """`[D01, paras 3-5; D06, paras 2-4; HSWA 1974, s 3 Law](url)` → the bundle references as
+    plain text, then only the authority linked. The model sometimes packs a trailing string of
+    case-document pinpoints into the same brackets as the authority; left alone, the link
+    formatter turns the whole run into the anchor text of one statute link."""
+    if not text or not isinstance(text, str):
+        return text
+    return _BUNDLE_REFS_IN_LABEL.sub(lambda m: f"[{m.group(1).rstrip()}] [{m.group(2)}]({m.group(3)})", text)
+
+
 def format_legal_citation_links(text: str) -> str:
     if not text or not isinstance(text, str):
         return text
+    text = split_bundle_refs_out_of_labels(text)
     url_pattern = r"(https?://[^)]+|[^)]+)"
 
     def repl_law(m):

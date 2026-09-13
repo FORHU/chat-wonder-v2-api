@@ -106,6 +106,21 @@ _Avoid_: a second hand-copied Streamable HTTP client with its own retry/unwrap l
 
 ## Legal answer verification (PH + UK)
 
+**Whole-Case Preload**
+ilovelawyer-api sends `case_document_texts` ([{id, name, text}] for every READY document) when the case's extracted text fits its `CASE_FULL_TEXT_INLINE_CHARS` (200k chars); `sync_active_case_documents` seeds them into the document cache as full, non-partial entries so the model starts the turn with every exhibit in context. `CASE_DOCUMENT_TOKEN_BUDGET` was raised to 60k tokens to hold one. Brackenmoor before/after: 18 single-document fetches per question → 0.
+_Avoid_: evicting preloaded documents to fit a smaller budget; fetching documents one at a time when the case fits
+
+**Partial Document Read**
+A `get_case_document` result produced with `case_document_chunk_ids`, `offset/limit`, or the char cap is marked `partial: true` with a `note` telling the model how to get the whole document; the cache never lets a partial read replace a full one, never serves a cached partial to a whole-document request, and the [CASE FILE] manifest marks partial entries. Both legal prompts require any document the question cites by paragraph/part/item to be read in full first. Confirmed live: the model previously treated a relevance-filtered slice as the exhibit (D01 §25, D20.3).
+_Avoid_: treating a filtered fetch as "the document"; serving the cache for a re-read request
+
+**Sub-question Budget**
+`_legal_model_override` adds `LEGAL_CHAINS_PER_SUBQUESTION` (6) tool calls per numbered/lettered part beyond the first (`_count_sub_questions`), ceiling `LEGAL_MAX_CHAINS_CEILING` (80). A four-part assessment question exhausted the old 60-call cap.
+
+**UK Doctrine Guards**
+`append_uk_doctrine_guards` (legal_fact_boost.py) — the England & Wales counterpart of the PH guards, selected by `jurisdiction` in `_finalize_legal_response`: whistleblowing burden/remedies without qualifying service, DPA 2018 Part 3 vs Part 2, CJA 2003 s.117 business records, Northern Ireland extent. PH guards no longer run on UK answers.
+_Avoid_: running PH guards on UK answers (Civil Code Art. 33 on a Leeds libel question)
+
 **Verifier Feedback Loop**
 Inside the tool-calling loop, when the legal model stops calling tools and produces a draft, the same checks the Cite Gate and quote-strip run post-hoc are run on the draft (`legal_verify.audit_legal_draft`). If anything would be demoted, the draft plus a `[VERIFIER …]` system message (what failed, how to fix it, the retrieved title→URL pool) is appended and the model revises. Bounded by `LEGAL_VERIFY_MAX_ROUNDS` (default 1; `0` disables — rollback lever). The post-hoc finalizer stays as the safety net for whatever survives. In the streaming path the chain yields `__DRAFT_DISCARD__` so `chat_stream` drops the buffered draft; a `self_check` `[TRACE]` step shows the revision in the research-step list.
 _Avoid_: silently gating a citation the model was never told about; unbounded revise rounds; running the loop for non-legal personas; streaming legal draft text live (the discard only works because legal text is buffered server-side)

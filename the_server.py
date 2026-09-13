@@ -41,9 +41,11 @@ from legal_citations import apply_legal_citation_pipeline, select_related_cases
 from legal_fact_boost import (
     append_critical_doctrine_guards,
     append_missing_prefetched_mentions,
+    append_uk_doctrine_guards,
     prepare_legal_turn,
 )
 import legal_responses_chain
+import legal_decisions
 from legal_verify import DRAFT_DISCARD, inject_verifier_feedback, make_legal_verifier, verifier_trace_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -285,6 +287,9 @@ class ChatRequest(BaseModel):
     # selected into this turn's context — see docs/adr/0005. Lets the model know an exhibit
     # exists (and fetch it via get_case_document) even when it didn't make the relevance cut.
     case_document_manifest: Optional[List[dict]] = None
+    # Whole-case inline: [{id, name, text}] for every READY document when the case fits
+    # ilovelawyer-api's CASE_FULL_TEXT_INLINE_CHARS — see sync_active_case_documents.
+    case_document_texts: Optional[List[dict]] = None
     # ilovelawyer-api's only signal for "this is a UK request" — see process_persona.
     # It always sends the plain "[legal ai]" text tag regardless of jurisdiction; this field
     # is what actually distinguishes a UK request from the PH default.
@@ -848,6 +853,87 @@ def _generate_reasoning_explanation(user_input: str, legal_response: str, search
         return None
 
 
+# How much of the final answer is shown to the decision-records call, and the corpus the
+# anchor-verification check runs against. A record whose anchor sentence falls beyond this cut
+# is simply dropped by audit_decision_records (safe failure — under-coverage on a very long
+# memo, never a wrong record), so this is a cost/latency vs. coverage knob, not a correctness one.
+_LEGAL_DECISION_RESPONSE_CHARS = int(os.getenv("LEGAL_DECISION_RESPONSE_CHARS", "16000"))
+
+
+def _generate_decision_records(user_input: str, legal_response: str, search_results: list, tool_log: list, state) -> dict | None:
+    """Fourth lightweight LLM call: Decision Records (differentiation program, Phase 1) — for
+    each consequential/contested conclusion in the answer, a structured record of the rule
+    applied, the evidence for and against, the alternative reading considered and rejected, how
+    it was weighted, and what fact would change it. This is auditability beyond a hyperlink: a
+    citation says where a sentence came from, a decision record says why the model concluded
+    what it did. See legal_decisions.py for the schema and the verification pass that runs on
+    the model's raw output before this returns — every rule link and evidence reference is
+    checked against what was actually retrieved/attached this turn, exactly like the Cite Gate
+    checks the answer's own citations, just extended from sentences to reasons."""
+    if not legal_response or not legal_response.strip():
+        return None
+    try:
+        response_slice = legal_response[:_LEGAL_DECISION_RESPONSE_CHARS]
+        manifest = getattr(state, "case_document_manifest", None) or []
+        manifest_lines = "\n".join(f"- {m.get('id')}: {m.get('name')}" for m in manifest[:60]) or "none attached"
+
+        prompt = (
+            "FINAL ANSWER (produce decision records for conclusions in this text):\n"
+            f"{response_slice}\n\n"
+            f"User's question (for context only):\n{user_input[:600]}\n\n"
+            f"Case exhibits attached (id: name) — use the short label, e.g. \"D01\", as `doc`:\n{manifest_lines}\n\n"
+            f"{legal_decisions.DECISION_RECORDS_SCHEMA_PROMPT}"
+        )
+        t0 = time.time()
+        completion = state.openai_client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. No markdown, no explanation outside the JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        raw = completion.choices[0].message.content or ""
+        logging.info("_generate_decision_records llm %.2fs", time.time() - t0)
+        parsed = _extract_json_object(raw)
+        raw_records = parsed.get("records") if isinstance(parsed, dict) else None
+
+        records, stats = legal_decisions.audit_decision_records(
+            raw_records,
+            response_slice,
+            search_results,
+            getattr(state, "active_case_documents", None),
+            manifest,
+        )
+        tags = stats.as_tags()
+        increment_metric_counter("legal.decisions.records", value=stats.records_out, tags=tags, session_id=None)
+        if stats.anchors_unverified:
+            increment_metric_counter("legal.decisions.anchors_unverified", value=stats.anchors_unverified, tags=tags, session_id=None)
+        if stats.rules_dropped:
+            increment_metric_counter("legal.decisions.rules_dropped", value=stats.rules_dropped, tags=tags, session_id=None)
+        if stats.evidence_unverified or stats.quotes_unverified:
+            increment_metric_counter(
+                "legal.decisions.refs_unverified",
+                value=stats.evidence_unverified + stats.quotes_unverified,
+                tags=tags,
+                session_id=None,
+            )
+        logging.info(
+            "_generate_decision_records %d in -> %d out (anchors_unverified=%d, rules ok=%d/dropped=%d, "
+            "evidence ok=%d/unverified=%d, quotes ok=%d/unverified=%d)",
+            stats.records_in, stats.records_out, stats.anchors_unverified,
+            stats.rules_verified, stats.rules_dropped,
+            stats.evidence_verified, stats.evidence_unverified,
+            stats.quotes_verified, stats.quotes_unverified,
+        )
+        if not records:
+            return None
+        return {"records": records}
+    except Exception as e:
+        logging.warning("_generate_decision_records failed: %s", e)
+        return None
+
+
 def run_legal_persona_ask(query: str) -> dict:
     """Legacy helper — legal ask now goes through chat Legal Tools + juris.ph MCP."""
     search = globals().get("search_jurisprudence")
@@ -912,12 +998,19 @@ def _finalize_legal_response(
     *,
     legal_mode: bool,
     user_input: str = "",
+    jurisdiction: str = "PH",
 ) -> str:
-    """Citation pipeline + ensure prefetched controlling authorities are named."""
+    """Citation pipeline + ensure prefetched controlling authorities are named.
+
+    Doctrine guards are jurisdiction-specific: the PH guards used to run on UK answers too
+    (a UK defamation question could pick up a Civil Code Article 33 reminder)."""
     out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode)
     if legal_mode:
         out = append_missing_prefetched_mentions(out, search_results)
-        out = append_critical_doctrine_guards(out, user_input)
+        if jurisdiction == "UK":
+            out = append_uk_doctrine_guards(out, user_input)
+        else:
+            out = append_critical_doctrine_guards(out, user_input)
         from legal_citations import format_legal_citation_links as _format_legal_citation_links, gate_unverified_legal_urls as _gate_unverified_legal_urls
 
         out = _gate_unverified_legal_urls(out, search_results)
@@ -1071,10 +1164,20 @@ def clean_function_definitions(manifest_list: list) -> list:
 # get_case_document handling below) — replaces a flat 10-document count cap that either wasted
 # headroom on a handful of large documents or discarded whole documents past the 10th regardless
 # of how little text each one actually contributed.
-_CASE_DOCUMENT_TOKEN_BUDGET = int(os.getenv("CASE_DOCUMENT_TOKEN_BUDGET", "40000"))
+# Raised from 40000: ilovelawyer-api inlines whole cases up to CASE_FULL_TEXT_INLINE_CHARS
+# (200k chars ≈ 50k tokens) — the budget must hold a full small bundle or the preload evicts
+# its own first documents on every turn.
+_CASE_DOCUMENT_TOKEN_BUDGET = int(os.getenv("CASE_DOCUMENT_TOKEN_BUDGET", "60000"))
 
-async def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None, case_document_manifest=None):
+async def sync_active_case_documents(session_id: str, case_document_ids, case_document_chunk_ids=None, case_document_manifest=None, case_document_texts=None):
     """Replace this turn's active case docs.
+
+    case_document_texts ([{id, name, text}]) is ilovelawyer-api inlining the WHOLE case when it
+    fits its CASE_FULL_TEXT_INLINE_CHARS budget: every document lands in the cache as a full
+    (non-partial) entry before the turn starts, so the model has every exhibit in front of it
+    and does not spend tool calls fetching them one by one — nor mistake a relevance-filtered
+    fetch for the complete document (Brackenmoor D01 §25 / D20.3). No network here either:
+    the text arrives in the request.
 
     Sessions are reused across consultations/cases on the client. Without a full replace,
     old documents stay in active_case_documents and keep being injected into later turns.
@@ -1109,6 +1212,25 @@ async def sync_active_case_documents(session_id: str, case_document_ids, case_do
     state.case_document_cache = {
         k: v for k, v in state.case_document_cache.items() if str(k) in state.allowed_case_document_ids
     }
+    for _doc in case_document_texts or []:
+        _did = str(_doc.get("id") or "")
+        _text = (_doc.get("text") or "").strip()
+        if not _did or not _text or _did not in state.allowed_case_document_ids:
+            continue
+        _prev = state.case_document_cache.get(_did)
+        if _prev and not _prev.get("partial"):
+            continue  # already held in full
+        _entry = {
+            "id": _did,
+            "name": _doc.get("name") or "",
+            "text": _text,
+            "chunk_count": 0,
+            "document_chunk_count": 0,
+            "partial": False,
+            "preloaded": True,
+        }
+        _entry["_token_count"] = calculate_tokens(_text)
+        state.case_document_cache[_did] = _entry
     # Only reuse what's already cached from an earlier get_case_document call this session —
     # no network calls here. A document not yet in cache simply isn't pre-populated; the
     # manifest (_build_case_document_injection) tells the model it exists and how to fetch it
@@ -1128,11 +1250,24 @@ def _build_case_document_injection(state) -> str:
     relevance/budget cut — see docs/adr/0005), followed by the full-text blocks of whichever
     documents actually made it into active_case_documents."""
     _manifest = state.case_document_manifest or []
-    _active_ids = {d.get("id") for d in state.active_case_documents}
+    _active_by_id = {d.get("id"): d for d in state.active_case_documents}
+
+    def _status(m):
+        d = _active_by_id.get(m.get("id"))
+        if d is None:
+            return " — not yet fetched into context; call get_case_document with this id if relevant"
+        if d.get("partial"):
+            return (
+                f" — PARTIAL in context ({d.get('chunk_count', 0)} of {d.get('document_chunk_count', '?')} chunks, "
+                "relevance-filtered); call get_case_document with this id and NO case_document_chunk_ids "
+                "before characterising any paragraph, part or item of it"
+            )
+        return " — in context in full"
+
     _manifest_lines = "\n".join(
         f"- {m.get('name') or 'Untitled'} (id: {m.get('id')})"
         + (f" — category: {m['category']}" if m.get("category") else "")
-        + ("" if m.get("id") in _active_ids else " — not yet fetched into context; call get_case_document with this id if relevant")
+        + _status(m)
         for m in _manifest
     )
     _doc_blocks = "\n".join(
@@ -1179,10 +1314,17 @@ def execute_function_call(function_call: dict, session_id: str = None):
         if func_name == "get_case_document" and session_id:
             _cd_state = _context.sessions.get(session_id)
             _cd_id = func_args.get("case_document_id")
-            if _cd_state is not None and _cd_id and _cd_id in _cd_state.case_document_cache:
-                _cached_case_document = _cd_state.case_document_cache[_cd_id]
+            # Serve from cache only when the cache holds the WHOLE document and the model is
+            # asking for the whole document. A cached relevance-filtered slice must not answer
+            # a follow-up "read it in full" call, and a paged/filtered request must go to the
+            # API even if the full text is cached (the model asked for a specific window).
+            _wants_whole = not func_args.get("case_document_chunk_ids") and func_args.get("limit") is None
+            if _cd_state is not None and _cd_id and _cd_id in _cd_state.case_document_cache and _wants_whole:
+                _cached = _cd_state.case_document_cache[_cd_id]
+                if not _cached.get("partial"):
+                    _cached_case_document = _cached
         if _cached_case_document is not None:
-            result = {"success": True, **_cached_case_document}
+            result = {"success": True, "partial": False, **_cached_case_document}
         else:
             result = globals()[func_name](**func_args)
         _LEGAL_RESULT_TOOLS = {
@@ -1337,8 +1479,21 @@ def execute_function_call(function_call: dict, session_id: str = None):
             if state is not None:
                 _cd_id = result.get("id") or func_args.get("case_document_id")
                 if result.get("success") and result.get("text"):
-                    entry = {"id": _cd_id, "name": result.get("name") or "", "text": result["text"], "chunk_count": result.get("chunk_count", 0)}
+                    entry = {
+                        "id": _cd_id,
+                        "name": result.get("name") or "",
+                        "text": result["text"],
+                        "chunk_count": result.get("chunk_count", 0),
+                        "document_chunk_count": result.get("document_chunk_count", result.get("chunk_count", 0)),
+                        "partial": bool(result.get("partial")),
+                    }
                     entry["_token_count"] = calculate_tokens(entry["text"])
+                    # A relevance-filtered re-read must never replace a full document already in
+                    # the cache — the manifest would then advertise the exhibit as fetched while
+                    # only a slice of it is in context (the Brackenmoor D01 §25 / D20.3 failure).
+                    _prev = state.case_document_cache.get(_cd_id)
+                    if _prev and not _prev.get("partial") and entry["partial"]:
+                        entry = _prev
                     state.case_document_cache[_cd_id] = entry
                     active = [d for d in state.active_case_documents if d.get("id") != _cd_id]
                     active.append(entry)
@@ -1967,7 +2122,17 @@ def _legal_use_responses_api() -> bool:
     return os.getenv("LEGAL_USE_RESPONSES_API", "true").strip().lower() not in ("false", "0", "no")
 
 
-def _legal_model_override(persona: str, state=None):
+_SUBQ_RE = re.compile(r"(?m)^\s*(?:\d+\.\d+|\([a-z]\)|\(?[ivx]+\)|[a-z]\)|Q\d+\b)")
+
+
+def _count_sub_questions(query: str) -> int:
+    """Distinct numbered/lettered parts at line starts: '1.1', '(a)', 'a)', '(iv)', 'Q2'."""
+    if not query:
+        return 1
+    return max(1, len(set(m.group(0).strip() for m in _SUBQ_RE.finditer(query))))
+
+
+def _legal_model_override(persona: str, state=None, query: str = ""):
     """Legal answers use a stronger model, not the default persona config.
 
     gpt-5.6-terra rejects function tools on /v1/chat/completions unless
@@ -2001,7 +2166,17 @@ def _legal_model_override(persona: str, state=None):
     # silently skips documents/authorities instead of finishing the job. Scale headroom with
     # how many exhibits are actually attached to this case.
     manifest_len = len(getattr(state, "case_document_manifest", None) or []) if state is not None else 0
-    max_chains = min(base_max_chains + (2 * manifest_len), int(os.getenv("LEGAL_MAX_CHAINS_CEILING", "60")))
+    # A multi-part question (an assessment paper's 1.1/1.2/…, a memo's (a)/(b)/(c)) needs
+    # research per part, not per exhibit — Brackenmoor Q2 (four parts) exhausted a 60-call
+    # budget and shipped with a "Not Yet Reviewed" list. Whole-case preload
+    # (case_document_texts) has since removed most per-document fetches, so this headroom
+    # goes to research rather than reads.
+    sub_questions = _count_sub_questions(query)
+    per_part = int(os.getenv("LEGAL_CHAINS_PER_SUBQUESTION", "6"))
+    max_chains = min(
+        base_max_chains + (2 * manifest_len) + per_part * max(0, sub_questions - 1),
+        int(os.getenv("LEGAL_MAX_CHAINS_CEILING", "80")),
+    )
     return (
         os.getenv("LEGAL_CHAT_MODEL", "gpt-5.6-terra"),
         reasoning_effort,
@@ -2014,7 +2189,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override, persona=persona)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -2340,7 +2515,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -2529,6 +2704,7 @@ def chat(request: ChatRequest):
             request.case_document_ids,
             request.case_document_chunk_ids,
             request.case_document_manifest,
+            request.case_document_texts,
         ))
 
     if persona == "garment" and request.weather:
@@ -2794,6 +2970,7 @@ def chat(request: ChatRequest):
         state.last_search_legal_results,
         legal_mode=_legal_mode,
         user_input=user_input,
+        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
     )
     related_cases: list = []
     if persona in ("legal", "legal_uk") and state.last_search_legal_results:
@@ -2820,8 +2997,12 @@ def chat(request: ChatRequest):
     _context.sessions[session_id] = state
 
     reasoning = None
+    decisions = None
     if persona in ("legal", "legal_uk") and final_text:
         reasoning = _generate_reasoning_explanation(
+            user_input, final_text, state.last_search_legal_results, state.last_turn_tool_log, state,
+        )
+        decisions = _generate_decision_records(
             user_input, final_text, state.last_search_legal_results, state.last_turn_tool_log, state,
         )
 
@@ -2832,6 +3013,7 @@ def chat(request: ChatRequest):
         "source_metadata": state.source_metadata,
         "related_cases": related_cases,
         "reasoning": reasoning,
+        "decisions": decisions,
         "outfit_ids": state.last_outfit_ids_result if persona == "stylist" and state.last_outfit_ids_result else None,
         "cosmetics_ids": state.last_cosmetics_ids_result if persona == "stylist" and state.last_cosmetics_ids_result else None,
         "garment_sets": state.last_garment_result if persona == "garment" and state.last_garment_result else None,
@@ -2950,6 +3132,7 @@ def approve(request: ApproveRequest):
         state.last_search_legal_results,
         legal_mode=_legal_mode,
         user_input=state.prompt[-1] if state.prompt else "",
+        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
     )
     state.generated.append(final_text)
     _context.sessions[session_id] = state
@@ -3098,6 +3281,7 @@ async def chat_stream(websocket: WebSocket):
                         state.last_search_legal_results,
                         legal_mode=_legal_mode,
                         user_input=user_input,
+                        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
                     )
                     if _legal_mode:
                         await websocket.send_text(final_text)
@@ -3140,6 +3324,7 @@ async def chat_stream(websocket: WebSocket):
                     request.case_document_ids,
                     request.case_document_chunk_ids,
                     request.case_document_manifest,
+                    request.case_document_texts,
                 )
 
             # Inject frontend-provided weather for garment persona
@@ -3338,6 +3523,7 @@ async def chat_stream(websocket: WebSocket):
                         state.last_search_legal_results,
                         legal_mode=_legal_mode,
                         user_input=user_input,
+                        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
                     )
                     if persona in ("legal", "legal_uk"):
                         await websocket.send_text(final_text)
@@ -3413,6 +3599,18 @@ async def chat_stream(websocket: WebSocket):
                         logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
                         if reasoning:
                             await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
+                        t_dr = time.time()
+                        decisions = await asyncio.to_thread(
+                            _generate_decision_records,
+                            user_input,
+                            final_text,
+                            state.last_search_legal_results,
+                            state.last_turn_tool_log,
+                            state,
+                        )
+                        logging.info("_generate_decision_records %.2fs", time.time() - t_dr)
+                        if decisions:
+                            await websocket.send_text(json.dumps({"type": "decisions", "session_id": session_id, "data": decisions}))
                         # Gated separately from _generate_structured_data above — see
                         # _wants_audio_overview's docstring for why this can't just be folded in.
                         if _wants_audio_overview(user_input):
