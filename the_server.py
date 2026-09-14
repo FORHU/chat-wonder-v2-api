@@ -142,7 +142,47 @@ class ChatState:
         self.pending_tools: Optional[list] = None
         self.pending_addendum: Optional[str] = None
 
+    def __getstate__(self):
+        """Exclude the live OpenAI client from pickling — it wraps open sockets/threads and
+        isn't serializable. Nothing is lost: every request path re-runs init_openai_client()
+        unconditionally before touching state.openai_client (see /chat and the websocket
+        handler), so a restored session just gets a fresh client on its next turn."""
+        state = self.__dict__.copy()
+        state["openai_client"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
 SESSION_TTL_SECONDS = 3600
+
+# Session Persistence
+SESSION_STORAGE_PATH = "sessions.pkl"
+SESSION_RESTORE_WINDOW = 600  # only restore sessions used within the last 10 minutes
+
+def save_sessions_to_disk():
+    try:
+        with open(SESSION_STORAGE_PATH, "wb") as f:
+            pickle.dump(_context.sessions, f)
+        logging.debug(f"Saved {len(_context.sessions)} sessions to disk.")
+    except Exception as e:
+        logging.error(f"Failed to save sessions: {e}")
+
+def load_sessions_from_disk():
+    if not os.path.exists(SESSION_STORAGE_PATH):
+        return
+    try:
+        with open(SESSION_STORAGE_PATH, "rb") as f:
+            saved_sessions = pickle.load(f)
+        now = time.time()
+        restored = 0
+        for sid, state in saved_sessions.items():
+            if now - state.last_used < SESSION_RESTORE_WINDOW:
+                _context.sessions[sid] = state
+                restored += 1
+        logging.info(f"Restored {restored} active session(s) from disk.")
+    except Exception as e:
+        logging.error(f"Failed to load sessions: {e}")
 
 def cleanup_sessions():
     while True:
@@ -150,6 +190,8 @@ def cleanup_sessions():
         expired = [sid for sid, s in list(_context.sessions.items()) if now - s.last_used > SESSION_TTL_SECONDS]
         for sid in expired:
             del _context.sessions[sid]
+        if _context.sessions:
+            save_sessions_to_disk()
         time.sleep(600)
 
 # ---------------------------------------------------------------------------
@@ -353,9 +395,15 @@ async def startup_event():
     global _app_event_loop
     _app_event_loop = asyncio.get_event_loop()
     logging.info("Starting Chat Wonder v2...")
+    load_sessions_from_disk()
     Thread(target=cleanup_sessions, daemon=True).start()
     _load_user_functions(overwrite_globals=True)
     logging.info("Startup complete (legal source: juris.ph MCP at %s)", _context.juris_mcp_url)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    save_sessions_to_disk()
+    logging.info("Shutdown: sessions flushed to disk.")
 
 # ---------------------------------------------------------------------------
 # Session helpers
