@@ -418,7 +418,13 @@ def get_republic_act(
         }
 
 
-def get_case_document(case_document_id: str, case_document_chunk_ids: list = None, offset: int = 0, limit: int = None) -> dict:
+def get_case_document(
+    case_document_id: str,
+    case_document_chunk_ids: list = None,
+    offset: int = 0,
+    limit: int = None,
+    query: str = None,
+) -> dict:
     """Fetch a user's own uploaded case document (contract, pleading, etc.) from
     ilovelawyer-api by id. Private to the uploading user — never treat this content
     as public jurisprudence or a Legal Citation.
@@ -427,7 +433,16 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
     large to read in one call — e.g. a 300-page exhibit fetched in full (no
     case_document_chunk_ids filter). Omit both for the normal case: either the relevance-
     filtered chunk set, or a document small enough to return whole. When has_more is true,
-    call again with offset=next_offset to continue reading the same document."""
+    call again with offset=next_offset to continue reading the same document.
+
+    query is injected by execute_function_call from state.current_query, not something the
+    model passes itself. Used only on the whole-document path (no case_document_chunk_ids,
+    no limit) when the document's full text exceeds _CASE_DOCUMENT_CHAR_CAP: chunks are
+    BM25-ranked against query before truncation, so the cut falls on the least relevant
+    material instead of whatever sits last by chunkIndex. A document that fits under the cap
+    is left in natural chunkIndex order regardless — nothing is being dropped, so there's no
+    reason to disturb reading order. The offset/limit paging path is untouched (it relies on
+    stable chunkIndex order across calls to `call again with offset=next_offset`)."""
     if not case_document_id:
         return {"success": False, "error": "Provide case_document_id"}
 
@@ -461,11 +476,22 @@ def get_case_document(case_document_id: str, case_document_chunk_ids: list = Non
 
     raw_chunks = data.get("chunks") or []
     chunks = raw_chunks
+    _bm25_ordered = False
     if case_document_chunk_ids:
         wanted = set(case_document_chunk_ids)
         chunks = [c for c in raw_chunks if c.get("id") in wanted]
+    elif query and limit is None and raw_chunks:
+        _raw_total_chars = sum(len(c.get("chunkText", "") or "") for c in raw_chunks)
+        if _raw_total_chars > _CASE_DOCUMENT_CHAR_CAP:
+            from bm25 import rank as _bm25_rank
 
-    chunks = sorted(chunks, key=lambda c: c.get("chunkIndex", 0))
+            _texts = [c.get("chunkText", "") or "" for c in raw_chunks]
+            _order = _bm25_rank(_texts, query)
+            chunks = [raw_chunks[i] for i in _order]
+            _bm25_ordered = True
+
+    if not _bm25_ordered:
+        chunks = sorted(chunks, key=lambda c: c.get("chunkIndex", 0))
     total_chunks = len(chunks)
     has_more = False
     next_offset = None

@@ -126,6 +126,10 @@ class ChatState:
         self.case_document_cache: dict = {}
         # None = not yet synced this process; empty set = this turn has no case docs.
         self.allowed_case_document_ids = None
+        # This turn's raw user_input, captured before persona tag injection (weather/sitemap/
+        # skin-analysis annotations aren't part of the actual question) — read by
+        # execute_function_call to give get_case_document something to rank chunks against.
+        self.current_query: str = ""
         # Every attached document's id/name/category, whether or not its chunks made this
         # turn's cut — see docs/adr/0005. Set by sync_active_case_documents.
         self.case_document_manifest: list = []
@@ -1358,6 +1362,13 @@ def execute_function_call(function_call: dict, session_id: str = None):
                     "error": "out_of_scope",
                     "message": "Case document is not attached to this case.",
                 }
+            # BM25-rank raw_chunks before get_case_document's char-cap truncation, so on the
+            # whole-document fallback path (no case_document_chunk_ids filter — see that
+            # function's docstring) the cut falls on the least relevant chunks instead of
+            # whichever happen to sit last by chunkIndex.
+            _cd_query = getattr(_cd_state, "current_query", "") if _cd_state is not None else ""
+            if _cd_query:
+                func_args["query"] = _cd_query
         _cached_case_document = None
         if func_name == "get_case_document" and session_id:
             _cd_state = _context.sessions.get(session_id)
@@ -3358,6 +3369,7 @@ async def chat_stream(websocket: WebSocket):
                 await websocket.send_text("[Error] User input is empty.")
                 await websocket.send_text(_context.__END__)
                 continue
+            state.current_query = user_input
 
             persona, user_input, filtered_tools, addendum_override = process_persona(user_input, request.jurisdiction)
             if persona == "legal":
