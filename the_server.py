@@ -848,9 +848,13 @@ def _generate_structured_data(legal_response: str, state) -> dict | None:
 def _generate_reasoning_explanation(user_input: str, legal_response: str, search_results: list, tool_log: list, state) -> dict | None:
     """Third lightweight LLM call: a plain-language 'why this answer' explanation for
     the ilovelawyer chat UI. Distinct from the glass-box SCL trace (raw R-CCAM phase
-    events, for developers) — this is a short, user-facing summary of the practical
-    reasoning, grounded only in the tool calls and sources actually used this turn
-    (tool_log / search_results), not re-derived from the model's general knowledge."""
+    events, for developers) and from Decision Records (_generate_decision_records —
+    audited, per-contested-conclusion legal reasoning with verified evidence/rule links).
+    This is the lighter, always-on counterpart: a user-facing walkthrough of the whole
+    turn's practical logic — why it reached its conclusion AND why it recommends the
+    specific next steps in the answer — grounded only in the tool calls and sources
+    actually used this turn (tool_log / search_results), not re-derived from the
+    model's general knowledge."""
     if not tool_log and not search_results:
         return None
     try:
@@ -865,24 +869,38 @@ def _generate_reasoning_explanation(user_input: str, legal_response: str, search
             grounding_lines.append(f"- Called `{name}`({arg_str}) -> {entry.get('summary', '')}")
         grounding = "\n".join(grounding_lines) or "No tools were called; answered directly from the legal-analysis protocol."
 
-        cited_titles = [str(r.get("title")) for r in (search_results or [])[:8] if r.get("title")]
-        cited_str = "; ".join(cited_titles) or "none"
+        cited_lines = []
+        for r in (search_results or [])[:8]:
+            title = r.get("title")
+            if not title:
+                continue
+            snippet = (r.get("snippet") or "")[:200]
+            cited_lines.append(f"- {title}" + (f" — {snippet}" if snippet else ""))
+        cited_str = "\n".join(cited_lines) or "none"
 
         prompt = (
-            "You are writing a short, plain-language 'how I reached this answer' explanation "
-            "for a non-lawyer user of a legal-AI chat. Do NOT introduce any law, case, or fact "
-            "not already present below — only explain the reasoning connecting what was actually "
-            "looked up to the answer given.\n\n"
+            "You are writing a plain-language 'how I reached this answer' explanation for a "
+            "non-lawyer user of a legal-AI chat, covering the FULL response — not just the "
+            "headline conclusion. Do NOT introduce any law, case, fact, or recommendation not "
+            "already present below — only explain the reasoning connecting what was actually "
+            "looked up and written to what the user sees.\n\n"
             f"User's question:\n{user_input[:600]}\n\n"
             f"Steps actually taken this turn:\n{grounding}\n\n"
-            f"Sources retrieved (titles): {cited_str}\n\n"
-            f"Final answer given (first 2000 chars):\n{legal_response[:2000]}\n\n"
+            f"Sources retrieved (title — snippet):\n{cited_str}\n\n"
+            f"Final answer given:\n{legal_response[:6000]}\n\n"
             "Return ONLY a JSON object with:\n"
-            "  \"reasoning\": a 2-4 sentence plain-language paragraph covering what it understood "
-            "the question to be, what it looked up and why, and how that led to the conclusion.\n"
+            "  \"reasoning\": 3-6 sentences walking through the practical logic for the WHOLE "
+            "answer — what it understood the user's situation/issue to be, what it looked up and "
+            "why, and the actual chain connecting the facts and retrieved law to the conclusion "
+            "(\"because X, and the law/case says Y, therefore Z\"), not a generic summary.\n"
             "  \"citation_reasons\": array of {\"title\": str, \"why_cited\": str (<=25 words)}, one "
             "per source above that materially supports the answer. Omit sources retrieved but not "
-            "relied on. Empty array if none were used."
+            "relied on. Empty array if none were used.\n"
+            "  \"recommendation_reasons\": array of {\"recommendation\": str (the step/action as "
+            "stated in the answer, <=15 words), \"why\": str (<=30 words, the practical or legal "
+            "reason THIS step matters for this user's specific situation, e.g. a deadline, a "
+            "procedural requirement, or risk it avoids)}, one per concrete next step or recommended "
+            "action the answer gives. Empty array if the answer gives none."
         )
         t0 = time.time()
         completion = state.openai_client.chat.completions.create(
@@ -899,6 +917,7 @@ def _generate_reasoning_explanation(user_input: str, legal_response: str, search
         if not isinstance(parsed, dict) or not parsed.get("reasoning"):
             return None
         parsed.setdefault("citation_reasons", [])
+        parsed.setdefault("recommendation_reasons", [])
         return parsed
     except Exception as e:
         logging.warning("_generate_reasoning_explanation failed: %s", e)
