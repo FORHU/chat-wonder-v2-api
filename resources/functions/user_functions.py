@@ -449,12 +449,14 @@ def get_case_document(
     base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
     api_key = os.getenv("CHAT_WONDER_API_KEY", "")
     if not base:
+        _logger.error("get_case_document id=%s missing_config=ILOVELAWYER_API_BASE", case_document_id)
         return {
             "success": False,
             "error": "missing_config",
             "message": "ILOVELAWYER_API_BASE is not set in user_functions.env",
         }
     if not api_key:
+        _logger.error("get_case_document id=%s missing_config=CHAT_WONDER_API_KEY", case_document_id)
         return {
             "success": False,
             "error": "missing_config",
@@ -462,14 +464,22 @@ def get_case_document(
         }
 
     url = f"{base}/api/v1/case-document/{urllib.parse.quote(str(case_document_id))}"
+    t0 = time.perf_counter()
     try:
         data = _http_get_json(url, {"x-api-key": api_key})
     except urllib.error.HTTPError as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
         if e.code == 404:
+            _logger.warning("get_case_document id=%s not_found elapsed=%.0fms", case_document_id, elapsed_ms)
             return {"success": False, "error": "not_found", "message": "Case document not found."}
+        _logger.error("get_case_document id=%s http_%s elapsed=%.0fms error=%s", case_document_id, e.code, elapsed_ms, e)
         return {"success": False, "error": f"http_{e.code}", "message": f"get_case_document failed: {e}"}
     except Exception as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        _logger.error("get_case_document id=%s failed elapsed=%.0fms error=%s", case_document_id, elapsed_ms, e)
         return {"success": False, "error": str(e), "message": f"get_case_document failed: {e}"}
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    _logger.info("get_case_document id=%s fetched elapsed=%.0fms", case_document_id, elapsed_ms)
 
     name = data.get("name") or ""
     rag_status = data.get("ragStatus") or ""
@@ -516,6 +526,7 @@ def get_case_document(
             _empty_message = "No chunks relevant to the current question were found in this document."
         else:
             _empty_message = "No extracted content available yet — the document may still be processing."
+        _logger.info("get_case_document id=%s empty ragStatus=%s", case_document_id, rag_status)
         return {
             "success": True,
             "id": case_document_id,
@@ -559,6 +570,10 @@ def get_case_document(
             f"the complete document — if the question refers to a paragraph, part or item you cannot "
             f"see here, {how}."
         )
+    _logger.info(
+        "get_case_document id=%s chunks=%d/%d partial=%s truncated=%s has_more=%s",
+        case_document_id, len(chunks), document_chunk_count, partial, truncated, has_more,
+    )
     return result
 
 
