@@ -117,6 +117,8 @@ jobs:
                   cat > /tmp/deploy-env/.env << 'ENVEOF'
                   OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
                   CHAT_MODEL=${{ vars.CHAT_MODEL }}
+                  LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
+                  LEGAL_REASONING_EFFORT=${{ vars.LEGAL_REASONING_EFFORT }}
                   JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
