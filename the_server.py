@@ -3728,17 +3728,25 @@ async def chat_stream(websocket: WebSocket):
 
 @app.post("/install-embeddings")
 async def install_embeddings(file: UploadFile = File(...), session_id: str = None):
+    broadcast_trace("request", f"Install embeddings — file: {file.filename}", session_id,
+        summary="Uploading a new embeddings file to the server.")
     try:
         content = await file.read()
         with open("embeddings.pkz", "wb") as f:
             f.write(content)
+        broadcast_trace("action", "Embeddings file saved.", session_id,
+            summary="New embeddings file saved successfully.")
         return {"message": "Embeddings file saved successfully."}
     except Exception as e:
+        broadcast_trace("cognition", f"Install embeddings failed — {e}", session_id,
+            summary="Failed to save the uploaded embeddings file.")
         raise HTTPException(status_code=500, detail=f"Failed to save embeddings: {e}")
 
 
 @app.post("/install-user-functions")
 async def install_user_functions(zip_file: UploadFile = File(...)):
+    broadcast_trace("request", f"Install user functions — file: {zip_file.filename}", None,
+        summary="Uploading a new user-functions package to the server.")
     try:
         content = await zip_file.read()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3758,12 +3766,20 @@ async def install_user_functions(zip_file: UploadFile = File(...)):
             if req_files:
                 req_dst = os.path.join(_context.FUNCTIONS_DIR, "requirements.txt")
                 shutil.copy(os.path.join(tmp, req_files[0]), req_dst)
+                broadcast_trace("action", "Installing requirements.txt for user functions...", None,
+                    summary="Installing Python dependencies declared by the uploaded user functions.")
                 subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_dst], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         _load_user_functions(overwrite_globals=False)
+        broadcast_trace("cognition", "User functions installed.", None,
+            summary="New user functions loaded and available for tool calls.")
         return {"message": "User functions installed successfully."}
     except zipfile.BadZipFile:
+        broadcast_trace("cognition", "Install user functions failed — invalid ZIP file", None,
+            summary="Upload rejected: not a valid ZIP file.")
         raise HTTPException(status_code=400, detail="Invalid ZIP file.")
     except Exception as e:
+        broadcast_trace("cognition", f"Install user functions failed — {e}", None,
+            summary="Failed to install the uploaded user functions.")
         raise HTTPException(status_code=500, detail=f"Error installing user functions: {e}")
 
 
@@ -3771,6 +3787,8 @@ async def install_user_functions(zip_file: UploadFile = File(...)):
 def export_chat(request: ExportRequest):
     state = get_session_state(request.session_id)
     state.last_used = time.time()
+    broadcast_trace("request", f"Export chat — format: {request.file_type}", request.session_id,
+        summary=f"Exporting the conversation as a {request.file_type.upper()} file.")
     df = pd.DataFrame({"Prompt": state.prompt, "Response": state.generated})
     file_type = request.file_type.lower()
     if file_type == "csv":
@@ -3789,6 +3807,8 @@ def export_chat(request: ExportRequest):
 def import_chat(request: ImportRequest):
     state = get_session_state(request.session_id)
     state.last_used = time.time()
+    broadcast_trace("request", "Import chat", request.session_id,
+        summary="Importing a conversation from an uploaded file.")
     try:
         df = pd.read_csv(io.StringIO(request.conversation), encoding="utf-8")
     except Exception:
@@ -3796,6 +3816,8 @@ def import_chat(request: ImportRequest):
     state.prompt = df["Prompt"].tolist()
     state.generated = df["Response"].tolist()
     _context.sessions[request.session_id] = state
+    broadcast_trace("cognition", "Chat imported.", request.session_id,
+        summary="Conversation imported successfully.")
     return {"message": "Chat imported successfully."}
 
 # ---------------------------------------------------------------------------
@@ -3944,6 +3966,9 @@ async def categorize_document(request: CategorizeDocumentRequest):
     extraction pipeline right after text extraction, alongside chunking/embedding. Always
     returns 200 (success: false on failure) so a categorization miss never surfaces as an
     HTTP error to a caller that's treating this as best-effort."""
+    session_id = getattr(request, "session_id", None)
+    broadcast_trace("request", f"Categorize document — file: {request.filename or 'unknown'}", session_id,
+        summary=f"Categorizing uploaded document '{request.filename or 'unknown'}'.")
     if not _context.openai_api_key:
         return {"success": False, "category": None}
     try:
@@ -3957,6 +3982,8 @@ async def categorize_document(request: CategorizeDocumentRequest):
             f"Filename: {request.filename or 'unknown'}\n\n"
             f"Document text (first 3000 chars):\n{request.text[:3000]}"
         )
+        broadcast_trace("action", "Calling LLM to categorize document...", session_id,
+            summary="The AI is reading the document and picking a short category label.")
         completion = client.chat.completions.create(
             model=_context.model,
             messages=[
@@ -3970,10 +3997,16 @@ async def categorize_document(request: CategorizeDocumentRequest):
         parsed = _extract_json_object(raw)
         category = parsed.get("category") if isinstance(parsed, dict) else None
         if not isinstance(category, str) or not category.strip():
+            broadcast_trace("cognition", "Categorization failed — no category returned", session_id,
+                summary="The AI did not return a usable category label.")
             return {"success": False, "category": None}
+        broadcast_trace("cognition", f"Category assigned: {category.strip()}", session_id,
+            summary=f"Document categorized as '{category.strip()}'.")
         return {"success": True, "category": category.strip()}
     except Exception as e:
         logging.warning(f"[Categorize Document] failed: {e}")
+        broadcast_trace("cognition", f"Categorization failed — {e}", session_id,
+            summary="Categorization failed due to an error.")
         return {"success": False, "category": None}
 
 
@@ -4374,6 +4407,9 @@ async def tailor_generate_outfit(
     if not image_bytes:
         raise HTTPException(status_code=422, detail="image file is empty")
 
+    broadcast_trace("request", f"Tailor outfit generation — gender: {gender_upper}", None,
+        summary=f"Generating a {gender_upper.lower()} outfit render from the uploaded canvas snapshot.")
+
     import base64
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     gender_word = "female" if gender_upper == "FEMALE" else "male"
@@ -4411,6 +4447,8 @@ async def tailor_generate_outfit(
     from openai import OpenAI
     client = OpenAI(api_key=_context.openai_api_key)
     try:
+        broadcast_trace("action", "Calling gpt-image-1 to render the combined outfit...", None,
+            summary="The AI is generating a ghost-mannequin product photo from the garment canvas.")
         gen = client.images.edit(
             model="gpt-image-1",
             image=("outfit.png", image_bytes, "image/png"),
@@ -4443,12 +4481,16 @@ async def tailor_generate_outfit(
             raise HTTPException(status_code=500, detail="Failed to generate presigned URL.")
 
         logging.info(f"[tailor_generate_outfit] gender={gender_upper} s3_key={s3_key}")
+        broadcast_trace("cognition", f"Outfit render complete — s3_key: {s3_key}", None,
+            summary="Outfit render complete and uploaded.")
         return {"success": True, "image_url": image_url, "s3_key": s3_key, "gender": gender_upper}
 
     except HTTPException:
         raise
     except Exception as e:
         logging.error(f"[tailor_generate_outfit] Failed: {e}")
+        broadcast_trace("cognition", f"Outfit render failed — {e}", None,
+            summary="Outfit render failed due to an error.")
         raise HTTPException(status_code=500, detail=str(e))
 
 
