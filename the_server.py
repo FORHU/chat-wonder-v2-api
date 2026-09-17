@@ -523,6 +523,9 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "get_case",
             "get_republic_act",
             "get_case_document",
+            "get_legal_recommendation",
+            "analyze_document",
+            "generate_legal_document",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_whitelist]
         try:
