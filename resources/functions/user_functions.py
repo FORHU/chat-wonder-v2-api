@@ -1761,15 +1761,20 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
 
         # Render via ilovelawyer-api into a downloadable file — optional, same posture as
         # analyze_document: missing config or a failed call never blocks the drafted content
-        # itself from coming back. Not yet live-tested — ilovelawyer-api#87/#88/#89 (the
-        # endpoint this calls) aren't merged yet (chat-wonder-v2-api#67).
+        # itself from coming back. Live-tested against a local ilovelawyer-api.
         base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
         api_key = os.getenv("CHAT_WONDER_API_KEY", "")
         if base and api_key:
             try:
+                # `format` here is generate_legal_document's own param — describes the drafted
+                # content's text format (defaults "markdown") for the JSON response, not the
+                # file format ilovelawyer-api renders to. Only forward it when it's actually one
+                # of the two file formats that endpoint accepts; otherwise render docx (matches
+                # the manifest's own "Defaults to 'docx'" description of the new format param).
+                render_format = format if format in ("docx", "pdf") else "docx"
                 render = _http_post_json(
                     f"{base}/api/v1/generated-document",
-                    {"documentName": template["name"], "content": content, "format": format},
+                    {"documentName": template["name"], "content": content, "format": render_format},
                     {"x-api-key": api_key},
                 )
                 file_info = render.get("file") or {}
