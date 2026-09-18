@@ -1759,33 +1759,10 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
             ],
         }
 
-        # Render via ilovelawyer-api into a downloadable file — optional, same posture as
-        # analyze_document: missing config or a failed call never blocks the drafted content
-        # itself from coming back. Live-tested against a local ilovelawyer-api.
-        base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
-        api_key = os.getenv("CHAT_WONDER_API_KEY", "")
-        if base and api_key:
-            try:
-                # `format` here is generate_legal_document's own param — describes the drafted
-                # content's text format (defaults "markdown") for the JSON response, not the
-                # file format ilovelawyer-api renders to. Only forward it when it's actually one
-                # of the two file formats that endpoint accepts; otherwise render docx (matches
-                # the manifest's own "Defaults to 'docx'" description of the new format param).
-                render_format = format if format in ("docx", "pdf") else "docx"
-                render = _http_post_json(
-                    f"{base}/api/v1/generated-document",
-                    {"documentName": template["name"], "content": content, "format": render_format},
-                    {"x-api-key": api_key},
-                )
-                file_info = render.get("file") or {}
-                if file_info.get("fileUrl"):
-                    result["file_url"] = file_info["fileUrl"]
-                    result["filename"] = file_info.get("filename")
-            except Exception as e:
-                _logger.warning("generate_legal_document render_failed document_type=%s error=%s", doc_type_lower, e)
-        else:
-            _logger.warning("generate_legal_document missing_config=ILOVELAWYER_API_BASE/CHAT_WONDER_API_KEY document_type=%s", doc_type_lower)
-
+        # Rendering to a downloadable file now happens in ilovelawyer-api, in-process,
+        # once this drafted content/format crosses over via the [GENERATED_FILE_DATA]
+        # frame (streaming) or the `generated_file` response field (/chat) — chat-wonder
+        # no longer calls out to ilovelawyer-api itself. See #71.
         return result
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2573,14 +2550,6 @@ def navigate_app(target_url: str, session_id: str = None) -> dict:
 def _http_get_json(url: str, headers: dict = None) -> dict:
     req = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _http_post_json(url: str, payload: dict, headers: dict = None) -> dict:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST",
-                                  headers={**(headers or {}), "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
