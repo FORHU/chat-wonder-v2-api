@@ -3414,6 +3414,10 @@ async def chat_stream(websocket: WebSocket):
                     existing = list(_context.sessions[session_id].last_search_legal_results or [])
                     existing.extend(_prefetch)
                     _context.sessions[session_id].last_search_legal_results = existing
+                if session_id and session_id in _context.sessions:
+                    # Reset per-turn so a document drafted on turn N doesn't leak into
+                    # turn N+1's [GENERATED_FILE_DATA] frame — mirrors /chat's reset.
+                    _context.sessions[session_id].last_generated_file_result = {}
             if persona in ("legal", "legal_uk"):
                 await sync_active_case_documents(
                     session_id,
@@ -3661,6 +3665,8 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
                 if persona == "tailor" and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
+                if persona == "legal" and state.last_generated_file_result:
+                    await websocket.send_text(f"[GENERATED_FILE_DATA]{json.dumps(state.last_generated_file_result)}")
                 # nav emission disabled for stylist — front end handles navigation
                 _ws_t_end = time.time()
                 ttft = (_ws_t_first_chunk - _ws_t_start) if _ws_t_first_chunk else 0
