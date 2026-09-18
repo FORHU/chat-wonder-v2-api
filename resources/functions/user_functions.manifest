@@ -282,7 +282,7 @@
     "persona": "legal",
     "function": {
       "name": "generate_legal_document",
-      "description": "Generate a Philippine legal document. Supported types: affidavit_of_loss, demand_letter, power_of_attorney, authorization_letter, promissory_note, lease_contract.",
+      "description": "Generate a Philippine legal document. Supported types: affidavit_of_loss, demand_letter, power_of_attorney, authorization_letter, promissory_note, lease_contract. A downloadable file is attached to the response automatically — do not tell the user to copy/paste the text as their document.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -393,6 +393,11 @@
           "lease_term": {
             "type": "string",
             "description": "For lease_contract: lease duration (e.g. '1 year')"
+          },
+          "format": {
+            "type": "string",
+            "enum": ["docx", "pdf"],
+            "description": "Output format. Defaults to 'docx', which produces a real downloadable file."
           }
         },
         "required": [
