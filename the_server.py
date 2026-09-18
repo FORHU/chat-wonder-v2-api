@@ -1556,15 +1556,14 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_tailor_result = result
-        if func_name == "generate_legal_document" and session_id and isinstance(result, dict):
+        if func_name in ("generate_legal_document", "draft_pleading") and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
-            if state is not None and result.get("success") and result.get("file_url"):
+            if state is not None and result.get("success") and result.get("content"):
                 state.last_generated_file_result = {
-                    "url": result["file_url"],
-                    "filename": result.get("filename"),
+                    "content": result["content"],
                     "format": result.get("format", "docx"),
-                    "document_type": result.get("document_type"),
-                    "document_name": result.get("document_name"),
+                    "document_type": result.get("document_type") or "pleading",
+                    "document_name": result.get("document_name") or result.get("pleading_type"),
                 }
         if func_name == "get_case_document" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
