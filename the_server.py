@@ -1729,12 +1729,8 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             inject_verifier_feedback(messages, full_response, feedback)
             continue
 
-        # HITL gate. generate_legal_document/draft_pleading are exempted: their
-        # result-handling (verbatim-reproduction instruction, trace/summary dispatch)
-        # only runs on the non-HITL path today, so gating them would silently drop
-        # that handling rather than just adding a pause.
-        _hitl_exempt = function_call["name"] in ("generate_legal_document", "draft_pleading")
-        if not _hitl_exempt and not (_context.manual_auto_approval or auto_approval):
+        # HITL gate
+        if not (_context.manual_auto_approval or auto_approval):
             return {"__hitl__": True, "function_call": function_call, "messages": messages, "tools": tools}
 
         # Duplicate check
@@ -2521,11 +2517,8 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             inject_verifier_feedback(messages, full_response, feedback)
             continue
 
-        # HITL gate: emit pending_approval event and stop streaming.
-        # generate_legal_document/draft_pleading are exempted — see matching
-        # comment on the non-streaming gate in run_function_chain.
-        _hitl_exempt = function_call["name"] in ("generate_legal_document", "draft_pleading")
-        if not _hitl_exempt and not (_context.manual_auto_approval or auto_approval):
+        # HITL gate: emit pending_approval event and stop streaming
+        if not (_context.manual_auto_approval or auto_approval):
             yield f"__HITL__{json.dumps({'function_call': function_call, 'messages': messages, 'tools': [t['function']['name'] for t in (tools or [])]})}"
             return
 
