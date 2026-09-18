@@ -120,6 +120,7 @@ class ChatState:
         self.last_maps_result: list = []
         self.last_nav_result: dict = {}
         self.last_tailor_result: dict = {}
+        self.last_generated_file_result: dict = {}
         self.last_outfit_ids_result: list = []
         self.last_cosmetics_ids_result: list = []
         self.active_case_documents: list = []
@@ -1555,6 +1556,16 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_tailor_result = result
+        if func_name == "generate_legal_document" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None and result.get("success") and result.get("file_url"):
+                state.last_generated_file_result = {
+                    "url": result["file_url"],
+                    "filename": result.get("filename"),
+                    "format": result.get("format", "docx"),
+                    "document_type": result.get("document_type"),
+                    "document_name": result.get("document_name"),
+                }
         if func_name == "get_case_document" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -2776,6 +2787,9 @@ def chat(request: ChatRequest):
             existing = list(_context.sessions[session_id].last_search_legal_results or [])
             existing.extend(_prefetch)
             _context.sessions[session_id].last_search_legal_results = existing
+        if session_id and session_id in _context.sessions:
+            # Reset per-turn so a document drafted on turn N doesn't leak into turn N+1's response.
+            _context.sessions[session_id].last_generated_file_result = {}
     if persona in ("legal", "legal_uk") and session_id and session_id in _context.sessions:
         # Plain `def chat` runs in Starlette's threadpool, not the main event loop, so this
         # thread has none of its own to await onto — asyncio.run gives sync_active_case_documents
@@ -3102,6 +3116,7 @@ def chat(request: ChatRequest):
         "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
         "nav_result": state.last_nav_result if persona == "nav" and state.last_nav_result else None,
         "tailor_result": state.last_tailor_result if persona == "tailor" and state.last_tailor_result else None,
+        "generated_file": state.last_generated_file_result if persona == "legal" and state.last_generated_file_result else None,
     }
 
 
