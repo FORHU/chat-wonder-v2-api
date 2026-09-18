@@ -526,6 +526,7 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "get_legal_recommendation",
             "analyze_document",
             "generate_legal_document",
+            "draft_pleading",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_whitelist]
         try:
@@ -1772,6 +1773,20 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
                 "Use this fact in all future reasoning. Do NOT re-call with the exact same arguments."
             ),
         })
+        if function_call["name"] in ("generate_legal_document", "draft_pleading") and isinstance(result, dict) and result.get("success"):
+            # Scoped narrowly to this one tool-result turn, not the global prompt: the
+            # inconsistency this fixes (issue #72) was the model treating a successful
+            # draft as something to summarize/describe rather than reproduce, even
+            # though the full text was already sitting in `content` above.
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[Constraints]\nThe `content` field in the Memory Fact above is the complete, "
+                    "final drafted document. Reproduce it in full, verbatim, as your reply. Do NOT "
+                    "summarize it, describe what it contains, or explain what the document should "
+                    "say instead of showing it."
+                ),
+            })
         messages.append({
             "role": "system",
             "content": (
@@ -1881,6 +1896,9 @@ def _summarize_tool_result(tool_name: str, result) -> str:
         if tool_name == "generate_legal_document":
             doc_name = (result.get("document_name") or result.get("document_type") or "document") if isinstance(result, dict) else "document"
             return f"A {doc_name} was drafted successfully."
+        if tool_name == "draft_pleading":
+            pleading_name = (result.get("pleading_type") or "pleading") if isinstance(result, dict) else "pleading"
+            return f"A {pleading_name} was drafted successfully."
         if tool_name == "analyze_document":
             fname = (result.get("filename") or "document") if isinstance(result, dict) else "document"
             chars = result.get("char_count", 0) if isinstance(result, dict) else 0
@@ -1959,6 +1977,9 @@ def _describe_tool_args(tool_name: str, arguments: str) -> str:
         if tool_name == "generate_legal_document":
             doc_type = args.get("document_type", "document")
             return f"It will draft a {doc_type}."
+        if tool_name == "draft_pleading":
+            pleading_type = args.get("pleading_type", "pleading")
+            return f"It will draft a {pleading_type}."
         if tool_name == "analyze_document":
             s3_key = args.get("s3_key", "")
             fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
@@ -2009,6 +2030,9 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
         if tool_name == "generate_legal_document":
             doc_type = args.get("document_type", "document")
             return f"Drafting {doc_type}"
+        if tool_name == "draft_pleading":
+            pleading_type = args.get("pleading_type", "pleading")
+            return f"Drafting {pleading_type}"
         if tool_name == "analyze_document":
             s3_key = args.get("s3_key", "")
             fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")

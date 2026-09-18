@@ -8,7 +8,8 @@
       "Bash(python3 -m pip install pycdc)",
       "Bash(python3.10 --version)",
       "Bash(python3 -m pip install decompyle3)",
-      "Bash(python3 -m decompyle3 \"c:\\\\Users\\\\User\\\\Documents\\\\forhu-project\\\\chat-wonder-v2-api\\\\the_server.pyc\")"
+      "Bash(python3 -m decompyle3 \"c:\\\\Users\\\\User\\\\Documents\\\\forhu-project\\\\chat-wonder-v2-api\\\\the_server.pyc\")",
+      "Bash(pnpm install *)"
     ]
   }
 }
