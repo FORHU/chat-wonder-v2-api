@@ -403,6 +403,150 @@
   },
   {
     "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "generate_legal_document_uk",
+      "description": "Draft a legal document for England and Wales. Supported types: witness_statement, statutory_declaration (including declarations of loss), letter_before_claim, general_power_of_attorney, letter_of_authority, loan_agreement, deed_poll. England and Wales only — Scotland and Northern Ireland are not supported. A downloadable file is produced automatically. If a REQUIRED field is missing, ask the user for it first rather than guessing — but never ask for optional fields: leave them unset unless the user has already given them. If the user asks for a document type not listed, say it is not available rather than substituting another.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "document_type": {
+            "type": "string",
+            "enum": [
+              "witness_statement",
+              "statutory_declaration",
+              "letter_before_claim",
+              "general_power_of_attorney",
+              "letter_of_authority",
+              "loan_agreement",
+              "deed_poll"
+            ],
+            "description": "Type of document to draft"
+          },
+          "witness_name": {"type": "string", "description": "witness_statement (required): full name of the witness"},
+          "witness_address": {"type": "string", "description": "witness_statement (required): witness's address (or work address if giving evidence in a professional capacity)"},
+          "witness_occupation": {"type": "string", "description": "witness_statement (optional): occupation or position"},
+          "party_role": {"type": "string", "description": "witness_statement (required): party on whose behalf it is made (Claimant, Defendant, or non-party)"},
+          "statement_facts": {"type": "string", "description": "witness_statement (required): the evidence the witness gives, in the user's own words"},
+          "court": {"type": "string", "description": "witness_statement (optional): court name, if proceedings exist"},
+          "claim_number": {"type": "string", "description": "witness_statement (optional): claim number, if known"},
+          "case_title": {"type": "string", "description": "witness_statement (optional): title of the proceedings, e.g. 'Smith v Jones'"},
+          "statement_number": {"type": "string", "description": "witness_statement (optional): e.g. '1st'"},
+          "exhibits": {"type": "string", "description": "witness_statement (optional): exhibits referred to, if any"},
+          "declarant_name": {"type": "string", "description": "statutory_declaration (required): full name of the person making the declaration"},
+          "declarant_address": {"type": "string", "description": "statutory_declaration (required): their address"},
+          "declarant_occupation": {"type": "string", "description": "statutory_declaration (optional): their occupation"},
+          "declaration_facts": {"type": "string", "description": "statutory_declaration (required): what is being declared (e.g. for a lost item: what, when and where lost, and what was done to find it)"},
+          "declaration_purpose": {"type": "string", "description": "statutory_declaration (optional): what it is needed for, if known"},
+          "sender_name": {"type": "string", "description": "letter_before_claim (required): who is sending the letter"},
+          "sender_address": {"type": "string", "description": "letter_before_claim (optional): sender's address"},
+          "recipient_name": {"type": "string", "description": "letter_before_claim (required): who the claim is against"},
+          "recipient_address": {"type": "string", "description": "letter_before_claim (optional): recipient's address"},
+          "claim_summary": {"type": "string", "description": "letter_before_claim (required): the facts and the basis of the claim"},
+          "remedy_sought": {"type": "string", "description": "letter_before_claim (required): what the sender wants the recipient to do"},
+          "amount": {"type": "string", "description": "letter_before_claim (optional): amount claimed, if money"},
+          "how_calculated": {"type": "string", "description": "letter_before_claim (optional): how the amount is calculated"},
+          "documents_relied_on": {"type": "string", "description": "letter_before_claim (optional): key documents the claim relies on"},
+          "reference_number": {"type": "string", "description": "letter_before_claim / letter_of_authority (optional): reference, if any"},
+          "response_days": {"type": "string", "description": "letter_before_claim (optional): days allowed to respond (defaults to 14)"},
+          "donor_name": {"type": "string", "description": "general_power_of_attorney (required): person giving the power"},
+          "donor_address": {"type": "string", "description": "general_power_of_attorney (optional): donor's address"},
+          "attorney_name": {"type": "string", "description": "general_power_of_attorney (required): person(s) appointed as attorney"},
+          "attorney_address": {"type": "string", "description": "general_power_of_attorney (optional): attorney's address"},
+          "appointment_type": {"type": "string", "description": "general_power_of_attorney (optional): if more than one attorney — 'jointly' or 'jointly and severally'"},
+          "limits_on_authority": {"type": "string", "description": "general_power_of_attorney (optional): any limits on what the attorney may do. Leave unset for no limits."},
+          "authoriser_name": {"type": "string", "description": "letter_of_authority (required): person giving the authority"},
+          "authoriser_address": {"type": "string", "description": "letter_of_authority (optional): their address"},
+          "authorised_person": {"type": "string", "description": "letter_of_authority (required): person being authorised"},
+          "organisation_addressed": {"type": "string", "description": "letter_of_authority (optional): organisation the letter is for"},
+          "authority_purpose": {"type": "string", "description": "letter_of_authority (required): what the person may do"},
+          "valid_until": {"type": "string", "description": "letter_of_authority (optional): end date, if any"},
+          "lender_name": {"type": "string", "description": "loan_agreement (required): lender"},
+          "lender_address": {"type": "string", "description": "loan_agreement (optional): lender's address"},
+          "borrower_name": {"type": "string", "description": "loan_agreement (required): borrower"},
+          "borrower_address": {"type": "string", "description": "loan_agreement (optional): borrower's address"},
+          "principal_amount": {"type": "string", "description": "loan_agreement (required): amount lent"},
+          "loan_date": {"type": "string", "description": "loan_agreement (optional): date the money is advanced"},
+          "interest_rate": {"type": "string", "description": "loan_agreement (optional): interest rate, if any (otherwise interest-free)"},
+          "repayment_terms": {"type": "string", "description": "loan_agreement (required): how and when it is repaid"},
+          "security": {"type": "string", "description": "loan_agreement (optional): any security for the loan"},
+          "former_name": {"type": "string", "description": "deed_poll (required): current/former name being given up"},
+          "new_name": {"type": "string", "description": "deed_poll (required): new name"},
+          "address": {"type": "string", "description": "deed_poll (required): address of the person changing their name"},
+          "date_of_birth": {"type": "string", "description": "deed_poll (optional): date of birth, if wanted on the deed"},
+          "format": {
+            "type": "string",
+            "enum": ["docx", "pdf"],
+            "description": "Output format. Defaults to 'docx'. Use 'pdf' if the user asks for a PDF."
+          }
+        },
+        "required": [
+          "document_type"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "draft_pleading_uk",
+      "description": "Draft a complete court document for civil proceedings in England and Wales (Particulars of Claim, Defence, Defence and Counterclaim, Reply, or similar) in full, ready-to-file prose — not a summary or outline. Use when the user asks to draft, prepare or write a statement of case or similar court document, as opposed to generate_legal_document_uk (fixed-form documents such as statutory declarations and letters) or research tools (explaining the law). England and Wales only — Scotland and Northern Ireland are not supported. Ask the user only if the type of document, the facts or the grounds are missing; leave every other field unset unless the user gave it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pleading_type": {
+            "type": "string",
+            "description": "The kind of document being drafted, in plain terms (e.g. 'Particulars of Claim', 'Defence', 'Defence and Counterclaim', 'Reply')."
+          },
+          "case_facts": {
+            "type": "string",
+            "description": "Relevant background facts needed to make sense of the document."
+          },
+          "grounds": {
+            "type": "string",
+            "description": "The claim or defence to be advanced, as a summary — this tool expands it into full, properly developed paragraphs. Do not pre-write the full text yourself; give the substance and let the tool draft it."
+          },
+          "relief_sought": {
+            "type": "string",
+            "description": "What is being asked of the court (e.g. payment of a sum, damages, dismissal of the claim). Leave unset to let the draft infer the standard claim or order."
+          },
+          "responding_to": {
+            "type": "string",
+            "description": "If this responds to another document (e.g. a Defence responds to Particulars of Claim), a short description of what is being responded to and its key allegations."
+          },
+          "court": {
+            "type": "string",
+            "description": "Court (e.g. 'County Court at Manchester', 'High Court, King's Bench Division'). Left blank in the draft if omitted."
+          },
+          "case_title": {
+            "type": "string",
+            "description": "Title of the proceedings, e.g. 'Smith v Jones'. Left blank if omitted."
+          },
+          "claim_number": {
+            "type": "string",
+            "description": "Claim number. Left blank in the draft if omitted."
+          },
+          "party_role": {
+            "type": "string",
+            "description": "Which party the user is (Claimant or Defendant)."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["docx", "pdf"],
+            "description": "Output format. Defaults to 'docx'. Use 'pdf' if the user asks for a PDF."
+          }
+        },
+        "required": [
+          "pleading_type",
+          "case_facts",
+          "grounds"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
     "persona": "stylist",
     "function": {
       "name": "navigate_app",

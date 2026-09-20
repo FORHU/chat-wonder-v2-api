@@ -507,6 +507,8 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "uk_legal_mcp_list_resources",
             "uk_legal_mcp_read_resource",
             "get_case_document",
+            "generate_legal_document_uk",
+            "draft_pleading_uk",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_uk_whitelist]
         try:
@@ -1361,6 +1363,10 @@ def _build_case_document_injection(state) -> str:
     )
 
 
+# Tools whose drafted `content` is rendered to a downloadable file by ilovelawyer-api.
+_DOCUMENT_TOOLS = ("generate_legal_document", "draft_pleading", "generate_legal_document_uk", "draft_pleading_uk")
+
+
 def execute_function_call(function_call: dict, session_id: str = None):
     func_name = function_call.get("name")
     try:
@@ -1556,7 +1562,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_tailor_result = result
-        if func_name in ("generate_legal_document", "draft_pleading") and session_id and isinstance(result, dict):
+        if func_name in _DOCUMENT_TOOLS and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None and result.get("success") and result.get("content"):
                 state.last_generated_file_result = {
@@ -1906,6 +1912,9 @@ def _summarize_tool_result(tool_name: str, result) -> str:
         if tool_name == "generate_legal_document":
             doc_name = (result.get("document_name") or result.get("document_type") or "document") if isinstance(result, dict) else "document"
             return f"A {doc_name} was drafted successfully."
+        if tool_name in ("generate_legal_document_uk", "draft_pleading_uk"):
+            doc_name = (result.get("document_name") or result.get("pleading_type") or "document") if isinstance(result, dict) else "document"
+            return f"A {doc_name} was drafted successfully."
         if tool_name == "analyze_document":
             fname = (result.get("filename") or "document") if isinstance(result, dict) else "document"
             chars = result.get("char_count", 0) if isinstance(result, dict) else 0
@@ -1984,6 +1993,9 @@ def _describe_tool_args(tool_name: str, arguments: str) -> str:
         if tool_name == "generate_legal_document":
             doc_type = args.get("document_type", "document")
             return f"It will draft a {doc_type}."
+        if tool_name in ("generate_legal_document_uk", "draft_pleading_uk"):
+            doc_type = args.get("document_type") or args.get("pleading_type") or "document"
+            return f"It will draft a {doc_type}."
         if tool_name == "analyze_document":
             s3_key = args.get("s3_key", "")
             fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
@@ -2033,6 +2045,9 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
             return f"Researching: {issue[:80]}" if issue else "Researching"
         if tool_name == "generate_legal_document":
             doc_type = args.get("document_type", "document")
+            return f"Drafting {doc_type}"
+        if tool_name in ("generate_legal_document_uk", "draft_pleading_uk"):
+            doc_type = args.get("document_type") or args.get("pleading_type") or "document"
             return f"Drafting {doc_type}"
         if tool_name == "analyze_document":
             s3_key = args.get("s3_key", "")
@@ -3130,7 +3145,7 @@ def chat(request: ChatRequest):
         "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
         "nav_result": state.last_nav_result if persona == "nav" and state.last_nav_result else None,
         "tailor_result": state.last_tailor_result if persona == "tailor" and state.last_tailor_result else None,
-        "generated_file": state.last_generated_file_result if persona == "legal" and state.last_generated_file_result else None,
+        "generated_file": state.last_generated_file_result if persona in ("legal", "legal_uk") and state.last_generated_file_result else None,
     }
 
 
@@ -3680,7 +3695,7 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
                 if persona == "tailor" and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
-                if persona == "legal" and state.last_generated_file_result:
+                if persona in ("legal", "legal_uk") and state.last_generated_file_result:
                     await websocket.send_text(f"[GENERATED_FILE_DATA]{json.dumps(state.last_generated_file_result)}")
                 # nav emission disabled for stylist — front end handles navigation
                 _ws_t_end = time.time()
