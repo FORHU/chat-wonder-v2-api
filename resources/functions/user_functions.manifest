@@ -1520,6 +1520,30 @@
     "type": "function",
     "persona": "legal_uk",
     "function": {
+      "name": "get_legal_recommendation_uk",
+      "description": "Start a general question about UK law: returns candidate UK legislation and case law for the issue in one call. It returns a list of sources to read, NOT an answer: fetch the sections and judgments before stating what they say. Use when the user asks a general question about UK law, rights, obligations or procedure and you do not yet know which Act or case applies.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "legal_issue": {
+            "type": "string",
+            "description": "The legal question or issue to research (required)"
+          },
+          "user_context": {
+            "type": "string",
+            "description": "Facts about the user's situation, to help choose which hits are relevant (optional)"
+          }
+        },
+        "required": [
+          "legal_issue"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
       "name": "hmrc_get_vat_rate",
       "description": "Look up the UK VAT rate category (standard 20%, reduced 5%, zero 0%, exempt) for a commodity or service description. Uses a static lookup table current as of 22 Nov 2023 — for time-sensitive advice, verify against hmrc_search_guidance since rates may have changed in later Budgets.",
       "parameters": {

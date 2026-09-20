@@ -729,6 +729,64 @@ def legislation_search(query: str = None, type: str = None, year: int = None, fu
         return {"success": False, "error": str(e), "message": f"legislation_search failed: {e}"}
 
 
+_UK_RECOMMENDATION_ROW_KEYS = (
+    "title", "name", "type", "year", "number", "citation", "neutral_citation", "court", "date", "url", "uri", "link", "slug", "score",
+)
+
+
+def _uk_recommendation_rows(payload: dict, limit: int = 5) -> list:
+    """Identifying fields only (title, citation, url ...) of the first few search rows. The snippet/body text is left
+    out on purpose: nothing here should be read as a statement of what the law says."""
+    rows = _uk_result_rows(payload) or []
+    return [
+        {k: r[k] for k in _UK_RECOMMENDATION_ROW_KEYS if k in r and r[k] not in (None, "")}
+        for r in rows[:limit]
+        if isinstance(r, dict)
+    ]
+
+
+def get_legal_recommendation_uk(legal_issue: str = None, user_context: str = None) -> dict:
+    """Starting point for a general UK legal question: the UK legislation and case law most relevant to it, in one call.
+
+    The UK sibling of get_legal_recommendation, but deliberately different: the Philippine tool has a model write the
+    answer from the titles it found. The UK persona may only state law it has fetched, so this returns a research pack
+    (candidate Acts/SIs and judgments with their links) for the model to read, with no generated text about the law.
+    """
+    issue = (str(legal_issue).strip() if legal_issue is not None else "")
+    if not issue:
+        return {"success": False, "error": "legal_issue is required"}
+
+    found = {}
+    errors = {}
+    for key, search_fn in (("legislation", legislation_search), ("case_law", case_law_search)):
+        result = search_fn(query=issue, limit=5)
+        if isinstance(result, dict) and result.get("success"):
+            found[key] = _uk_recommendation_rows(result)
+        else:
+            found[key] = []
+            errors[key] = (result or {}).get("error") or "search failed"
+
+    if len(errors) == 2:
+        return {"success": False, "error": "Both the legislation and the case law search failed", "search_errors": errors}
+
+    pack = {
+        "success": True,
+        "issue": issue,
+        "user_context": user_context or None,
+        "legislation": found["legislation"],
+        "case_law": found["case_law"],
+        "how_to_use": (
+            "These are search hits only, not verified statements of law. Before saying what any Act, section or judgment "
+            "provides, fetch it (legislation_get_section, judgment_get_paragraph) and cite it through citations_resolve. "
+            "Use user_context to decide which hits matter. If neither list has an on-point hit, say you could not find one."
+        ),
+        "disclaimer": "This is general legal information, not legal advice. For your specific situation, please consult a qualified solicitor or barrister.",
+    }
+    if errors:
+        pack["search_errors"] = errors
+    return pack
+
+
 def legislation_get_toc(type: str = None, year: int = None, number: int = None, offset: int = 0, limit: int = 200) -> dict:
     """Fetch the table of contents of a UK Act or SI."""
     type = (str(type).strip() if type is not None else "")

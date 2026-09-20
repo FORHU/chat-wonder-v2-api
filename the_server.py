@@ -478,6 +478,7 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "legislation_search",
             "legislation_get_toc",
             "legislation_get_section",
+            "get_legal_recommendation_uk",
             "citations_parse",
             "citations_resolve",
             "citations_network",
@@ -1473,6 +1474,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
             "legislation_search",
             "legislation_get_toc",
             "legislation_get_section",
+            "get_legal_recommendation_uk",
             "citations_parse",
             "citations_resolve",
             "citations_network",
@@ -1873,6 +1875,11 @@ def _summarize_tool_result(tool_name: str, result) -> str:
             sets_req = result.get("sets_requested", 1) if isinstance(result, dict) else 1
             concern_str = f" Concerns flagged: {', '.join(concerns[:3])}." if concerns else ""
             return f"{sets_req} skincare routine(s) were generated for {skin_type} skin.{concern_str}"
+        if tool_name == "get_legal_recommendation_uk":
+            issue = (result.get("issue") or "")[:80] if isinstance(result, dict) else ""
+            n_leg = len(result.get("legislation", [])) if isinstance(result, dict) else 0
+            n_case = len(result.get("case_law", [])) if isinstance(result, dict) else 0
+            return f'Found {n_leg} legislation and {n_case} case law source(s) to read for: "{issue}".'
         if tool_name == "get_legal_recommendation":
             issue = (result.get("issue") or "")[:80] if isinstance(result, dict) else ""
             mats = len(result.get("relevant_materials", [])) if isinstance(result, dict) else 0
@@ -1953,6 +1960,9 @@ def _describe_tool_args(tool_name: str, arguments: str) -> str:
         if tool_name == "recommend_cosmetics":
             sets = args.get("sets", 1)
             return f"It will generate {sets} skincare routine(s) based on the skin analysis."
+        if tool_name == "get_legal_recommendation_uk":
+            issue = args.get("legal_issue", "")
+            return f'It will look up UK legislation and case law for: "{issue[:100]}".' if issue else ""
         if tool_name == "get_legal_recommendation":
             issue = args.get("legal_issue", "")
             return f'It will research and provide a recommendation on: "{issue[:100]}".' if issue else ""
@@ -2003,6 +2013,9 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
         if tool_name == "get_republic_act":
             ident = args.get("ra_number") or args.get("id") or ""
             return f"Fetching Republic Act: {ident}" if ident else "Fetching Republic Act"
+        if tool_name == "get_legal_recommendation_uk":
+            issue = args.get("legal_issue", "")
+            return f"Looking up UK law: {issue[:80]}" if issue else "Looking up UK law"
         if tool_name == "get_legal_recommendation":
             issue = args.get("legal_issue", "")
             return f"Researching: {issue[:80]}" if issue else "Researching"
