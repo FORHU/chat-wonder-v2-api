@@ -1263,6 +1263,279 @@ def uk_legal_mcp_read_resource(uri: str = None) -> dict:
         return {"success": False, "error": str(e), "message": f"uk_legal_mcp_read_resource failed: {e}"}
 
 
+# ---------------------------------------------------------------------------
+# UK (England & Wales) document drafting — the UK sibling of generate_legal_document,
+# which is Philippine-only. Layouts follow the Practice Direction on Pre-Action Conduct (para 6),
+# CPR PD 32 (paras 17-20, witness statements), the Statutory Declarations Act 1835 and the Powers
+# of Attorney Act 1971 s.10. England & Wales only — Scotland and Northern Ireland use different
+# court forms and terminology.
+# ---------------------------------------------------------------------------
+
+UK_DRAFTER_SYSTEM_PROMPT = (
+    "You are a drafter of legal documents for England and Wales. Write in British English, in formal "
+    "but plain modern legal English. Produce the complete, final document text — never a description, "
+    "outline or explanation of what the document should contain. Use ONLY the facts supplied; never "
+    "invent names, dates, amounts, addresses, claim numbers or exhibit contents — where a detail is "
+    "missing, leave a blank written [___]. Cite only the rules and statutory provisions named in the "
+    "instructions; never cite case law and never invent a citation. Output only the document itself — "
+    "no commentary before or after it, and no markdown code fences."
+)
+
+UK_DISCLAIMER = (
+    "This is an AI-drafted document for England and Wales, prepared from public rules and forms. It has not "
+    "been reviewed by a solicitor. Check it against the current rules and get it reviewed before you sign, "
+    "serve or file it."
+)
+
+UK_DEFAULT_NEXT_STEPS = [
+    "Check every detail for accuracy",
+    "Fill in any blanks marked [___]",
+    "Get the document reviewed by a solicitor before relying on it",
+]
+
+UK_DOCUMENT_TEMPLATES = {
+    "witness_statement": {
+        "name": "Witness Statement",
+        "required_fields": ["witness_name", "witness_address", "party_role", "statement_facts"],
+        "optional_fields": ["witness_occupation", "court", "claim_number", "case_title", "statement_number", "exhibits"],
+        "next_steps": [
+            "Check every fact is within your own knowledge, or say where the information came from",
+            "Mark and refer to each exhibit exactly as listed, and attach the exhibits",
+            "Sign and date it yourself — the statement of truth is yours",
+            "If the case is in the Business and Property Courts, extra requirements apply to trial witness statements — check the current rules",
+        ],
+        "prompt": """Draft a witness statement for civil proceedings in England and Wales, laid out as Practice Direction 32 (paras 17-20) requires.
+
+Facts supplied:
+- Witness: {witness_name}
+- Address (or work address if giving evidence in a professional capacity): {witness_address}
+- Occupation / position: {witness_occupation}
+- Party on whose behalf it is made: {party_role}
+- Court: {court}
+- Claim number: {claim_number}
+- Title of proceedings: {case_title}
+- Statement number: {statement_number}
+- Exhibits: {exhibits}
+- Evidence the witness gives: {statement_facts}
+
+Layout:
+1. Top right corner (PD 32 para 17.2): party on whose behalf the statement is made; the witness's initials and surname; the number of the statement (e.g. 1st); identifying initials and numbers of exhibits; the date the statement was made.
+2. Court name, claim number and title of the proceedings.
+3. Title: WITNESS STATEMENT OF [FULL NAME IN CAPITALS].
+4. Opening in the first person (para 18.1): full name, address (or work address), occupation or description, whether a party or an employee of a party, then "state as follows:".
+5. The evidence in consecutively numbered paragraphs, in the first person, each dealing with a distinct point. Say which matters are within the witness's own knowledge and which are information and belief, giving the source of that information. Put all dates and numbers in figures. Refer to each exhibit by its identifying mark.
+6. Statement of truth, in exactly these words: "I believe that the facts stated in this witness statement are true. I understand that proceedings for contempt of court may be brought against anyone who makes, or causes to be made, a false statement in a document verified by a statement of truth without an honest belief in its truth."
+7. Signature line for the witness and a date line.""",
+    },
+    "statutory_declaration": {
+        "name": "Statutory Declaration",
+        "required_fields": ["declarant_name", "declarant_address", "declaration_facts"],
+        "optional_fields": ["declarant_occupation", "declaration_purpose"],
+        "next_steps": [
+            "Do not sign it in advance — you must sign it in front of a solicitor, commissioner for oaths or notary public",
+            "Take photo ID and proof of address; the person taking it may charge a fee",
+            "Check whether the organisation asking for it has its own required wording",
+        ],
+        "prompt": """Draft a statutory declaration under the Statutory Declarations Act 1835 (England and Wales).
+
+Facts supplied:
+- Declarant: {declarant_name}
+- Address: {declarant_address}
+- Occupation: {declarant_occupation}
+- Purpose: {declaration_purpose}
+- What is being declared: {declaration_facts}
+
+Layout:
+1. Title: STATUTORY DECLARATION.
+2. Opening: "I, [full name], of [address], [occupation], do solemnly and sincerely declare as follows:"
+3. The facts in consecutively numbered paragraphs, in the first person, stating only what the declarant says is true. If the declaration is about a lost item, cover what it is, when and where it was last seen, what was done to look for it, and that it has not been found.
+4. Closing, in exactly these words: "AND I make this solemn declaration conscientiously believing the same to be true, and by virtue of the provisions of the Statutory Declarations Act 1835."
+5. Signature line for the declarant, then: "Declared at [place] this [day] of [month] [year]" and "Before me," followed by a signature line and blanks for the name and capacity of the person taking the declaration (solicitor, commissioner for oaths or notary public).""",
+    },
+    "letter_before_claim": {
+        "name": "Letter Before Claim",
+        "required_fields": ["sender_name", "recipient_name", "claim_summary", "remedy_sought"],
+        "optional_fields": [
+            "sender_address", "recipient_address", "reference_number", "amount", "how_calculated",
+            "documents_relied_on", "response_days",
+        ],
+        "next_steps": [
+            "If you are claiming a debt from an individual (including a sole trader), the Pre-Action Protocol for Debt Claims is likely to apply instead — it has its own required contents, information sheet and reply form",
+            "Keep proof of when and how you sent the letter",
+            "Keep copies of the documents you refer to",
+        ],
+        "prompt": """Draft an open letter before claim for England and Wales, following paragraph 6 of the Practice Direction on Pre-Action Conduct.
+
+Facts supplied:
+- From: {sender_name}, {sender_address}
+- To: {recipient_name}, {recipient_address}
+- Reference: {reference_number}
+- Summary of the claim and its basis: {claim_summary}
+- What the sender wants: {remedy_sought}
+- Amount claimed: {amount}
+- How the amount is calculated: {how_calculated}
+- Documents relied on: {documents_relied_on}
+- Days allowed to respond: {response_days}
+
+The letter must:
+1. Be dated, with both addresses and the reference.
+2. Give concise details of the claim: the basis on which it is made and a summary of the facts.
+3. State clearly what the sender wants the recipient to do, and, where money is claimed, how the amount is calculated.
+4. List the key documents the claim relies on and say copies are enclosed or available.
+5. Allow a reasonable time to respond — use the number of days given above, or 14 days if it says [___].
+6. Ask the recipient to reply saying whether the claim is accepted and, if not, why, which facts and parts of the claim are disputed, and whether they intend to make a counterclaim.
+7. Say the sender is willing to consider alternative dispute resolution, such as mediation, if the recipient prefers it.
+8. Say that if there is no satisfactory response the sender may start court proceedings without further notice, will ask the court to take the recipient's non-compliance with the pre-action requirements into account on costs, and will claim interest and costs.
+9. Close formally, with a signature block for the sender.""",
+    },
+    "general_power_of_attorney": {
+        "name": "General Power of Attorney",
+        "required_fields": ["donor_name", "attorney_name"],
+        "optional_fields": ["donor_address", "attorney_address", "appointment_type", "limits_on_authority"],
+        "next_steps": [
+            "It must be signed as a deed, in front of an independent adult witness who also signs",
+            "This ends if you lose mental capacity — for that you need a lasting power of attorney, which uses official forms from the Office of the Public Guardian",
+            "Banks and other organisations may ask to see the original or a certified copy",
+        ],
+        "prompt": """Draft a general power of attorney under section 10 of the Powers of Attorney Act 1971 (England and Wales), executed as a deed.
+
+Facts supplied:
+- Donor (person giving the power): {donor_name}, {donor_address}
+- Attorney(s): {attorney_name}, {attorney_address}
+- If more than one attorney — jointly, or jointly and severally: {appointment_type}
+- Limits on the authority given: {limits_on_authority}
+
+Layout:
+1. Title: GENERAL POWER OF ATTORNEY.
+2. Operative wording: "THIS GENERAL POWER OF ATTORNEY is made this [day] of [month] [year] by [donor] of [address]. I appoint [attorney] of [address] [jointly / jointly and severally, only if there is more than one attorney] to be my attorney[s] in accordance with section 10 of the Powers of Attorney Act 1971."
+3. If limits on authority were given, add a clause setting them out precisely. If none were given, do NOT add any limit.
+4. Execution as a deed: "Executed as a deed by [donor] in the presence of:" with the donor's signature line and a witness block (signature, full name, address, occupation).""",
+    },
+    "letter_of_authority": {
+        "name": "Letter of Authority",
+        "required_fields": ["authoriser_name", "authorised_person", "authority_purpose"],
+        "optional_fields": ["authoriser_address", "organisation_addressed", "reference_number", "valid_until"],
+        "next_steps": [
+            "Sign and date it, and enclose ID if the organisation asks for it",
+            "Check whether the organisation requires its own authority form instead",
+        ],
+        "prompt": """Draft a letter of authority (a letter authorising another person to act on the writer's behalf) for use in England and Wales.
+
+Facts supplied:
+- Person giving authority: {authoriser_name}, {authoriser_address}
+- Person authorised: {authorised_person}
+- Organisation the letter is addressed to: {organisation_addressed}
+- Reference: {reference_number}
+- What the person is authorised to do: {authority_purpose}
+- Valid until: {valid_until}
+
+Include: date; addressee; reference; a clear statement that the writer authorises the named person to act for them for the stated purpose only; the period of validity (or that it lasts until withdrawn in writing); a line that the organisation may deal with the named person and discuss the matter with them; the writer's signature line and printed name.""",
+    },
+    "loan_agreement": {
+        "name": "Loan Agreement",
+        "required_fields": ["lender_name", "borrower_name", "principal_amount", "repayment_terms"],
+        "optional_fields": ["lender_address", "borrower_address", "interest_rate", "loan_date", "security"],
+        "next_steps": [
+            "Both parties should sign and date it and each keep a copy",
+            "If you lend money as a business, or the borrower is a consumer, consumer credit rules may apply — get advice first",
+            "Keep records of every payment made",
+        ],
+        "prompt": """Draft a simple loan agreement governed by the law of England and Wales.
+
+Facts supplied:
+- Lender: {lender_name}, {lender_address}
+- Borrower: {borrower_name}, {borrower_address}
+- Amount lent: {principal_amount}
+- Date of loan: {loan_date}
+- Interest: {interest_rate}
+- Repayment terms: {repayment_terms}
+- Security: {security}
+
+Include clauses for: parties; the loan and the date the money is advanced; interest (say the loan is interest-free if no rate is given); repayment; what happens on late payment or default; that the borrower may repay early without penalty unless the terms above say otherwise; no assignment without written consent; that the agreement is the whole agreement and can be varied only in writing; governing law and the courts of England and Wales. End with signature blocks for both parties, each with a date line.""",
+    },
+    "deed_poll": {
+        "name": "Deed Poll (Change of Name)",
+        "required_fields": ["former_name", "new_name", "address"],
+        "optional_fields": ["date_of_birth"],
+        "next_steps": [
+            "Sign it as a deed in front of an independent adult witness (some organisations ask for two)",
+            "An unenrolled deed poll is available from age 16; enrolling it on the public record through the High Court is available from age 18 — check the current fee on GOV.UK",
+            "Ask your bank, passport office and other organisations which type they accept",
+        ],
+        "prompt": """Draft a deed poll for a change of name in England and Wales.
+
+Facts supplied:
+- Former name: {former_name}
+- New name: {new_name}
+- Address: {address}
+- Date of birth: {date_of_birth}
+
+Layout:
+1. Title: DEED POLL.
+2. Opening: "I, [NEW NAME], of [address], [born on date of birth, if given,] formerly known as [FORMER NAME], hereby:"
+3. Numbered declarations: (1) renounce, relinquish and abandon the use of my former name and declare that I have assumed, adopted and determined to take and use from the date of this deed the name [new name] in substitution for it; (2) declare that I shall at all times hereafter in all records, deeds, documents and other writings and in all actions and proceedings, as well as in all dealings and transactions and on all occasions whatsoever, use and subscribe the name [new name] as my name in place of the former name; (3) authorise and require all persons at all times to designate, address and describe me by the name [new name].
+4. "In witness whereof I have signed this deed on [day] of [month] [year]," then "Signed as a deed by the above-named in the presence of:" with the signature line for the person and a witness block (signature, full name, address, occupation).""",
+    },
+}
+
+
+def generate_legal_document_uk(document_type: str, details: dict = None, format: str = "docx", **kwargs) -> dict:
+    """Generate a legal document for England and Wales from a fixed template."""
+    from openai import OpenAI
+
+    if details is None:
+        details = {}
+    if kwargs:
+        details.update(kwargs)
+
+    doc_type_lower = document_type.lower().replace(" ", "_").replace("-", "_")
+    if doc_type_lower not in UK_DOCUMENT_TEMPLATES:
+        return {
+            "success": False,
+            "error": f"Unknown document type: '{document_type}'",
+            "available_types": list(UK_DOCUMENT_TEMPLATES.keys()),
+        }
+
+    template = UK_DOCUMENT_TEMPLATES[doc_type_lower]
+    missing = [f for f in template["required_fields"] if not details.get(f)]
+    if missing:
+        return {
+            "success": False,
+            "error": "Missing required fields",
+            "missing_fields": missing,
+            "required_fields": template["required_fields"],
+            "optional_fields": template.get("optional_fields", []),
+        }
+
+    filled = dict(details)
+    for field in template.get("optional_fields", []):
+        if not filled.get(field):
+            filled[field] = "[___]"
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": UK_DRAFTER_SYSTEM_PROMPT},
+                {"role": "user", "content": template["prompt"].format(**filled)},
+            ],
+            temperature=0.2,
+        )
+        return {
+            "success": True,
+            "document_type": doc_type_lower,
+            "document_name": template["name"],
+            "format": format,
+            "content": response.choices[0].message.content,
+            "fields_used": details,
+            "disclaimer": UK_DISCLAIMER,
+            "next_steps": template.get("next_steps", UK_DEFAULT_NEXT_STEPS),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict:
     """Provide legal information and recommendations for a given legal issue."""
     from openai import OpenAI
