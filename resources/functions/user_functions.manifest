@@ -403,6 +403,56 @@
   },
   {
     "type": "function",
+    "persona": "legal",
+    "function": {
+      "name": "draft_pleading",
+      "description": "Draft a complete Philippine court pleading (motion, opposition, manifestation, comment, reply, or similar) in full, ready-to-file prose — not a summary or outline of what it should contain. Use whenever the user asks to draft, prepare, or write a pleading/motion/opposition, as opposed to generate_legal_document (fixed-form documents like affidavits and contracts) or get_legal_recommendation (explaining the law, not drafting).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pleading_type": {
+            "type": "string",
+            "description": "The kind of pleading being drafted, in plain terms (e.g. 'Opposition to Motion for Reconsideration', 'Motion to Dismiss', 'Manifestation', 'Motion for Extension of Time'). Not a fixed enum — describe it as the user described it."
+          },
+          "case_facts": {
+            "type": "string",
+            "description": "Relevant background facts of the case needed to make sense of the pleading."
+          },
+          "grounds": {
+            "type": "string",
+            "description": "The grounds/arguments to raise, as a summary — this tool expands them into full, properly developed legal argument. Do not pre-write the full argument yourself; give the substance and let the tool draft it."
+          },
+          "relief_sought": {
+            "type": "string",
+            "description": "What the pleading asks the court to do (e.g. deny the motion, dismiss the case, grant additional time). Leave unset to let the draft infer a standard prayer from pleading_type."
+          },
+          "responding_to": {
+            "type": "string",
+            "description": "If this pleading responds to another (e.g. an opposition responds to a motion), a short description of what's being responded to and its date/key points."
+          },
+          "court": {
+            "type": "string",
+            "description": "Court and branch (e.g. 'Regional Trial Court, Branch 10, City of Makati'). Left blank in the draft if omitted."
+          },
+          "case_title": {
+            "type": "string",
+            "description": "Case caption (e.g. 'Juan Dela Cruz v. Maria Santos'). Left blank in the draft if omitted."
+          },
+          "case_number": {
+            "type": "string",
+            "description": "Docket/case number. Left blank in the draft if omitted."
+          }
+        },
+        "required": [
+          "pleading_type",
+          "case_facts",
+          "grounds"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
     "persona": "legal_uk",
     "function": {
       "name": "generate_legal_document_uk",

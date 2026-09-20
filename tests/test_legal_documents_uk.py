@@ -175,7 +175,7 @@ class UkPersonaWiringTests(unittest.TestCase):
 
     def test_philippine_persona_does_not_get_the_uk_document_tools(self):
         names = self._tool_names("[legal ai] draft an affidavit")
-        self.assertIn("generate_legal_document", names)
+        self.assertLessEqual({"generate_legal_document", "draft_pleading"}, names)
         self.assertFalse({"generate_legal_document_uk", "draft_pleading_uk"} & names)
 
     def test_uk_prompt_no_longer_says_document_tools_are_unavailable(self):
