@@ -1023,6 +1023,30 @@
     "type": "function",
     "persona": "legal_uk",
     "function": {
+      "name": "analyze_document_uk",
+      "description": "Read an uploaded document (from S3) so you can analyse it under England & Wales law. Call this when the user has uploaded a document and wants it analysed. It returns the document's text and instructions, NOT an analysis: write the analysis yourself and cite only law you have fetched.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "s3_key": {
+            "type": "string",
+            "description": "The S3 key of the uploaded document, e.g. 'uploads/documents/uuid-filename.pdf' (required)"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Display filename for the document (optional)"
+          }
+        },
+        "required": [
+          "s3_key"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
       "name": "parliament_search_hansard",
       "description": "Search Hansard debate contributions by phrase, date range, house, or member. query must be words a member actually said, not a bill title (members rarely say the full title verbatim). Chain: read the debate via parliament_get_debate_contributions(debate_ext_id). To filter by member, resolve member_id via parliament_find_member first.",
       "parameters": {

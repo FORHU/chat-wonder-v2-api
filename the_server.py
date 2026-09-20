@@ -482,6 +482,7 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "citations_resolve",
             "citations_network",
             "citations_format_oscola",
+            "analyze_document_uk",
             "parliament_search_hansard",
             "parliament_policy_position_summary",
             "parliament_find_member",
@@ -1886,6 +1887,11 @@ def _summarize_tool_result(tool_name: str, result) -> str:
             chars = result.get("char_count", 0) if isinstance(result, dict) else 0
             trunc = " (truncated)" if isinstance(result, dict) and result.get("truncated") else ""
             return f'Analysis complete for "{fname}" ({chars:,} chars{trunc}).'
+        if tool_name == "analyze_document_uk":
+            fname = (result.get("filename") or "document") if isinstance(result, dict) else "document"
+            chars = result.get("char_count", 0) if isinstance(result, dict) else 0
+            trunc = " (truncated)" if isinstance(result, dict) and result.get("truncated") else ""
+            return f'Read "{fname}" ({chars:,} chars{trunc}) for analysis.'
         if tool_name == "scan_cosmetic":
             product = (result.get("product_name") or result.get("product_title") or "unknown product") if isinstance(result, dict) else "unknown product"
             return f'Scan complete for "{str(product)[:60]}".'
@@ -1963,6 +1969,10 @@ def _describe_tool_args(tool_name: str, arguments: str) -> str:
             s3_key = args.get("s3_key", "")
             fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
             return f'It will analyze the document: "{fname}".' if fname else ""
+        if tool_name == "analyze_document_uk":
+            s3_key = args.get("s3_key", "")
+            fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
+            return f'It will read the document "{fname}" to analyse it.' if fname else ""
         if tool_name == "scan_cosmetic":
             skin_type = args.get("skin_type", "general")
             return f"It will scan a cosmetic product label for {skin_type} skin."
@@ -2013,6 +2023,10 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
             s3_key = args.get("s3_key", "")
             fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
             return f"Analyzing: {fname}" if fname else "Analyzing document"
+        if tool_name == "analyze_document_uk":
+            s3_key = args.get("s3_key", "")
+            fname = args.get("filename") or (s3_key.split("/")[-1] if s3_key else "")
+            return f"Reading: {fname}" if fname else "Reading document"
         # legal_uk persona (resources/functions/user_functions.manifest) — these never had
         # _describe_tool_args coverage either (glass-box trace text fell back to generic
         # phrasing for all of them); mapped here for the first time.
