@@ -1536,6 +1536,84 @@ def generate_legal_document_uk(document_type: str, details: dict = None, format:
         return {"success": False, "error": str(e)}
 
 
+def draft_pleading_uk(
+    pleading_type: str,
+    case_facts: str,
+    grounds: str,
+    relief_sought: str = None,
+    responding_to: str = None,
+    court: str = None,
+    case_title: str = None,
+    claim_number: str = None,
+    party_role: str = None,
+    format: str = "docx",
+    **kwargs,
+) -> dict:
+    """Draft a complete statement of case or similar court document for England and Wales, in full prose."""
+    from openai import OpenAI
+
+    missing = [f for f, v in (("pleading_type", pleading_type), ("case_facts", case_facts), ("grounds", grounds)) if not v]
+    if missing:
+        return {"success": False, "error": "Missing required fields", "missing_fields": missing}
+
+    court = court or "[___]"
+    case_title = case_title or "[___]"
+    claim_number = claim_number or "[___]"
+    party_role = party_role or "[___]"
+    responding_to_block = f"\n- Responding to: {responding_to}" if responding_to else ""
+    relief_block = (
+        f"\n- Relief sought: {relief_sought}" if relief_sought
+        else "\n- Relief sought: not specified — infer the standard claim or order sought for this document type from the grounds given."
+    )
+
+    prompt = f"""Draft a complete {pleading_type} for civil proceedings in England and Wales, ready to file.
+
+- Court: {court}
+- Claim number: {claim_number}
+- Title of proceedings: {case_title}
+- Party this document is for: {party_role}{responding_to_block}
+- Facts: {case_facts}
+- Grounds: {grounds}{relief_block}
+
+Write the full document now — not an outline, not a summary of what it should say. Follow this layout:
+1. Heading: the name of the court (if none given, use "IN THE COUNTY COURT AT [___]" or "IN THE HIGH COURT OF JUSTICE, KING'S BENCH DIVISION" as suits the claim), the claim number, the title of the proceedings with each party and their role (Claimant / Defendant), and the title of this document.
+2. The body in consecutively numbered paragraphs, each dealing with one point, applying the facts supplied to the grounds.
+3. Follow the rules for the document type:
+   - Particulars of Claim: a concise statement of the facts relied on (CPR 16.4(1)(a)); if interest is claimed, whether it is claimed under a contract, an enactment or another basis, with the rate, the dates and, for a specified sum, the amount and daily rate (16.4(1)(b) and (2)); a statement if aggravated, exemplary or provisional damages are claimed (16.4(1)(c) and (d)). For a contract claim, identify the contract and its relevant terms; for an oral contract, the words used, by whom, to whom, when and where (PD 16 paras 7.3-7.5). End with what the Claimant claims.
+   - Defence (or Defence and Counterclaim): deal with every allegation in the Particulars of Claim, stating which are admitted, which are denied and which the Defendant cannot admit or deny but requires the Claimant to prove (CPR 16.5(1)); give reasons for every denial and, if the Defendant puts forward a different version of events, state it (16.5(2)); if the value claimed is disputed, say so with reasons and an alternative figure where possible (16.5(6)). Plead limitation if relied on.
+   - Reply, or any other document responding to another: answer the points raised, paragraph by paragraph.
+4. Statement of truth (CPR Part 22 and PD 22), in these words: "I believe that the facts stated in [this / these] [name of document, in lower case, e.g. these particulars of claim, this defence] are true. I understand that proceedings for contempt of court may be brought against anyone who makes, or causes to be made, a false statement in a document verified by a statement of truth without an honest belief in its truth." Follow with a signature line, printed name, position (e.g. Claimant) and date.
+5. Finish with the date and the party's name and address for service (leave blanks if not supplied).
+
+Cite only the CPR rules and practice directions named above. Do not cite case law or any statute. If interest is claimed but the user gave no rate, start date or legal basis, write those as [___] — never state a rate or a statutory basis the user did not give. Do not add alternative causes of action or heads of loss the user did not raise. Leave a blank [___] for anything not supplied — never make up a fact, date, name or amount."""
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": UK_DRAFTER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        return {
+            "success": True,
+            "pleading_type": pleading_type,
+            "format": format,
+            "content": response.choices[0].message.content,
+            "disclaimer": UK_DISCLAIMER,
+            "next_steps": [
+                "Check every fact, date and amount against your documents",
+                "Fill in any blanks marked [___], including the court, claim number and your address for service",
+                "If a solicitor signs the statement of truth for you, the wording changes — they should confirm it",
+                "Check the court's current time limits and fees before filing",
+            ],
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict:
     """Provide legal information and recommendations for a given legal issue."""
     from openai import OpenAI

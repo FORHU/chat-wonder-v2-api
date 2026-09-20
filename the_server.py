@@ -508,6 +508,7 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "uk_legal_mcp_read_resource",
             "get_case_document",
             "generate_legal_document_uk",
+            "draft_pleading_uk",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_uk_whitelist]
         try:
@@ -1363,7 +1364,7 @@ def _build_case_document_injection(state) -> str:
 
 
 # Tools whose drafted `content` is rendered to a downloadable file by ilovelawyer-api.
-_DOCUMENT_TOOLS = ("generate_legal_document", "draft_pleading", "generate_legal_document_uk")
+_DOCUMENT_TOOLS = ("generate_legal_document", "draft_pleading", "generate_legal_document_uk", "draft_pleading_uk")
 
 
 def execute_function_call(function_call: dict, session_id: str = None):
@@ -1908,8 +1909,8 @@ def _summarize_tool_result(tool_name: str, result) -> str:
             mats = len(result.get("relevant_materials", [])) if isinstance(result, dict) else 0
             mat_str = f" {mats} material(s) referenced." if mats else ""
             return f'A legal recommendation was produced for: "{issue}".{mat_str}'
-        if tool_name == "generate_legal_document_uk":
-            doc_name = (result.get("document_name") or result.get("document_type") or "document") if isinstance(result, dict) else "document"
+        if tool_name in ("generate_legal_document_uk", "draft_pleading_uk"):
+            doc_name = (result.get("document_name") or result.get("document_type") or result.get("pleading_type") or "document") if isinstance(result, dict) else "document"
             return f"A {doc_name} was drafted successfully."
         if tool_name == "generate_legal_document":
             doc_name = (result.get("document_name") or result.get("document_type") or "document") if isinstance(result, dict) else "document"
@@ -1989,8 +1990,8 @@ def _describe_tool_args(tool_name: str, arguments: str) -> str:
         if tool_name == "get_legal_recommendation":
             issue = args.get("legal_issue", "")
             return f'It will research and provide a recommendation on: "{issue[:100]}".' if issue else ""
-        if tool_name == "generate_legal_document_uk":
-            doc_type = args.get("document_type", "document")
+        if tool_name in ("generate_legal_document_uk", "draft_pleading_uk"):
+            doc_type = args.get("document_type") or args.get("pleading_type") or "document"
             return f"It will draft a {doc_type}."
         if tool_name == "generate_legal_document":
             doc_type = args.get("document_type", "document")
@@ -2042,8 +2043,8 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
         if tool_name == "get_legal_recommendation":
             issue = args.get("legal_issue", "")
             return f"Researching: {issue[:80]}" if issue else "Researching"
-        if tool_name == "generate_legal_document_uk":
-            doc_type = args.get("document_type", "document")
+        if tool_name in ("generate_legal_document_uk", "draft_pleading_uk"):
+            doc_type = args.get("document_type") or args.get("pleading_type") or "document"
             return f"Drafting {doc_type}"
         if tool_name == "generate_legal_document":
             doc_type = args.get("document_type", "document")
