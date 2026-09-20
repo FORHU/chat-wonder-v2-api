@@ -18,6 +18,14 @@ class LegalPromptDocumentDraftingTests(unittest.TestCase):
         self.assertNotIn("reproduce its `content`", PROMPT)
         self.assertNotIn("verbatim, as your reply", PROMPT)
 
+    def test_a_users_own_case_title_is_not_treated_as_an_authority_to_look_up(self):
+        # The general research rule says to search a named party case. For a drafting request the
+        # title is the user's own proceeding: searching it made the reply say the case "could not be
+        # retrieved", which is noise in a message that should just link the document.
+        self.assertIn("is not an authority", PROMPT)
+        self.assertIn("do not search for it", PROMPT)
+        self.assertIn("never mention it in your reply as an authority", PROMPT)
+
     def test_prompt_tells_the_model_to_link_instead(self):
         self.assertIn("do NOT reproduce, quote or paste its text", PROMPT)
         self.assertIn("inline link", PROMPT)
