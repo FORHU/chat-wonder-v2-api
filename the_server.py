@@ -1773,20 +1773,6 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
                 "Use this fact in all future reasoning. Do NOT re-call with the exact same arguments."
             ),
         })
-        if function_call["name"] in ("generate_legal_document", "draft_pleading") and isinstance(result, dict) and result.get("success"):
-            # Scoped narrowly to this one tool-result turn, not the global prompt: the
-            # inconsistency this fixes (issue #72) was the model treating a successful
-            # draft as something to summarize/describe rather than reproduce, even
-            # though the full text was already sitting in `content` above.
-            messages.append({
-                "role": "system",
-                "content": (
-                    "[Constraints]\nThe `content` field in the Memory Fact above is the complete, "
-                    "final drafted document. Reproduce it in full, verbatim, as your reply. Do NOT "
-                    "summarize it, describe what it contains, or explain what the document should "
-                    "say instead of showing it."
-                ),
-            })
         messages.append({
             "role": "system",
             "content": (

@@ -87,8 +87,8 @@ class DraftPleadingTests(unittest.TestCase):
         self.assertIn("UNIQUE_FACT_MARKER_998", user_content)
         self.assertIn("UNIQUE_GROUNDS_MARKER_777", user_content)
         # Root-cause-2 regression: the system prompt itself must forbid the
-        # description-instead-of-document failure mode, independent of the
-        # scoped [Constraints] injection in the_server.py's tool-call loop.
+        # description-instead-of-document failure mode — the drafter is told to write the
+        # actual document, not describe what it should contain.
         self.assertIn("Never respond with a description", system_content)
 
     def test_optional_fields_default_to_blanks_not_omitted(self):
