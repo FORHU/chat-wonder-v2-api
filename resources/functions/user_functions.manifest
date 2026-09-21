@@ -1739,5 +1739,64 @@
         ]
       }
     }
+  },
+  {
+    "type": "function",
+    "persona": "legal_uk",
+    "function": {
+      "name": "draft_pleading_uk",
+      "description": "Draft a complete court document for civil proceedings in England and Wales (Particulars of Claim, Defence, Defence and Counterclaim, Reply, or similar) in full, ready-to-file prose — not a summary or outline. Use when the user asks to draft, prepare or write a statement of case or similar court document, as opposed to generate_legal_document_uk (fixed-form documents such as statutory declarations and letters) or research tools (explaining the law). England and Wales only — Scotland and Northern Ireland are not supported. Ask the user only if the type of document, the facts or the grounds are missing; leave every other field unset unless the user gave it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pleading_type": {
+            "type": "string",
+            "description": "The kind of document being drafted, in plain terms (e.g. 'Particulars of Claim', 'Defence', 'Defence and Counterclaim', 'Reply')."
+          },
+          "case_facts": {
+            "type": "string",
+            "description": "Relevant background facts needed to make sense of the document."
+          },
+          "grounds": {
+            "type": "string",
+            "description": "The claim or defence to be advanced, as a summary — this tool expands it into full, properly developed paragraphs. Do not pre-write the full text yourself; give the substance and let the tool draft it."
+          },
+          "relief_sought": {
+            "type": "string",
+            "description": "What is being asked of the court (e.g. payment of a sum, damages, dismissal of the claim). Leave unset to let the draft infer the standard claim or order."
+          },
+          "responding_to": {
+            "type": "string",
+            "description": "If this responds to another document (e.g. a Defence responds to Particulars of Claim), a short description of what is being responded to and its key allegations."
+          },
+          "court": {
+            "type": "string",
+            "description": "Court (e.g. 'County Court at Manchester', 'High Court, King's Bench Division'). Left blank in the draft if omitted."
+          },
+          "case_title": {
+            "type": "string",
+            "description": "Title of the proceedings, e.g. 'Smith v Jones'. Left blank if omitted."
+          },
+          "claim_number": {
+            "type": "string",
+            "description": "Claim number. Left blank in the draft if omitted."
+          },
+          "party_role": {
+            "type": "string",
+            "description": "Which party the user is (Claimant or Defendant)."
+          },
+          "format": {
+            "type": "string",
+            "enum": ["docx", "pdf"],
+            "description": "Output format. Defaults to 'docx'. Use 'pdf' if the user asks for a PDF."
+          }
+        },
+        "required": [
+          "pleading_type",
+          "case_facts",
+          "grounds"
+        ]
+      }
+    }
   }
 ]
