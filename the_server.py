@@ -1324,6 +1324,25 @@ async def sync_active_case_documents(session_id: str, case_document_ids, case_do
         candidates.pop(0)
     state.active_case_documents = candidates
 
+def _document_context_injection(persona: str, document_context: str) -> str:
+    """Wraps document_context with a persona-appropriate label before it's appended to the
+    system prompt. Written originally for the cosmetics persona (a product catalog the model
+    should ignore for unrelated requests); ilovelawyer-api's legal/legal_uk personas reuse this
+    same generic field for case summaries, ranked document excerpts, transcript context, and
+    triage notes — none of that should be labeled or gated as a cosmetics catalog."""
+    if persona in ("legal", "legal_uk"):
+        label = (
+            "\n\n[CASE CONTEXT — background for this legal consultation: case summary, "
+            "relevant document excerpts, and any triage notes]\n"
+        )
+    else:
+        label = (
+            "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
+            "beauty, or cosmetics products. If the user is asking about outfits, garments, or "
+            "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
+        )
+    return label + document_context
+
 def _build_case_document_injection(state) -> str:
     """Case-document system-prompt block: a manifest of every attached exhibit (so the model
     knows the full exhibit set exists even for one whose content didn't make this turn's
@@ -2940,13 +2959,9 @@ def chat(request: ChatRequest):
                 pass
 
     if getattr(request, "document_context", None):
-        doc_injection = (
-            "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
-            "beauty, or cosmetics products. If the user is asking about outfits, garments, or "
-            "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
-            + request.document_context
+        addendum_override = (addendum_override or "You are a helpful assistant.") + _document_context_injection(
+            persona, request.document_context
         )
-        addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
 
     if not user_input.strip():
         raise HTTPException(status_code=400, detail="User input is empty.")
@@ -3588,13 +3603,9 @@ async def chat_stream(websocket: WebSocket):
                         pass
 
             if getattr(request, "document_context", None):
-                doc_injection = (
-                    "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
-                    "beauty, or cosmetics products. If the user is asking about outfits, garments, or "
-                    "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
-                    + request.document_context
+                addendum_override = (addendum_override or "You are a helpful assistant.") + _document_context_injection(
+                    persona, request.document_context
                 )
-                addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
 
             if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
