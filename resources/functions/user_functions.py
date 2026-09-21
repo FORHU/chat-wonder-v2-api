@@ -1900,6 +1900,127 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
                 pass
 
 
+_UK_ANALYSIS_CHAR_LIMIT = 50000
+_UK_ANALYSIS_MAX_BYTES = 20 * 1024 * 1024
+
+_UK_ANALYSIS_GUIDE = (
+    "This is the extracted text of the user's document, not an analysis. Write the analysis yourself, for England & Wales, "
+    "under these headings: 1. Document overview (type, parties, date, purpose); 2. Key terms and obligations; "
+    "3. England & Wales law that may apply; 4. Unusual, ambiguous or risky clauses; 5. Each party's rights and obligations; "
+    "6. Possible disputes and how to reduce them; 7. Suggested next steps. Under heading 3, name only law you have fetched "
+    "with legislation_search / legislation_get_section or case_law_search / judgment_get_paragraph, and cite it through "
+    "citations_resolve and citations_format_oscola. If you have not fetched it, do not state what an Act or case provides; "
+    "say which area of law to check. Quote the document's own words when pointing at a clause."
+)
+
+
+def _uk_extract_document_text(path: str, fname: str, contents: bytes) -> dict:
+    """Text of an uploaded document (txt, pdf, docx, image OCR, audio transcript). {"text": ...} or {"error": ...}."""
+    ext = os.path.splitext(fname)[1].lower()
+    if ext == ".txt":
+        for enc in ("utf-8", "cp1252", "latin-1"):
+            try:
+                return {"text": contents.decode(enc)}
+            except UnicodeDecodeError:
+                continue
+        return {"error": "Could not decode the text file."}
+    if ext == ".pdf":
+        try:
+            import PyPDF2
+            reader = PyPDF2.PdfReader(io.BytesIO(contents))
+            return {"text": "\n\n".join(t.strip() for t in (p.extract_text() for p in reader.pages) if t)}
+        except ImportError:
+            try:
+                import pdfplumber
+                with pdfplumber.open(io.BytesIO(contents)) as pdf:
+                    return {"text": "\n\n".join(p.extract_text() or "" for p in pdf.pages).strip()}
+            except ImportError:
+                return {"error": "PDF library not installed. Run: pip install PyPDF2"}
+        except Exception as e:
+            return {"error": f"Failed to parse PDF: {e}"}
+    if ext in (".docx", ".doc"):
+        try:
+            import docx
+            doc = docx.Document(io.BytesIO(contents))
+            return {"text": "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())}
+        except ImportError:
+            return {"error": "DOCX library not installed. Run: pip install python-docx"}
+        except Exception as e:
+            return {"error": f"Failed to parse DOCX: {e}"}
+    if ext in (".mp3", ".wav", ".m4a", ".png", ".jpg", ".jpeg"):
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return {"error": "OpenAI API key required for audio transcription and image OCR."}
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        try:
+            if ext in (".mp3", ".wav", ".m4a"):
+                with open(path, "rb") as audio_file:
+                    return {"text": client.audio.transcriptions.create(model="whisper-1", file=audio_file).text}
+            import base64, mimetypes
+            b64 = base64.b64encode(contents).decode("utf-8")
+            mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
+            resp = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": "Extract all text from this image exactly as written. If no text, describe the image briefly."},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                ]}],
+                max_tokens=3000,
+            )
+            return {"text": resp.choices[0].message.content.strip()}
+        except Exception as e:
+            return {"error": f"Could not read the {'audio' if ext in ('.mp3', '.wav', '.m4a') else 'image'}: {e}"}
+    return {"error": f"Unsupported file type '{ext}'. Supported: PDF, DOCX, TXT, PNG, JPG, MP3, WAV, M4A."}
+
+
+def analyze_document_uk(s3_key: str = None, filename: str = None) -> dict:
+    """UK sibling of analyze_document. Returns the document's text plus UK analysis instructions, and no generated analysis:
+    the UK persona may only state law it has fetched, so the model writes the analysis itself from fetched sources."""
+    if not s3_key:
+        return {"success": False, "error": "s3_key is required"}
+    import s3_storage
+
+    fname = filename or os.path.basename(s3_key)
+    tmp_path = os.path.join(tempfile.gettempdir(), os.path.basename(s3_key))
+    if not s3_storage.download_from_s3(s3_key, tmp_path):
+        return {"success": False, "error": "File not found in S3 or S3 is not configured."}
+    try:
+        with open(tmp_path, "rb") as f:
+            contents = f.read()
+        if len(contents) > _UK_ANALYSIS_MAX_BYTES:
+            return {"success": False, "error": "File too large. Maximum allowed size is 20MB."}
+
+        extracted = _uk_extract_document_text(tmp_path, fname, contents)
+        if extracted.get("error"):
+            return {"success": False, "error": extracted["error"]}
+        text = (extracted.get("text") or "").strip()
+        if not text:
+            return {"success": False, "error": "No text could be extracted from the document."}
+
+        truncated = len(text) > _UK_ANALYSIS_CHAR_LIMIT
+        return {
+            "success": True,
+            "filename": fname,
+            "s3_key": s3_key,
+            "char_count": len(text),
+            "truncated": truncated,
+            "document_text": text[:_UK_ANALYSIS_CHAR_LIMIT],
+            "analysis_guide": _UK_ANALYSIS_GUIDE + (
+                f" The text was cut at {_UK_ANALYSIS_CHAR_LIMIT:,} characters, so say the analysis covers only the start." if truncated else ""
+            ),
+        }
+    except Exception as e:
+        logging.error(f"[analyze_document_uk] Unexpected error: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
 def scan_cosmetic(front_s3_key: str, back_s3_key: str, skin_type: str = "general") -> dict:
     """Analyze a cosmetic product by scanning its front and back label images stored in S3."""
     import s3_storage
