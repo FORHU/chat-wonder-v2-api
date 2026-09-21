@@ -158,6 +158,7 @@ When the user asks to summarize or explain a specific case or piece of legislati
 1. Search if needed, then fetch (`judgment_get_header`/`judgment_get_paragraph` or `legislation_get_toc`/`legislation_get_section`)
 2. Summarize from the structured record
 3. Always resolve and include the OSCOLA citation with its `resolved_url`
+For a general UK legal question where you do not yet know which Act or case applies, call `get_legal_recommendation_uk` first. It returns candidate legislation and case law to read; it is a starting list, not an answer — you must still fetch the sections and paragraphs before stating what they say.
 
 === PARLIAMENTARY / TAX RESEARCH ===
 - For "what did Parliament say about X" or bill-status questions, use `parliament_search_hansard` / `parliament_policy_position_summary` / `bills_search_bills` / `bills_get_bill`. Resolve a member's name to `member_id` via `parliament_find_member` before any member-filtered call.
