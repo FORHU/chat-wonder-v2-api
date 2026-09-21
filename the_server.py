@@ -17,7 +17,8 @@ import pickle
 import zipfile
 import tempfile
 import shutil
-from threading import Thread
+import contextvars
+from threading import Thread, Event
 from typing import Optional, List
 
 import dotenv
@@ -2366,28 +2367,53 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
 # Streaming reason loop (generator)
 # ---------------------------------------------------------------------------
 
+_turn_cancel_event = contextvars.ContextVar("turn_cancel_event", default=None)
+
+
 async def _astream_llm(perform_chat_fn, messages):
     loop = asyncio.get_event_loop()
     q = asyncio.Queue()
+    turn_cancel = _turn_cancel_event.get()  # set per turn by chat_stream; None elsewhere
+    stop = Event()  # set when THIS call's consumer goes away
+    holder = {}  # lets the async side close a stalled stream
 
     def _run():
         try:
-            for chunk in perform_chat_fn(messages):
+            stream = perform_chat_fn(messages)
+            holder["stream"] = stream
+            for chunk in stream:
+                if stop.is_set() or (turn_cancel and turn_cancel.is_set()):
+                    break
                 loop.call_soon_threadsafe(q.put_nowait, chunk)
         except Exception as e:
             loop.call_soon_threadsafe(q.put_nowait, e)
         finally:
+            close = getattr(holder.get("stream"), "close", None)
+            if close:
+                try:
+                    close()
+                except Exception:
+                    pass
             loop.call_soon_threadsafe(q.put_nowait, None)
 
     Thread(target=_run, daemon=True).start()
 
-    while True:
-        item = await q.get()
-        if item is None:
-            break
-        if isinstance(item, Exception):
-            raise item
-        yield item
+    try:
+        while True:
+            item = await q.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()  # consumer cancelled or finished: tell the thread to stop
+        close = getattr(holder.get("stream"), "close", None)
+        if close:
+            try:
+                close()  # also unblocks a read stalled before the first chunk
+            except Exception:
+                pass
 
 
 async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False, verify=None):
