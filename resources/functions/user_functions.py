@@ -2111,6 +2111,100 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
         return {"success": False, "error": str(e)}
 
 
+def draft_pleading(
+    pleading_type: str,
+    case_facts: str,
+    grounds: str,
+    relief_sought: str = None,
+    responding_to: str = None,
+    court: str = None,
+    case_title: str = None,
+    case_number: str = None,
+    format: str = "markdown",
+    **kwargs,
+) -> dict:
+    """Draft a complete Philippine court pleading in full prose.
+
+    Deliberately free-form rather than a DOCUMENT_TEMPLATES-style fixed
+    template: a pleading's substance is its legal argument, which varies
+    per case and can't be reduced to filling blanks in a fixed paragraph
+    shape (see generate_legal_document for the kind of document where that
+    approach is correct — affidavits, contracts, and similar boilerplate).
+    """
+    from openai import OpenAI
+
+    missing = [f for f, v in (("pleading_type", pleading_type), ("case_facts", case_facts), ("grounds", grounds)) if not v]
+    if missing:
+        return {
+            "success": False,
+            "error": "Missing required fields",
+            "missing_fields": missing,
+        }
+
+    court = court or "___________________________"
+    case_title = case_title or "___________________________"
+    case_number = case_number or "___________________"
+    responding_to_block = f"\n- Responding to: {responding_to}" if responding_to else ""
+    relief_block = (
+        f"\n- Relief sought: {relief_sought}" if relief_sought
+        else "\n- Relief sought: not specified — infer the standard prayer appropriate to this pleading type from the grounds given."
+    )
+
+    prompt = f"""Draft a complete Philippine {pleading_type}, ready to file.
+
+- Court: {court}
+- Case: {case_title}
+- Case No.: {case_number}{responding_to_block}
+- Facts: {case_facts}
+- Grounds: {grounds}{relief_block}
+
+Write the full pleading text now — not an outline, not a summary of what it should say. Expand the grounds above into properly developed legal argument in numbered paragraphs, applying the facts to the applicable law/rules. Include:
+1. Caption block (court, parties, case number, pleading title, formatted as a PH pleading)
+2. Prefatory statement identifying the pleading and what it responds to, if applicable
+3. Body: numbered paragraphs developing each ground into full argument
+4. Prayer/WHEREFORE clause requesting the relief sought
+5. Verification and Certification Against Forum Shopping block (standard boilerplate, leave signature/notary details blank)
+6. Signature block for counsel (leave name/roll number/address blank)
+
+Leave blanks (___) only for information that was not provided above — never leave the argument itself as a placeholder or description."""
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a Philippine litigation lawyer drafting a pleading for filing. "
+                        "Always produce the complete, final document text — full sentences and "
+                        "paragraphs a lawyer could file as-is. Never respond with a description, "
+                        "outline, or explanation of what the pleading should contain instead of "
+                        "writing it. Use proper Philippine pleading structure and formal legal "
+                        "language throughout."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        return {
+            "success": True,
+            "pleading_type": pleading_type,
+            "format": format,
+            "content": response.choices[0].message.content,
+            "disclaimer": "This is an AI-drafted pleading. Have it reviewed by a licensed attorney before filing.",
+            "next_steps": [
+                "Review all details and arguments for accuracy",
+                "Fill in any blank fields (marked with ___)",
+                "Have a lawyer review the document before filing",
+                "Confirm court, branch, and case number are correct",
+            ],
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Cosmetics helpers
 # ---------------------------------------------------------------------------
