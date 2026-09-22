@@ -3704,6 +3704,14 @@ async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_ev
             )
         await websocket.send_text("[DONE]")
 
+    except asyncio.CancelledError:
+        # A cancel is not an error — see the finally below, which skips __END__
+        # here; the watcher's caller sends it once if the socket is still open.
+        logging.info(
+            "/chat-stream [%s] turn cancelled after %.2fs session=%s",
+            persona, time.time() - _ws_t_start, session_id,
+        )
+        raise
     except Exception as e:
         logging.warning(
             "/chat-stream [%s] ERROR after %.2fs session=%s: %s",
@@ -3713,12 +3721,39 @@ async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_ev
         await websocket.send_text(_context.__END__)
         end_sent = True
     finally:
-        if not end_sent:
+        if not end_sent and not cancel_event.is_set():
             try:
                 await websocket.send_text(_context.__END__)
             except Exception:
                 pass
     return user_input
+
+
+async def _watch_for_stop(websocket, cancel_event, turn_task, reason_box):
+    """Runs beside a turn; cancels it on client disconnect or a {"type":"stop"} message.
+
+    reason_box is a one-item list the caller reads afterwards: "disconnect" or "stop"."""
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                reason_box[0] = "disconnect"
+                break
+            text = message.get("text")
+            if text:
+                try:
+                    is_stop = json.loads(text).get("type") == "stop"
+                except Exception:
+                    is_stop = False
+                if is_stop:
+                    reason_box[0] = "stop"
+                    break
+                logging.warning("/chat-stream: ignoring a message received mid-turn")
+    except Exception:
+        reason_box[0] = "disconnect"  # socket already broken
+    logging.info("/chat-stream: cancelling turn (%s)", reason_box[0])
+    cancel_event.set()
+    turn_task.cancel()
 
 
 @app.websocket("/chat-stream")
@@ -3737,6 +3772,10 @@ async def chat_stream(websocket: WebSocket):
             msg_type = data.get("type", "chat")
 
             if msg_type == "approve":
+                # TODO(stop-generation): this resume path is not watched for Stop —
+                # ilovelawyer-api only ever sends type: "chat", so it has no HITL
+                # approve flow. Revisit if another client (e.g. scl-core) needs Stop
+                # to interrupt an approved-tool-call resume too.
                 session_id = data.get("session_id")
                 decision = data.get("decision", "approved")
                 comments = data.get("comments")
@@ -3844,7 +3883,31 @@ async def chat_stream(websocket: WebSocket):
 
             # Regular chat message
             request = ChatRequest(**{k: v for k, v in data.items() if k in ChatRequest.model_fields})
-            _turn_user_input = await _run_regular_turn(websocket, data, request, cancel_event=None)
+            cancel_event = Event()
+            reason_box = [None]
+            ctx_token = _turn_cancel_event.set(cancel_event)
+            turn_task = asyncio.create_task(_run_regular_turn(websocket, data, request, cancel_event))
+            watcher = asyncio.create_task(_watch_for_stop(websocket, cancel_event, turn_task, reason_box))
+            try:
+                _turn_user_input = await turn_task
+            except asyncio.CancelledError:
+                if not cancel_event.is_set():
+                    raise  # not our stop (e.g. server shutdown)
+                _turn_user_input = None
+            finally:
+                watcher.cancel()
+                _turn_cancel_event.reset(ctx_token)
+
+            if cancel_event.is_set():
+                if reason_box[0] == "disconnect":
+                    return  # the watcher consumed the disconnect; Starlette would raise
+                            # RuntimeError on another receive, so leave the handler here
+                try:  # "stop": socket still open, end the turn cleanly
+                    await websocket.send_text(_context.__END__)
+                except Exception:
+                    pass
+                continue  # wait for the next message
+
             if _turn_user_input is not None:
                 user_input = _turn_user_input
             continue
