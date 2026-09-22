@@ -763,12 +763,23 @@ def case_law_grep_judgment(slug: str = None, pattern: str = None, case_insensiti
 
 
 def legislation_search(query: str = None, type: str = None, year: int = None, fulltext: bool = False, limit: int = 20) -> dict:
-    """Search UK Acts and Statutory Instruments via the UK Legal MCP."""
+    """Search UK Acts and Statutory Instruments via the UK Legal MCP.
+
+    A recognised short form ("HRA", "PACE", "DPA") is expanded to the Act's full title before
+    the query is sent — uk-legal-mcp.fly.dev's search only matches close to the literal title,
+    so the acronym alone returns nothing. See uk_legal_query.plan_uk_legislation_query and
+    FORHU/chat-wonder-v2-api#94.
+    """
+    from uk_legal_query import plan_uk_legislation_query, prefer_exact_ref
+
     query = (str(query).strip() if query is not None else "")
     if not query:
         return {"success": False, "error": "query is required"}
+
+    plan = plan_uk_legislation_query(query)
+
     args = {}
-    args["query"] = query
+    args["query"] = plan.query
     if type is not None:
         args["type"] = str(type)
     if year is not None:
@@ -783,7 +794,9 @@ def legislation_search(query: str = None, type: str = None, year: int = None, fu
         if rows is not None:
             from uk_legal_mcp.scoring import fill_missing_scores
 
-            fill_missing_scores(rows, query)
+            fill_missing_scores(rows, plan.query)
+            if plan.ref is not None:
+                rows[:] = prefer_exact_ref(rows, plan.ref)
         return {"success": True, **payload}
     except Exception as e:
         return {"success": False, "error": str(e), "message": f"legislation_search failed: {e}"}
