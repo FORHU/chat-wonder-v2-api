@@ -3358,9 +3358,373 @@ def hitl_status():
     return {"auto_approval": _context.manual_auto_approval}
 
 
+async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_event):
+    """Runs one regular chat turn. Returns the processed user_input (None if the turn
+    ended before it was set) so chat_stream can hand it to a later HITL approve."""
+    session_id = request.session_id
+
+    if not session_id or session_id not in _context.sessions:
+        await websocket.send_text("[Error] Unknown session.")
+        await websocket.send_text(_context.__END__)
+        return None
+
+    state = _context.sessions[session_id]
+    state.last_used = time.time()
+    if data.get("user_id"):
+        state.user_id = data["user_id"]
+    init_openai_client(state, _context.openai_api_key)
+
+    user_input = request.user_input or getattr(request, "user_history_select", "") or ""
+    if not user_input.strip():
+        await websocket.send_text("[Error] User input is empty.")
+        await websocket.send_text(_context.__END__)
+        return user_input
+    state.current_query = user_input
+
+    persona, user_input, filtered_tools, addendum_override = process_persona(user_input, request.jurisdiction)
+    if persona == "legal":
+        user_input, _prefetch = prepare_legal_turn(user_input)
+        if _prefetch and session_id and session_id in _context.sessions:
+            existing = list(_context.sessions[session_id].last_search_legal_results or [])
+            existing.extend(_prefetch)
+            _context.sessions[session_id].last_search_legal_results = existing
+        if session_id and session_id in _context.sessions:
+            # Reset per-turn so a document drafted on turn N doesn't leak into
+            # turn N+1's [GENERATED_FILE_DATA] frame — mirrors /chat's reset.
+            _context.sessions[session_id].last_generated_file_result = {}
+    if persona in ("legal", "legal_uk"):
+        await sync_active_case_documents(
+            session_id,
+            request.case_document_ids,
+            request.case_document_chunk_ids,
+            request.case_document_manifest,
+            request.case_document_texts,
+        )
+
+    # Inject frontend-provided weather for garment persona
+    if persona == "garment" and data.get("weather"):
+        try:
+            user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
+        except Exception:
+            pass
+
+    # Inject frontend-provided skin analysis, weather, and location for cosmetics persona
+    if persona == "cosmetics":
+        if data.get("skin_analysis"):
+            try:
+                user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        if data.get("weather"):
+            try:
+                user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        if data.get("location"):
+            try:
+                user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+
+    # Inject frontend-provided location for maps persona
+    if persona == "maps":
+        _meeting_dest = _extract_meeting_destination(user_input)
+        if _meeting_dest:
+            user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
+        elif data.get("location"):
+            try:
+                user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        state.last_maps_result = []
+
+    # Inject sitemap for nav persona (B2: runs sync, no streaming)
+    if persona == "nav" and data.get("sitemap_context"):
+        try:
+            user_input = f"[SITEMAP_CONTEXT:{json.dumps(data['sitemap_context'], ensure_ascii=False)}]\n\n{user_input}"
+        except Exception:
+            pass
+
+    if persona == "stylist":
+        if data.get("sitemap_context"):
+            state.sitemap_context = data["sitemap_context"]
+        if data.get("weather"):
+            try:
+                user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        if data.get("location"):
+            try:
+                _meeting_dest = _extract_meeting_destination(user_input)
+                if _meeting_dest:
+                    user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
+                else:
+                    user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+            state.last_maps_result = []
+        if data.get("skin_analysis"):
+            try:
+                user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        try:
+            # Resolve gender: prefer client-sent DB value, fall back to server-side
+            # state (set immediately when recommend_garments returns, no round-trip).
+            _raw_gender = (data.get("gender") or "").strip().upper() or state.confirmed_gender
+            if _raw_gender in ("MALE", "FEMALE"):
+                user_input = f"[USER_GENDER:{_raw_gender}]\n\n{user_input}"
+        except Exception:
+            pass
+        if data.get("sitemap_context"):
+            try:
+                user_input = f"[SITEMAP_CONTEXT:{json.dumps(data['sitemap_context'], ensure_ascii=False)}]\n\n{user_input}"
+            except Exception:
+                pass
+        _ws_cat_raw = data.get("category")
+        if _ws_cat_raw:
+            try:
+                if isinstance(_ws_cat_raw, dict):
+                    _ws_cat_val = _ws_cat_raw.get("meta", "")
+                else:
+                    _ws_cat_str = str(_ws_cat_raw)
+                    _ws_cat_val = _ws_cat_str.split("=", 1)[-1] if "=" in _ws_cat_str else _ws_cat_str
+                if _ws_cat_val:
+                    user_input = f"[OUTFIT_CATEGORY:{_ws_cat_val}]\n\n{user_input}"
+            except Exception:
+                pass
+
+    if getattr(request, "document_context", None):
+        doc_injection = (
+            "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
+            "beauty, or cosmetics products. If the user is asking about outfits, garments, or "
+            "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
+            + request.document_context
+        )
+        addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
+
+    if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
+        addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
+
+    _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
+    broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
+        summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
+
+    full_response = ""
+    _ws_t_start = time.time()
+    _ws_t_first_chunk = None
+    # HITL auto-approval is derived inside reason_loop()/streaming_reason_loop()
+    # from each call's own persona argument — a plain local value, not shared
+    # state — so no wrapping is needed here.
+    end_sent = False
+
+    # B2: nav runs sync — no streaming of raw JSON
+    if persona == "nav":
+        try:
+            nav_result_raw = reason_loop(state, user_input, session_id=session_id, tools=[], addendum_override=addendum_override, persona=persona)
+            nav_text = (nav_result_raw or "").strip()
+            try:
+                nav_json = json.loads(nav_text)
+                if nav_json.get("confidence", 0) < 0.5:
+                    nav_json["target_url"] = None
+                state.last_nav_result = nav_json
+                system_message = nav_json.get("system_message", "")
+            except Exception:
+                nav_json = {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": nav_text}
+                state.last_nav_result = nav_json
+                system_message = nav_text
+            state.prompt.append(user_input)
+            state.generated.append(system_message)
+            _context.sessions[session_id] = state
+            await websocket.send_text(system_message)
+            await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
+            await websocket.send_text(_context.__END__)
+            await websocket.send_text("[DONE]")
+        except Exception as e:
+            logging.warning("/chat-stream [nav] ERROR session=%s: %s", session_id, e)
+            await websocket.send_text("[Error] Navigation failed.")
+            await websocket.send_text(_context.__END__)
+            await websocket.send_text("[DONE]")
+        return user_input
+
+    try:
+        async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
+            if chunk.startswith("__HITL__"):
+                hitl_data = json.loads(chunk[8:])
+                fc = hitl_data["function_call"]
+                state.pending_function_call = fc
+                state.pending_messages = hitl_data["messages"]
+                state.pending_tools = hitl_data.get("tools")
+                state.pending_addendum = addendum_override
+                _context.sessions[session_id] = state
+                try:
+                    args_parsed = json.loads(fc.get("arguments", "{}"))
+                except Exception:
+                    args_parsed = {}
+                await websocket.send_text(json.dumps({
+                    "status": "pending_approval",
+                    "tool_name": fc["name"],
+                    "arguments": args_parsed,
+                }))
+                break
+            # Verify→refine rejected the buffered legal draft; drop it so only the
+            # revised answer (or the re-yielded draft fallback) reaches the finalizer.
+            if chunk == DRAFT_DISCARD:
+                full_response = ""
+                continue
+            # Glass-box research steps bypass the legal persona's buffering below —
+            # they aren't answer text, so they carry no citation-gating risk, and the
+            # whole point is to fill the silent window while full_response is withheld.
+            if chunk.startswith("[TRACE]"):
+                await websocket.send_text(chunk)
+                continue
+            if _ws_t_first_chunk is None:
+                _ws_t_first_chunk = time.time()
+            # Legal answers must pass through citation gating/doctrine guards
+            # (_finalize_legal_response) before the client sees them, so raw
+            # chunks are buffered instead of streamed live for these personas.
+            if persona not in ("legal", "legal_uk"):
+                await websocket.send_text(chunk)
+            full_response += chunk
+
+        if full_response:
+            state.prompt.append(user_input)
+            final_text = full_response.strip()
+            _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+            final_text = _finalize_legal_response(
+                final_text,
+                state.last_search_legal_results,
+                legal_mode=_legal_mode,
+                user_input=user_input,
+                jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+            )
+            if persona in ("legal", "legal_uk"):
+                await websocket.send_text(final_text)
+            if persona in ("legal", "legal_uk") and state.last_search_legal_results:
+                state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
+                await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
+                related_cases = select_related_cases(state.last_search_legal_results)
+                await websocket.send_text(f"[RELATED_CASES]{json.dumps(related_cases)}")
+            state.generated.append(final_text)
+            _context.sessions[session_id] = state
+        else:
+            # Tool was called but LLM produced no text — still persist the turn
+            state.prompt.append(user_input)
+            state.generated.append("")
+            _context.sessions[session_id] = state
+        # Structured data frames fire regardless of whether LLM produced text,
+        # so the panel renders even when the LLM terminates silently after a tool call.
+        if persona == "stylist":
+            if state.last_tailor_result and not (state.last_nav_result or {}).get("target_url"):
+                state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+            elif state.last_outfit_ids_result and not (state.last_nav_result or {}).get("target_url"):
+                state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+            elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
+                state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+            elif state.last_maps_result and not (state.last_nav_result or {}).get("target_url"):
+                state.last_nav_result = {"target_url": "/map", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+        if persona == "stylist" and state.last_outfit_ids_result:
+            await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
+        if persona == "stylist" and state.last_cosmetics_ids_result:
+            await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
+        if persona == "garment" and state.last_garment_result:
+            await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
+        _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
+        if _garment_gender in ("MALE", "FEMALE"):
+            await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
+        if persona == "cosmetics" and state.last_cosmetics_result:
+            await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
+        if persona == "maps" and state.last_maps_result:
+            await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
+        if persona == "tailor" and state.last_tailor_result:
+            await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
+        if persona in ("legal", "legal_uk") and state.last_generated_file_result:
+            await websocket.send_text(f"[GENERATED_FILE_DATA]{json.dumps(state.last_generated_file_result)}")
+        # nav emission disabled for stylist — front end handles navigation
+        _ws_t_end = time.time()
+        ttft = (_ws_t_first_chunk - _ws_t_start) if _ws_t_first_chunk else 0
+        logging.info(
+            "/chat-stream [%s] ttft=%.2fs total=%.2fs chars=%d session=%s",
+            persona, ttft, _ws_t_end - _ws_t_start, len(full_response), session_id,
+        )
+        # Send __END__ now so the client unlocks immediately, then generate
+        # timeline/mindmap in a background thread and send before [DONE].
+        await websocket.send_text(_context.__END__)
+        end_sent = True
+        # Everything past __END__ is extras on top of an answer the client already has.
+        # A failure here must not become "[Error] ..." (see the except below): ilovelawyer-api
+        # treated any [Error] frame as a failed turn and never persisted the reply, so the
+        # user watched a full answer stream in and then found it gone from history.
+        try:
+            if persona in ("legal", "legal_uk") and full_response:
+                t_sd = time.time()
+                structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
+                logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
+                if structured:
+                    await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
+                t_re = time.time()
+                reasoning = await asyncio.to_thread(
+                    _generate_reasoning_explanation,
+                    user_input,
+                    final_text,
+                    state.last_search_legal_results,
+                    state.last_turn_tool_log,
+                    state,
+                )
+                logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
+                if reasoning:
+                    await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
+                t_dr = time.time()
+                decisions = await asyncio.to_thread(
+                    _generate_decision_records,
+                    user_input,
+                    final_text,
+                    state.last_search_legal_results,
+                    state.last_turn_tool_log,
+                    state,
+                )
+                logging.info("_generate_decision_records %.2fs", time.time() - t_dr)
+                if decisions:
+                    await websocket.send_text(json.dumps({"type": "decisions", "session_id": session_id, "data": decisions}))
+                # Gated separately from _generate_structured_data above — see
+                # _wants_audio_overview's docstring for why this can't just be folded in.
+                if _wants_audio_overview(user_input):
+                    t_ao = time.time()
+                    audio_overview = await asyncio.to_thread(
+                        _generate_audio_overview_script, full_response.strip(), state
+                    )
+                    logging.info("_generate_audio_overview_script %.2fs", time.time() - t_ao)
+                    if audio_overview:
+                        await websocket.send_text(f"[AUDIO_OVERVIEW_DATA]{json.dumps(audio_overview)}")
+        except Exception as e:
+            logging.warning(
+                "/chat-stream [%s] post-__END__ extras failed after %.2fs session=%s (answer already delivered): %s",
+                persona, time.time() - _ws_t_start, session_id, e,
+            )
+        await websocket.send_text("[DONE]")
+
+    except Exception as e:
+        logging.warning(
+            "/chat-stream [%s] ERROR after %.2fs session=%s: %s",
+            persona, time.time() - _ws_t_start, session_id, e,
+        )
+        await websocket.send_text(f"[Error] {e}")
+        await websocket.send_text(_context.__END__)
+        end_sent = True
+    finally:
+        if not end_sent:
+            try:
+                await websocket.send_text(_context.__END__)
+            except Exception:
+                pass
+    return user_input
+
+
 @app.websocket("/chat-stream")
 async def chat_stream(websocket: WebSocket):
     await websocket.accept()
+    user_input = ""  # last processed turn input; the HITL approve branch reads it
     try:
         while True:
             raw_data = await websocket.receive_text()
@@ -3480,363 +3844,10 @@ async def chat_stream(websocket: WebSocket):
 
             # Regular chat message
             request = ChatRequest(**{k: v for k, v in data.items() if k in ChatRequest.model_fields})
-            session_id = request.session_id
-
-            if not session_id or session_id not in _context.sessions:
-                await websocket.send_text("[Error] Unknown session.")
-                await websocket.send_text(_context.__END__)
-                continue
-
-            state = _context.sessions[session_id]
-            state.last_used = time.time()
-            if data.get("user_id"):
-                state.user_id = data["user_id"]
-            init_openai_client(state, _context.openai_api_key)
-
-            user_input = request.user_input or getattr(request, "user_history_select", "") or ""
-            if not user_input.strip():
-                await websocket.send_text("[Error] User input is empty.")
-                await websocket.send_text(_context.__END__)
-                continue
-            state.current_query = user_input
-
-            persona, user_input, filtered_tools, addendum_override = process_persona(user_input, request.jurisdiction)
-            if persona == "legal":
-                user_input, _prefetch = prepare_legal_turn(user_input)
-                if _prefetch and session_id and session_id in _context.sessions:
-                    existing = list(_context.sessions[session_id].last_search_legal_results or [])
-                    existing.extend(_prefetch)
-                    _context.sessions[session_id].last_search_legal_results = existing
-                if session_id and session_id in _context.sessions:
-                    # Reset per-turn so a document drafted on turn N doesn't leak into
-                    # turn N+1's [GENERATED_FILE_DATA] frame — mirrors /chat's reset.
-                    _context.sessions[session_id].last_generated_file_result = {}
-            if persona in ("legal", "legal_uk"):
-                await sync_active_case_documents(
-                    session_id,
-                    request.case_document_ids,
-                    request.case_document_chunk_ids,
-                    request.case_document_manifest,
-                    request.case_document_texts,
-                )
-
-            # Inject frontend-provided weather for garment persona
-            if persona == "garment" and data.get("weather"):
-                try:
-                    user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
-                except Exception:
-                    pass
-
-            # Inject frontend-provided skin analysis, weather, and location for cosmetics persona
-            if persona == "cosmetics":
-                if data.get("skin_analysis"):
-                    try:
-                        user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-                if data.get("weather"):
-                    try:
-                        user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-                if data.get("location"):
-                    try:
-                        user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-
-            # Inject frontend-provided location for maps persona
-            if persona == "maps":
-                _meeting_dest = _extract_meeting_destination(user_input)
-                if _meeting_dest:
-                    user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
-                elif data.get("location"):
-                    try:
-                        user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-                state.last_maps_result = []
-
-            # Inject sitemap for nav persona (B2: runs sync, no streaming)
-            if persona == "nav" and data.get("sitemap_context"):
-                try:
-                    user_input = f"[SITEMAP_CONTEXT:{json.dumps(data['sitemap_context'], ensure_ascii=False)}]\n\n{user_input}"
-                except Exception:
-                    pass
-
-            if persona == "stylist":
-                if data.get("sitemap_context"):
-                    state.sitemap_context = data["sitemap_context"]
-                if data.get("weather"):
-                    try:
-                        user_input = f"[FRONTEND_WEATHER:{json.dumps(data['weather'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-                if data.get("location"):
-                    try:
-                        _meeting_dest = _extract_meeting_destination(user_input)
-                        if _meeting_dest:
-                            user_input = f"[MEETING_LOCATION:{_meeting_dest}]\n\n{user_input}"
-                        else:
-                            user_input = f"[USER_LOCATION:{json.dumps(data['location'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-                    state.last_maps_result = []
-                if data.get("skin_analysis"):
-                    try:
-                        user_input = f"[SKIN_ANALYSIS:{json.dumps(data['skin_analysis'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-                try:
-                    # Resolve gender: prefer client-sent DB value, fall back to server-side
-                    # state (set immediately when recommend_garments returns, no round-trip).
-                    _raw_gender = (data.get("gender") or "").strip().upper() or state.confirmed_gender
-                    if _raw_gender in ("MALE", "FEMALE"):
-                        user_input = f"[USER_GENDER:{_raw_gender}]\n\n{user_input}"
-                except Exception:
-                    pass
-                if data.get("sitemap_context"):
-                    try:
-                        user_input = f"[SITEMAP_CONTEXT:{json.dumps(data['sitemap_context'], ensure_ascii=False)}]\n\n{user_input}"
-                    except Exception:
-                        pass
-                _ws_cat_raw = data.get("category")
-                if _ws_cat_raw:
-                    try:
-                        if isinstance(_ws_cat_raw, dict):
-                            _ws_cat_val = _ws_cat_raw.get("meta", "")
-                        else:
-                            _ws_cat_str = str(_ws_cat_raw)
-                            _ws_cat_val = _ws_cat_str.split("=", 1)[-1] if "=" in _ws_cat_str else _ws_cat_str
-                        if _ws_cat_val:
-                            user_input = f"[OUTFIT_CATEGORY:{_ws_cat_val}]\n\n{user_input}"
-                    except Exception:
-                        pass
-
-            if getattr(request, "document_context", None):
-                doc_injection = (
-                    "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
-                    "beauty, or cosmetics products. If the user is asking about outfits, garments, or "
-                    "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
-                    + request.document_context
-                )
-                addendum_override = (addendum_override or "You are a helpful assistant.") + doc_injection
-
-            if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
-                addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
-
-            _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
-            broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
-                summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
-
-            full_response = ""
-            _ws_t_start = time.time()
-            _ws_t_first_chunk = None
-            # HITL auto-approval is derived inside reason_loop()/streaming_reason_loop()
-            # from each call's own persona argument — a plain local value, not shared
-            # state — so no wrapping is needed here.
-            end_sent = False
-
-            # B2: nav runs sync — no streaming of raw JSON
-            if persona == "nav":
-                try:
-                    nav_result_raw = reason_loop(state, user_input, session_id=session_id, tools=[], addendum_override=addendum_override, persona=persona)
-                    nav_text = (nav_result_raw or "").strip()
-                    try:
-                        nav_json = json.loads(nav_text)
-                        if nav_json.get("confidence", 0) < 0.5:
-                            nav_json["target_url"] = None
-                        state.last_nav_result = nav_json
-                        system_message = nav_json.get("system_message", "")
-                    except Exception:
-                        nav_json = {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": nav_text}
-                        state.last_nav_result = nav_json
-                        system_message = nav_text
-                    state.prompt.append(user_input)
-                    state.generated.append(system_message)
-                    _context.sessions[session_id] = state
-                    await websocket.send_text(system_message)
-                    await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
-                    await websocket.send_text(_context.__END__)
-                    await websocket.send_text("[DONE]")
-                except Exception as e:
-                    logging.warning("/chat-stream [nav] ERROR session=%s: %s", session_id, e)
-                    await websocket.send_text("[Error] Navigation failed.")
-                    await websocket.send_text(_context.__END__)
-                    await websocket.send_text("[DONE]")
-                continue
-
-            try:
-                async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
-                    if chunk.startswith("__HITL__"):
-                        hitl_data = json.loads(chunk[8:])
-                        fc = hitl_data["function_call"]
-                        state.pending_function_call = fc
-                        state.pending_messages = hitl_data["messages"]
-                        state.pending_tools = hitl_data.get("tools")
-                        state.pending_addendum = addendum_override
-                        _context.sessions[session_id] = state
-                        try:
-                            args_parsed = json.loads(fc.get("arguments", "{}"))
-                        except Exception:
-                            args_parsed = {}
-                        await websocket.send_text(json.dumps({
-                            "status": "pending_approval",
-                            "tool_name": fc["name"],
-                            "arguments": args_parsed,
-                        }))
-                        break
-                    # Verify→refine rejected the buffered legal draft; drop it so only the
-                    # revised answer (or the re-yielded draft fallback) reaches the finalizer.
-                    if chunk == DRAFT_DISCARD:
-                        full_response = ""
-                        continue
-                    # Glass-box research steps bypass the legal persona's buffering below —
-                    # they aren't answer text, so they carry no citation-gating risk, and the
-                    # whole point is to fill the silent window while full_response is withheld.
-                    if chunk.startswith("[TRACE]"):
-                        await websocket.send_text(chunk)
-                        continue
-                    if _ws_t_first_chunk is None:
-                        _ws_t_first_chunk = time.time()
-                    # Legal answers must pass through citation gating/doctrine guards
-                    # (_finalize_legal_response) before the client sees them, so raw
-                    # chunks are buffered instead of streamed live for these personas.
-                    if persona not in ("legal", "legal_uk"):
-                        await websocket.send_text(chunk)
-                    full_response += chunk
-
-                if full_response:
-                    state.prompt.append(user_input)
-                    final_text = full_response.strip()
-                    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-                    final_text = _finalize_legal_response(
-                        final_text,
-                        state.last_search_legal_results,
-                        legal_mode=_legal_mode,
-                        user_input=user_input,
-                        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-                    )
-                    if persona in ("legal", "legal_uk"):
-                        await websocket.send_text(final_text)
-                    if persona in ("legal", "legal_uk") and state.last_search_legal_results:
-                        state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
-                        await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
-                        related_cases = select_related_cases(state.last_search_legal_results)
-                        await websocket.send_text(f"[RELATED_CASES]{json.dumps(related_cases)}")
-                    state.generated.append(final_text)
-                    _context.sessions[session_id] = state
-                else:
-                    # Tool was called but LLM produced no text — still persist the turn
-                    state.prompt.append(user_input)
-                    state.generated.append("")
-                    _context.sessions[session_id] = state
-                # Structured data frames fire regardless of whether LLM produced text,
-                # so the panel renders even when the LLM terminates silently after a tool call.
-                if persona == "stylist":
-                    if state.last_tailor_result and not (state.last_nav_result or {}).get("target_url"):
-                        state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                    elif state.last_outfit_ids_result and not (state.last_nav_result or {}).get("target_url"):
-                        state.last_nav_result = {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                    elif state.last_cosmetics_result and not (state.last_nav_result or {}).get("target_url"):
-                        state.last_nav_result = {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                    elif state.last_maps_result and not (state.last_nav_result or {}).get("target_url"):
-                        state.last_nav_result = {"target_url": "/map", "confidence": 1.0, "extracted_entities": None, "system_message": ""}
-                if persona == "stylist" and state.last_outfit_ids_result:
-                    await websocket.send_text(f"[OUTFIT_IDS]{json.dumps(state.last_outfit_ids_result)}")
-                if persona == "stylist" and state.last_cosmetics_ids_result:
-                    await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
-                if persona == "garment" and state.last_garment_result:
-                    await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
-                _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
-                if _garment_gender in ("MALE", "FEMALE"):
-                    await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
-                if persona == "cosmetics" and state.last_cosmetics_result:
-                    await websocket.send_text(f"[COSMETICS_DATA]{json.dumps(state.last_cosmetics_result)}")
-                if persona == "maps" and state.last_maps_result:
-                    await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
-                if persona == "tailor" and state.last_tailor_result:
-                    await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
-                if persona in ("legal", "legal_uk") and state.last_generated_file_result:
-                    await websocket.send_text(f"[GENERATED_FILE_DATA]{json.dumps(state.last_generated_file_result)}")
-                # nav emission disabled for stylist — front end handles navigation
-                _ws_t_end = time.time()
-                ttft = (_ws_t_first_chunk - _ws_t_start) if _ws_t_first_chunk else 0
-                logging.info(
-                    "/chat-stream [%s] ttft=%.2fs total=%.2fs chars=%d session=%s",
-                    persona, ttft, _ws_t_end - _ws_t_start, len(full_response), session_id,
-                )
-                # Send __END__ now so the client unlocks immediately, then generate
-                # timeline/mindmap in a background thread and send before [DONE].
-                await websocket.send_text(_context.__END__)
-                end_sent = True
-                # Everything past __END__ is extras on top of an answer the client already has.
-                # A failure here must not become "[Error] ..." (see the except below): ilovelawyer-api
-                # treated any [Error] frame as a failed turn and never persisted the reply, so the
-                # user watched a full answer stream in and then found it gone from history.
-                try:
-                    if persona in ("legal", "legal_uk") and full_response:
-                        t_sd = time.time()
-                        structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
-                        logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
-                        if structured:
-                            await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
-                        t_re = time.time()
-                        reasoning = await asyncio.to_thread(
-                            _generate_reasoning_explanation,
-                            user_input,
-                            final_text,
-                            state.last_search_legal_results,
-                            state.last_turn_tool_log,
-                            state,
-                        )
-                        logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
-                        if reasoning:
-                            await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
-                        t_dr = time.time()
-                        decisions = await asyncio.to_thread(
-                            _generate_decision_records,
-                            user_input,
-                            final_text,
-                            state.last_search_legal_results,
-                            state.last_turn_tool_log,
-                            state,
-                        )
-                        logging.info("_generate_decision_records %.2fs", time.time() - t_dr)
-                        if decisions:
-                            await websocket.send_text(json.dumps({"type": "decisions", "session_id": session_id, "data": decisions}))
-                        # Gated separately from _generate_structured_data above — see
-                        # _wants_audio_overview's docstring for why this can't just be folded in.
-                        if _wants_audio_overview(user_input):
-                            t_ao = time.time()
-                            audio_overview = await asyncio.to_thread(
-                                _generate_audio_overview_script, full_response.strip(), state
-                            )
-                            logging.info("_generate_audio_overview_script %.2fs", time.time() - t_ao)
-                            if audio_overview:
-                                await websocket.send_text(f"[AUDIO_OVERVIEW_DATA]{json.dumps(audio_overview)}")
-                except Exception as e:
-                    logging.warning(
-                        "/chat-stream [%s] post-__END__ extras failed after %.2fs session=%s (answer already delivered): %s",
-                        persona, time.time() - _ws_t_start, session_id, e,
-                    )
-                await websocket.send_text("[DONE]")
-
-            except Exception as e:
-                logging.warning(
-                    "/chat-stream [%s] ERROR after %.2fs session=%s: %s",
-                    persona, time.time() - _ws_t_start, session_id, e,
-                )
-                await websocket.send_text(f"[Error] {e}")
-                await websocket.send_text(_context.__END__)
-                end_sent = True
-            finally:
-                if not end_sent:
-                    try:
-                        await websocket.send_text(_context.__END__)
-                    except Exception:
-                        pass
+            _turn_user_input = await _run_regular_turn(websocket, data, request, cancel_event=None)
+            if _turn_user_input is not None:
+                user_input = _turn_user_input
+            continue
 
     except WebSocketDisconnect:
         logging.debug("WebSocket connection closed.")
