@@ -2451,7 +2451,12 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
     # on the last research iteration can still be audited and revised, while the
     # tool-call cap itself stays at max_chains.
     _budget = max_chains + (1 if verify else 0)
+    _turn_cancel = _turn_cancel_event.get()  # set per turn by chat_stream; None elsewhere
     for iteration in range(_budget):
+        # Belt and braces: the task cancel already lands at the next await, but this
+        # catches it before starting another full LLM cycle. See _astream_llm.
+        if _turn_cancel and _turn_cancel.is_set():
+            raise asyncio.CancelledError
         if iteration >= max_chains and refine_round == 0:
             break
         function_call = {"name": None, "arguments": ""}
@@ -2614,6 +2619,8 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
 
+        if _turn_cancel and _turn_cancel.is_set():
+            raise asyncio.CancelledError
         _tool_start = time.time()
         result = await asyncio.to_thread(execute_function_call, function_call, session_id=session_id)
         logging.info(
@@ -3358,9 +3365,13 @@ def hitl_status():
     return {"auto_approval": _context.manual_auto_approval}
 
 
-async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_event):
+async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_event, reason_box=None):
     """Runs one regular chat turn. Returns the processed user_input (None if the turn
-    ended before it was set) so chat_stream can hand it to a later HITL approve."""
+    ended before it was set) so chat_stream can hand it to a later HITL approve.
+
+    reason_box, if given, is _watch_for_stop's one-item list ("disconnect"/"stop") — read
+    only for the cancel log line below, so a cancel not caused by the watcher (e.g. server
+    shutdown) still logs cleanly with reason None."""
     session_id = request.session_id
 
     if not session_id or session_id not in _context.sessions:
@@ -3373,6 +3384,13 @@ async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_ev
     if data.get("user_id"):
         state.user_id = data["user_id"]
     init_openai_client(state, _context.openai_api_key)
+
+    # Reset per-turn: _broadcast_retrieval_context (start of turn) and _broadcast_turn_confidence
+    # (end of turn) both read source_metadata, so a cancelled or non-legal turn's stale value
+    # would otherwise leak into this turn's glass-box trace. last_search_legal_results is left
+    # alone — it's an intentionally accumulating pool across turns (see PhPoolAccumulationTests
+    # in test_legal_verify.py). last_turn_tool_log is already reset fresh by each chain function.
+    state.source_metadata = []
 
     user_input = request.user_input or getattr(request, "user_history_select", "") or ""
     if not user_input.strip():
@@ -3548,6 +3566,10 @@ async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_ev
             await websocket.send_text("[DONE]")
         return user_input
 
+    # Tracked only for the cancel log line below (3.5) — best-effort, parsed from the same
+    # [TRACE] frames already flowing through this loop, not a source of truth for anything else.
+    _cancel_phase = "LLM"
+
     try:
         async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
             if chunk.startswith("__HITL__"):
@@ -3577,6 +3599,14 @@ async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_ev
             # they aren't answer text, so they carry no citation-gating risk, and the
             # whole point is to fill the silent window while full_response is withheld.
             if chunk.startswith("[TRACE]"):
+                try:
+                    _trace_phase = json.loads(chunk[len("[TRACE]"):-len("[/TRACE]")]).get("phase")
+                    if _trace_phase == "start":
+                        _cancel_phase = "tool call"
+                    elif _trace_phase == "result":
+                        _cancel_phase = "LLM"
+                except Exception:
+                    pass
                 await websocket.send_text(chunk)
                 continue
             if _ws_t_first_chunk is None:
@@ -3652,44 +3682,51 @@ async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_ev
         # timeline/mindmap in a background thread and send before [DONE].
         await websocket.send_text(_context.__END__)
         end_sent = True
+        _cancel_phase = "extras"
         # Everything past __END__ is extras on top of an answer the client already has.
         # A failure here must not become "[Error] ..." (see the except below): ilovelawyer-api
         # treated any [Error] frame as a failed turn and never persisted the reply, so the
         # user watched a full answer stream in and then found it gone from history.
         try:
             if persona in ("legal", "legal_uk") and full_response:
-                t_sd = time.time()
-                structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
-                logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
-                if structured:
-                    await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
-                t_re = time.time()
-                reasoning = await asyncio.to_thread(
-                    _generate_reasoning_explanation,
-                    user_input,
-                    final_text,
-                    state.last_search_legal_results,
-                    state.last_turn_tool_log,
-                    state,
-                )
-                logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
-                if reasoning:
-                    await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
-                t_dr = time.time()
-                decisions = await asyncio.to_thread(
-                    _generate_decision_records,
-                    user_input,
-                    final_text,
-                    state.last_search_legal_results,
-                    state.last_turn_tool_log,
-                    state,
-                )
-                logging.info("_generate_decision_records %.2fs", time.time() - t_dr)
-                if decisions:
-                    await websocket.send_text(json.dumps({"type": "decisions", "session_id": session_id, "data": decisions}))
+                # A cancel can land between two of these to_thread calls — the one already
+                # running can't be killed (see Known limits), but each guard here stops the
+                # *next* one from starting, so a late Stop doesn't pay for extras nobody sees.
+                if not cancel_event.is_set():
+                    t_sd = time.time()
+                    structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
+                    logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
+                    if structured:
+                        await websocket.send_text(f"[STRUCTURED_DATA]{json.dumps(structured)}")
+                if not cancel_event.is_set():
+                    t_re = time.time()
+                    reasoning = await asyncio.to_thread(
+                        _generate_reasoning_explanation,
+                        user_input,
+                        final_text,
+                        state.last_search_legal_results,
+                        state.last_turn_tool_log,
+                        state,
+                    )
+                    logging.info("_generate_reasoning_explanation %.2fs", time.time() - t_re)
+                    if reasoning:
+                        await websocket.send_text(json.dumps({"type": "reasoning", "session_id": session_id, "data": reasoning}))
+                if not cancel_event.is_set():
+                    t_dr = time.time()
+                    decisions = await asyncio.to_thread(
+                        _generate_decision_records,
+                        user_input,
+                        final_text,
+                        state.last_search_legal_results,
+                        state.last_turn_tool_log,
+                        state,
+                    )
+                    logging.info("_generate_decision_records %.2fs", time.time() - t_dr)
+                    if decisions:
+                        await websocket.send_text(json.dumps({"type": "decisions", "session_id": session_id, "data": decisions}))
                 # Gated separately from _generate_structured_data above — see
                 # _wants_audio_overview's docstring for why this can't just be folded in.
-                if _wants_audio_overview(user_input):
+                if not cancel_event.is_set() and _wants_audio_overview(user_input):
                     t_ao = time.time()
                     audio_overview = await asyncio.to_thread(
                         _generate_audio_overview_script, full_response.strip(), state
@@ -3708,8 +3745,8 @@ async def _run_regular_turn(websocket: WebSocket, data: dict, request, cancel_ev
         # A cancel is not an error — see the finally below, which skips __END__
         # here; the watcher's caller sends it once if the socket is still open.
         logging.info(
-            "/chat-stream [%s] turn cancelled after %.2fs session=%s",
-            persona, time.time() - _ws_t_start, session_id,
+            "/chat-stream: stop reason=%s session=%s elapsed=%.2fs chars_streamed=%d phase=%s",
+            reason_box[0] if reason_box else None, session_id, time.time() - _ws_t_start, len(full_response), _cancel_phase,
         )
         raise
     except Exception as e:
@@ -3886,7 +3923,7 @@ async def chat_stream(websocket: WebSocket):
             cancel_event = Event()
             reason_box = [None]
             ctx_token = _turn_cancel_event.set(cancel_event)
-            turn_task = asyncio.create_task(_run_regular_turn(websocket, data, request, cancel_event))
+            turn_task = asyncio.create_task(_run_regular_turn(websocket, data, request, cancel_event, reason_box=reason_box))
             watcher = asyncio.create_task(_watch_for_stop(websocket, cancel_event, turn_task, reason_box))
             try:
                 _turn_user_input = await turn_task

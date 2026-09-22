@@ -431,6 +431,7 @@ async def streaming_run_function_chain_responses(
         _summarize_tool_result,
         _trace_count_for_result,
         _trace_label_for_call,
+        _turn_cancel_event,
         broadcast_trace,
         execute_function_call,
     )
@@ -464,7 +465,12 @@ async def streaming_run_function_chain_responses(
     # on the last research iteration can still be audited and revised, while the
     # tool-call cap itself stays at max_chains.
     _budget = max_chains + (1 if verify else 0)
+    _turn_cancel = _turn_cancel_event.get()  # set per turn by chat_stream; None elsewhere
     for iteration in range(_budget):
+        # Belt and braces: the task cancel already lands at the next await, but this
+        # catches it before starting another full LLM cycle. See _astream_llm.
+        if _turn_cancel and _turn_cancel.is_set():
+            raise asyncio.CancelledError
         if iteration >= max_chains and refine_round == 0:
             break
         if last_tool:
@@ -642,6 +648,8 @@ async def streaming_run_function_chain_responses(
         yield f"[TRACE]{json.dumps({'id': _trace_step_id, 'phase': 'start', 'tool': function_call['name'], 'label': _trace_label_for_call(function_call['name'], cur_args if isinstance(cur_args, dict) else {})})}[/TRACE]"
 
         funcall_chains.append({"name": function_call["name"], "args": cur_args})
+        if _turn_cancel and _turn_cancel.is_set():
+            raise asyncio.CancelledError
         result = await asyncio.to_thread(execute_function_call, function_call, session_id=session_id)
         if result is None:
             continue
