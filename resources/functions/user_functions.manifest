@@ -120,7 +120,7 @@
         "properties": {
           "case_document_id": {
             "type": "string",
-            "description": "The case document's id"
+            "description": "The document's handle from the CASE FILE list, e.g. F1"
           },
           "case_document_chunk_ids": {
             "type": "array",
