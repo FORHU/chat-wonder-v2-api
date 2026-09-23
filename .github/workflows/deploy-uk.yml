@@ -9,14 +9,20 @@ name: Deploy to EC2 (UK)
 #   * both env files travel through Parameter Store, encrypted, instead of being
 #     written over an SSH session.
 #
+# Runs on every push to main, and on demand. Note that Singapore's pipeline also
+# triggers on push to main, so one merge deploys both regions from the same
+# commit; the concurrency group below only serialises the UK side.
+#
 # Images are tagged uk-<sha> in the same ap-southeast-1 registry, so Singapore's
 # :latest and :<sha> are never touched.
 
 on:
+    push:
+        branches: [main]
     workflow_dispatch:
         inputs:
             ref:
-                description: "Branch, tag, or SHA to deploy"
+                description: "Branch, tag, or SHA to deploy (ignored on push)"
                 required: true
                 default: main
             image_tag:
@@ -49,10 +55,11 @@ jobs:
             contents: read
 
         steps:
+            # On push there is no `ref` input, so fall back to the pushed commit.
             - name: Checkout code
               uses: actions/checkout@v4
               with:
-                  ref: ${{ github.event.inputs.ref }}
+                  ref: ${{ github.event.inputs.ref || github.sha }}
 
             - name: Configure AWS credentials (OIDC)
               uses: aws-actions/configure-aws-credentials@v4
@@ -77,8 +84,12 @@ jobs:
             # This file is COPYed into the image by the Dockerfile, so it must
             # exist before the build. UK values: the London bucket and region,
             # and the UK ilovelawyer API.
+            #
+            # No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY here. They would be
+            # baked into a layer and pushed to ECR, readable by anyone who can
+            # pull the image. The instance role covers S3 instead.
             - name: Write user_functions.env into build context
-              if: ${{ github.event.inputs.image_tag == '' }}
+              if: ${{ github.event_name == 'push' || github.event.inputs.image_tag == '' }}
               run: |
                   mkdir -p resources/functions
                   cat > resources/functions/user_functions.env << 'FUNCEOF'
@@ -96,7 +107,7 @@ jobs:
                   FUNCEOF
 
             - name: Build and push Docker image
-              if: ${{ github.event.inputs.image_tag == '' }}
+              if: ${{ github.event_name == 'push' || github.event.inputs.image_tag == '' }}
               env:
                   IMAGE: ${{ steps.tag.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.tag }}
               run: |
@@ -127,6 +138,7 @@ jobs:
                   OPENAI_API_KEY=${OPENAI_API_KEY}
                   CHAT_MODEL=${{ vars.CHAT_MODEL }}
                   LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
+                  LEGAL_REASONING_EFFORT=${{ vars.LEGAL_REASONING_EFFORT }}
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
