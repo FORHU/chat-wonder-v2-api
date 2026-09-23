@@ -134,6 +134,13 @@ class ChatState:
         # Every attached document's id/name/category, whether or not its chunks made this
         # turn's cut — see docs/adr/0005. Set by sync_active_case_documents.
         self.case_document_manifest: list = []
+        # Short per-session labels (F1, F2, ...) the model is shown instead of raw case-document
+        # UUIDs in any prompt, so it has nothing UUID-shaped to copy into an answer or decision
+        # record. Assigned once per document id and kept stable for the session's lifetime — see
+        # sync_active_case_documents. doc_id_by_handle is the reverse map used to resolve a
+        # handle the model sends back via execute_function_call.
+        self.doc_handle_by_id: dict = {}
+        self.doc_id_by_handle: dict = {}
         self.document_fetch_error: Optional[dict] = None
         self.confirmed_gender: str = ""
         self.sitemap_context: list = []
@@ -939,6 +946,12 @@ def _generate_reasoning_explanation(user_input: str, legal_response: str, search
 # memo, never a wrong record), so this is a cost/latency vs. coverage knob, not a correctness one.
 _LEGAL_DECISION_RESPONSE_CHARS = int(os.getenv("LEGAL_DECISION_RESPONSE_CHARS", "16000"))
 
+# Total budget for the SOURCE EXCERPTS block below, split evenly across whichever documents are
+# active this turn. Without this, _generate_decision_records only ever saw the final answer and
+# the manifest — never the documents themselves — so it had nothing to quote verbatim and quoted
+# its own answer instead, which then always failed the evidence-quote check in audit_evidence.
+_LEGAL_DECISION_SOURCE_CHARS = int(os.getenv("LEGAL_DECISION_SOURCE_CHARS", "12000"))
+
 
 def _generate_decision_records(user_input: str, legal_response: str, search_results: list, tool_log: list, state) -> dict | None:
     """Fourth lightweight LLM call: Decision Records (differentiation program, Phase 1) — for
@@ -955,13 +968,33 @@ def _generate_decision_records(user_input: str, legal_response: str, search_resu
     try:
         response_slice = legal_response[:_LEGAL_DECISION_RESPONSE_CHARS]
         manifest = getattr(state, "case_document_manifest", None) or []
-        manifest_lines = "\n".join(f"- {m.get('id')}: {m.get('name')}" for m in manifest[:60]) or "none attached"
+        handles = getattr(state, "doc_handle_by_id", None) or {}
+        # No document id in this list — only the handle and the name. Same reasoning as
+        # _build_case_document_injection: nothing id-shaped for the model to copy into `doc`.
+        manifest_lines = "\n".join(
+            f"- [{handles.get(str(m.get('id')), '?')}] {m.get('name')}" for m in manifest[:60]
+        ) or "none attached"
+
+        # Give the model the actual document text to quote from — previously this prompt only
+        # had the final answer and the manifest, so a `quote` could only ever be lifted from the
+        # model's own answer, which then always failed the evidence-quote verification below.
+        docs = getattr(state, "active_case_documents", None) or []
+        sources_block = ""
+        if docs:
+            _per_doc = max(500, _LEGAL_DECISION_SOURCE_CHARS // max(1, len(docs)))
+            _sources = "\n\n".join(
+                f"[{handles.get(str(d.get('id')), '?')}] {d.get('name') or 'Untitled'}\n{(d.get('text') or '')[:_per_doc]}"
+                for d in docs if d.get("id")
+            )
+            if _sources:
+                sources_block = f"SOURCE EXCERPTS (quote verbatim from these only):\n{_sources}\n\n"
 
         prompt = (
             "FINAL ANSWER (produce decision records for conclusions in this text):\n"
             f"{response_slice}\n\n"
             f"User's question (for context only):\n{user_input[:600]}\n\n"
-            f"Case exhibits attached (id: name) — use the short label, e.g. \"D01\", as `doc`:\n{manifest_lines}\n\n"
+            f"Case exhibits attached ([handle] name) — write the handle, e.g. \"F1\", as `doc`:\n{manifest_lines}\n\n"
+            f"{sources_block}"
             f"{legal_decisions.DECISION_RECORDS_SCHEMA_PROMPT}"
         )
         t0 = time.time()
@@ -984,6 +1017,7 @@ def _generate_decision_records(user_input: str, legal_response: str, search_resu
             search_results,
             getattr(state, "active_case_documents", None),
             manifest,
+            handles=handles,
         )
         tags = stats.as_tags()
         increment_metric_counter("legal.decisions.records", value=stats.records_out, tags=tags, session_id=None)
@@ -1008,6 +1042,18 @@ def _generate_decision_records(user_input: str, legal_response: str, search_resu
         )
         if not records:
             return None
+        for _rec in records:
+            _rec["anchor"] = _redact_document_ids(_rec.get("anchor") or "", state)
+            _rec["conclusion"] = _redact_document_ids(_rec.get("conclusion") or "", state)
+            _rec["weighting"] = _redact_document_ids(_rec.get("weighting") or "", state)
+            for _ev in (_rec.get("evidenceFor") or []) + (_rec.get("evidenceAgainst") or []):
+                if _ev.get("quote"):
+                    _ev["quote"] = _redact_document_ids(_ev["quote"], state)
+                if _ev.get("pinpoint"):
+                    _ev["pinpoint"] = _redact_document_ids(_ev["pinpoint"], state)
+            for _alt in _rec.get("alternatives") or []:
+                _alt["position"] = _redact_document_ids(_alt.get("position") or "", state)
+                _alt["whyRejected"] = _redact_document_ids(_alt.get("whyRejected") or "", state)
         return {"records": records}
     except Exception as e:
         logging.warning("_generate_decision_records failed: %s", e)
@@ -1072,6 +1118,30 @@ def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) ->
     )
 
 
+def _redact_document_ids(text: str, state) -> str:
+    """Strip anything id-shaped for a case document out of text the user or the persisted
+    transcript will see: a raw case-document UUID (belt-and-braces — the model is never shown
+    one, see _build_case_document_injection, but an older session or a model that ignores the
+    instruction could still echo one) and a bracketed internal handle like [F1]. Both are
+    replaced with the document's real name. A bare handle with no brackets is left alone — it
+    could be real user text, not a reference."""
+    if not text or not state:
+        return text
+    manifest = getattr(state, "case_document_manifest", None) or []
+    handles = getattr(state, "doc_handle_by_id", None) or {}
+    for m in manifest:
+        doc_id = str(m.get("id") or "")
+        if not doc_id:
+            continue
+        name = m.get("name") or "Document"
+        if doc_id in text:
+            text = text.replace(doc_id, name)
+        handle = handles.get(doc_id)
+        if handle:
+            text = re.sub(rf"\[{re.escape(handle)}\]", name, text)
+    return text
+
+
 def _finalize_legal_response(
     text: str,
     search_results,
@@ -1079,6 +1149,7 @@ def _finalize_legal_response(
     legal_mode: bool,
     user_input: str = "",
     jurisdiction: str = "PH",
+    state=None,
 ) -> str:
     """Citation pipeline + ensure prefetched controlling authorities are named.
 
@@ -1095,6 +1166,7 @@ def _finalize_legal_response(
 
         out = _gate_unverified_legal_urls(out, search_results)
         out = _format_legal_citation_links(out)
+    out = _redact_document_ids(out, state)
     return out
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1358,16 @@ async def sync_active_case_documents(session_id: str, case_document_ids, case_do
     if state is None:
         return
     state.case_document_manifest = case_document_manifest or []
+    # Assign each attached document a stable handle (F1, F2, ...) the first time it's seen this
+    # session — never reassigned, so a handle the model learned on an earlier turn still means
+    # the same document later. See the doc_handle_by_id docstring in ChatState.__init__.
+    _handles = state.doc_handle_by_id or {}
+    for _m in state.case_document_manifest:
+        _doc_id = str(_m.get("id") or "")
+        if _doc_id and _doc_id not in _handles:
+            _handles[_doc_id] = f"F{len(_handles) + 1}"
+    state.doc_handle_by_id = _handles
+    state.doc_id_by_handle = {h: i for i, h in _handles.items()}
     allowed = [str(_cid) for _cid in case_document_ids]
     state.allowed_case_document_ids = set(allowed)
     # Drop cached docs from other cases so a later get_case_document call cannot revive them.
@@ -1347,34 +1429,45 @@ def _build_case_document_injection(state) -> str:
     """Case-document system-prompt block: a manifest of every attached exhibit (so the model
     knows the full exhibit set exists even for one whose content didn't make this turn's
     relevance/budget cut — see docs/adr/0005), followed by the full-text blocks of whichever
-    documents actually made it into active_case_documents."""
+    documents actually made it into active_case_documents.
+
+    Documents are identified to the model only by handle (F1, F2, ...) and name — never by their
+    real UUID — so there is nothing id-shaped in the prompt for the model to copy into an answer
+    or a decision record's `doc` field (see docs/adr/0004 and the "file ID shows instead of the
+    file name" fix). handles come from doc_handle_by_id, assigned in sync_active_case_documents."""
     _manifest = state.case_document_manifest or []
     _active_by_id = {d.get("id"): d for d in state.active_case_documents}
+    _handles = state.doc_handle_by_id or {}
+
+    def _handle_of(doc_id):
+        return _handles.get(str(doc_id), "?")
 
     def _status(m):
         d = _active_by_id.get(m.get("id"))
+        h = _handle_of(m.get("id"))
         if d is None:
-            return " — not yet fetched into context; call get_case_document with this id if relevant"
+            return f" — not yet fetched into context; call get_case_document with handle {h} if relevant"
         if d.get("partial"):
             return (
                 f" — PARTIAL in context ({d.get('chunk_count', 0)} of {d.get('document_chunk_count', '?')} chunks, "
-                "relevance-filtered); call get_case_document with this id and NO case_document_chunk_ids "
+                f"relevance-filtered); call get_case_document with handle {h} and NO case_document_chunk_ids "
                 "before characterising any paragraph, part or item of it"
             )
         return " — in context in full"
 
     _manifest_lines = "\n".join(
-        f"- {m.get('name') or 'Untitled'} (id: {m.get('id')})"
+        f"- [{_handle_of(m.get('id'))}] {m.get('name') or 'Untitled'}"
         + (f" — category: {m['category']}" if m.get("category") else "")
         + _status(m)
         for m in _manifest
     )
     _doc_blocks = "\n".join(
-        f"\nDocument \"{d['name']}\" (id: {d['id']}):\n{d['text']}\n" if d.get("name") else f"\nDocument (id: {d['id']}):\n{d['text']}\n"
+        f"\nDocument [{_handle_of(d.get('id'))}] \"{d['name']}\":\n{d['text']}\n" if d.get("name") else f"\nDocument [{_handle_of(d.get('id'))}]:\n{d['text']}\n"
         for d in state.active_case_documents
     )
     _manifest_block = (
-        f"\n\n[CASE FILE — every document attached to this case]\n{_manifest_lines}\n"
+        "\n\n[CASE FILE — every document attached to this case. Refer to documents by name in "
+        f"your answer; handles like F1 are internal — never write a handle or any document id.]\n{_manifest_lines}\n"
         if _manifest_lines else ""
     )
     return (
@@ -1405,6 +1498,13 @@ def execute_function_call(function_call: dict, session_id: str = None):
             func_args["session_id"] = session_id
         if func_name == "get_case_document" and session_id:
             _cd_state = _context.sessions.get(session_id)
+            # The model is only ever shown a handle (F1, ...), never the real id — see
+            # _build_case_document_injection. Resolve it back to the real id before anything
+            # else touches case_document_id. A value that isn't a known handle (an older
+            # session, a direct API caller, or a raw id a test passes) is left as-is.
+            _raw_cd_id = str(func_args.get("case_document_id") or "")
+            if _cd_state is not None:
+                func_args["case_document_id"] = (getattr(_cd_state, "doc_id_by_handle", None) or {}).get(_raw_cd_id.upper(), _raw_cd_id)
             _cd_id = str(func_args.get("case_document_id") or "")
             _allowed = getattr(_cd_state, "allowed_case_document_ids", None) if _cd_state is not None else None
             if _allowed is not None and _cd_id not in _allowed:
@@ -3147,6 +3247,7 @@ def chat(request: ChatRequest):
         legal_mode=_legal_mode,
         user_input=user_input,
         jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+        state=state,
     )
     related_cases: list = []
     if persona in ("legal", "legal_uk") and state.last_search_legal_results:
@@ -3310,6 +3411,7 @@ def approve(request: ApproveRequest):
         legal_mode=_legal_mode,
         user_input=state.prompt[-1] if state.prompt else "",
         jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+        state=state,
     )
     state.generated.append(final_text)
     _context.sessions[session_id] = state
@@ -3459,6 +3561,7 @@ async def chat_stream(websocket: WebSocket):
                         legal_mode=_legal_mode,
                         user_input=user_input,
                         jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                        state=state,
                     )
                     if _legal_mode:
                         await websocket.send_text(final_text)
@@ -3702,6 +3805,7 @@ async def chat_stream(websocket: WebSocket):
                         legal_mode=_legal_mode,
                         user_input=user_input,
                         jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                        state=state,
                     )
                     if persona in ("legal", "legal_uk"):
                         await websocket.send_text(final_text)

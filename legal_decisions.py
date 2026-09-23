@@ -14,7 +14,7 @@ The record schema (as the model returns it, before audit):
       "anchor": str,        # a verbatim sentence copied from the final answer
       "conclusion": str,    # the proposition the anchor asserts, in one sentence
       "rule": [{"title": str, "url": str}],                    # authority relied on
-      "evidenceFor": [{"doc": str, "pinpoint": str, "quote": str}],      # doc = manifest label, e.g. "D01"
+      "evidenceFor": [{"doc": str, "pinpoint": str, "quote": str}],      # doc = handle, e.g. "F1"
       "evidenceAgainst": [{"doc": str, "pinpoint": str, "quote": str}],
       "alternatives": [{"position": str, "whyRejected": str, "evidenceRef": str}],
       "weighting": str,
@@ -25,10 +25,12 @@ The record schema (as the model returns it, before audit):
 After audit_decision_records: `rule` entries whose url doesn't resolve have url=None,
 verified=False (kept as plain text, never shipped as a clickable link — same posture as the
 Cite Gate); `evidenceFor`/`evidenceAgainst` entries get `docId` (resolved case-document id, or
-None) and `verified` (docId resolved AND, if a quote was given, the quote is actually in that
-document's/the retrieved pool's text). Nothing is silently dropped from evidence — an
-unverifiable item is informative (it shows what the model could not itself substantiate) — but
-`rule` links are dropped to a bare title, exactly like the Cite Gate does for the answer itself.
+None), `doc` rewritten to the exhibit's real file name (never the model's raw handle/id — see
+"Fix: the file ID shows instead of the file name"), and `verified` (docId resolved AND, if a
+quote was given, the quote is actually in that document's/the retrieved pool's text). Nothing is
+silently dropped from evidence — an unverifiable item is informative (it shows what the model
+could not itself substantiate) — but `rule` links are dropped to a bare title, exactly like the
+Cite Gate does for the answer itself.
 """
 
 from __future__ import annotations
@@ -47,6 +49,11 @@ from legal_citations import (
 
 _MAX_RECORDS = 8
 _DOC_LABEL_PREFIX_RE = re.compile(r"^([A-Za-z]{1,4}\d{1,4}(?:\.\d+)?)\b")
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _looks_like_uuid(text: str) -> bool:
+    return bool(_UUID_RE.match((text or "").strip()))
 
 
 @dataclass
@@ -77,12 +84,19 @@ def case_document_text_corpus(case_documents: Optional[List[dict]]) -> str:
 
 
 def case_document_labels(
-    case_documents: Optional[List[dict]], manifest: Optional[List[dict]]
+    case_documents: Optional[List[dict]],
+    manifest: Optional[List[dict]],
+    handles: Optional[Dict[str, str]] = None,
 ) -> List[Tuple[str, str]]:
-    """(label, id) pairs an evidence reference's `doc` field might match: every attached
-    exhibit's manifest name in full, plus — for the "D07_Interview_..." bundle-document naming
-    convention this product's benchmarks use — the short code alone ("D07"), so a model that
-    writes `"doc": "D07"` resolves to the same document as one that writes the full filename.
+    """(label, id) pairs an evidence reference's `doc` field might match: the document's
+    per-session handle (e.g. "F1", see the_server.py's doc_handle_by_id — what the model is
+    actually shown in its prompts now), every attached exhibit's manifest name in full, plus —
+    for the "D07_Interview_..." bundle-document naming convention this product's benchmarks
+    use — the short code alone ("D07"), so a model that writes `"doc": "D07"` resolves to the
+    same document as one that writes the full filename. The raw id itself is also matched as a
+    defensive fallback (an older session, or a model that ignores the handle instruction) — it
+    is never what's shown back to a user; resolve_doc_label's exact-match-first pass means a
+    handle like "F1" is never mistaken for a manifest name that happens to start with "F1".
     Falls back to case_documents (name/id) when no manifest was supplied."""
     pairs: List[Tuple[str, str]] = []
     source = manifest if manifest else (case_documents or [])
@@ -93,10 +107,13 @@ def case_document_labels(
         name = m.get("name") or ""
         if not doc_id or not name:
             continue
+        if handles and str(doc_id) in handles:
+            pairs.append((handles[str(doc_id)], doc_id))
         pairs.append((name, doc_id))
         short = _DOC_LABEL_PREFIX_RE.match(name)
         if short:
             pairs.append((short.group(1), doc_id))
+        pairs.append((str(doc_id), doc_id))
     return pairs
 
 
@@ -124,8 +141,13 @@ def _normalize_anchor(text: str) -> str:
 
 
 def _audit_evidence(
-    items: Any, labels: List[Tuple[str, str]], corpus: str, stats: DecisionAuditStats
+    items: Any,
+    labels: List[Tuple[str, str]],
+    corpus: str,
+    stats: DecisionAuditStats,
+    names: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
+    names = names or {}
     audited: List[dict] = []
     for e in items or []:
         if not isinstance(e, dict):
@@ -145,9 +167,17 @@ def _audit_evidence(
             stats.evidence_verified += 1
         else:
             stats.evidence_unverified += 1
+        # `doc` is what the UI shows as the source — always the resolved file name, never the
+        # model's raw label (a handle, or a leaked UUID). A UUID-shaped label that failed to
+        # resolve is masked to "Document" rather than shown raw (see the file-ID-shown-instead-
+        # of-name fix); a non-UUID label that failed to resolve (a genuine typo) is kept as-is
+        # so it's still informative for debugging.
+        display_doc = names.get(str(doc_id)) if doc_id else None
+        if not display_doc:
+            display_doc = "Document" if _looks_like_uuid(doc_label) else doc_label
         audited.append(
             {
-                "doc": doc_label,
+                "doc": display_doc,
                 "docId": doc_id,
                 "pinpoint": e.get("pinpoint") or "",
                 "quote": quote or None,
@@ -163,6 +193,7 @@ def audit_decision_records(
     search_results,
     case_documents: Optional[List[dict]],
     manifest: Optional[List[dict]],
+    handles: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[dict], DecisionAuditStats]:
     """Verify a batch of model-produced decision records:
       - `anchor` must be a verbatim (whitespace-normalized) substring of the actual answer —
@@ -185,7 +216,12 @@ def audit_decision_records(
     corpus = " ".join(
         c for c in (collect_tool_result_text_corpus(search_results), case_document_text_corpus(case_documents)) if c
     )
-    labels = case_document_labels(case_documents, manifest)
+    labels = case_document_labels(case_documents, manifest, handles)
+    names = {
+        str(m.get("id")): m.get("name")
+        for m in (manifest if manifest else (case_documents or []))
+        if isinstance(m, dict) and m.get("id") and m.get("name")
+    }
 
     out: List[dict] = []
     for rec in records[:_MAX_RECORDS]:
@@ -217,8 +253,8 @@ def audit_decision_records(
                 "anchor": anchor,
                 "conclusion": str(rec.get("conclusion") or "").strip(),
                 "rule": rule_out,
-                "evidenceFor": _audit_evidence(rec.get("evidenceFor"), labels, corpus, stats),
-                "evidenceAgainst": _audit_evidence(rec.get("evidenceAgainst"), labels, corpus, stats),
+                "evidenceFor": _audit_evidence(rec.get("evidenceFor"), labels, corpus, stats, names),
+                "evidenceAgainst": _audit_evidence(rec.get("evidenceAgainst"), labels, corpus, stats, names),
                 "alternatives": [
                     {
                         "position": str(a.get("position") or "").strip(),
@@ -251,10 +287,12 @@ Produce 3-6 decision records — one per CONSEQUENTIAL or CONTESTED conclusion i
                                 the EXACT resolved url already used in the answer for that
                                 authority — never a new or guessed url
   "evidenceFor": [{"doc": string, "pinpoint": string, "quote": string}],
-                                doc = the exhibit's short label as it appears in the case file
-                                (e.g. "D01"); pinpoint = paragraph/part/item; quote = a short
-                                VERBATIM phrase from that document if you are quoting it
-                                (omit quote if you are paraphrasing)
+                                doc = the exhibit's handle as it appears in the case file (e.g.
+                                "F1") — never its id; pinpoint = paragraph/part/item; quote = a
+                                short phrase copied VERBATIM from that document's SOURCE
+                                EXCERPTS below, character-for-character (omit quote if you are
+                                paraphrasing, or if no SOURCE EXCERPTS were given for that
+                                document — a sentence from your own answer is not evidence)
   "evidenceAgainst": [...],    same shape — evidence that cuts against the conclusion, if any
   "alternatives": [{"position": string, "whyRejected": string, "evidenceRef": string}],
                                 a different reading of the same facts/law that was considered and
