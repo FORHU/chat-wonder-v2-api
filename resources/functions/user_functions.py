@@ -298,13 +298,41 @@ def search_jurisprudence(
 
 
 def search_republic_acts(query: str = None, limit: int = 5, year: int = None) -> dict:
-    """Semantic search over Philippine Republic Acts via juris.ph MCP."""
+    """Semantic search over Philippine Republic Acts via juris.ph MCP.
+
+    Acronyms ("VAWC", "IPRA") and RA-number formats ("RA 9262" vs "R.A. No. 9262" vs "9262")
+    are expanded before the query reaches juris.ph — see ph_legal_query.plan_ra_query and
+    FORHU/chat-wonder-v2-api#75. The cache key is built from the expanded query set, not the
+    raw input, so two spellings that expand to the same set (e.g. "vawc" vs "VAWC") share a
+    cache entry.
+    """
+    from ph_legal_query import RaSearchPlan, document_number, plan_ra_query
+
     query = (query or "").strip()
     if not query:
         return {"success": False, "error": "query is required"}
 
     limit = max(1, min(int(limit or 5), 20))
-    cache_key = hashlib.md5(f"ra:{query}:{limit}:{year}".encode()).hexdigest()
+    plan: RaSearchPlan = plan_ra_query(query)
+
+    if plan.kind == "unindexed":
+        return {
+            "success": True,
+            "query": query,
+            "limit": limit,
+            "total_results": 0,
+            "results": [],
+            "note": (
+                f"{plan.label} isn't searchable here yet — juris.ph only indexes Republic Acts "
+                "and Supreme Court decisions, not Executive Orders, Presidential Decrees, "
+                "Administrative Orders or Memorandum Orders/Circulars. Try searching by topic, "
+                "or by the Republic Act that amends it, if any."
+            ),
+            "search_type": "unindexed",
+            "cached": False,
+        }
+
+    cache_key = hashlib.md5(f"ra:{'|'.join(plan.queries)}:{limit}:{year}".encode()).hexdigest()
     if cache_key in _search_cache:
         cached = _search_cache[cache_key]
         if time.time() - cached["timestamp"] < CACHE_TTL_SECONDS:
@@ -313,20 +341,30 @@ def search_republic_acts(query: str = None, limit: int = 5, year: int = None) ->
             return out
         del _search_cache[cache_key]
 
-    args = {"query": query, "limit": limit}
-    if year is not None:
-        args["year"] = int(year)
+    def _run(q: str) -> list:
+        args = {"query": q, "limit": limit}
+        if year is not None:
+            args["year"] = int(year)
+        payload = _juris_call("search_republic_acts", args)
+        return _normalize_search_results(payload.get("results") or [], "republic_act")
 
     try:
-        payload = _juris_call("search_republic_acts", args)
-        results = _normalize_search_results(payload.get("results") or [], "republic_act")
+        if len(plan.queries) == 1:
+            results = _run(plan.queries[0])
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=len(plan.queries)) as pool:
+                batches = [f.result() for f in [pool.submit(_run, q) for q in plan.queries]]
+            results = _merge_ra_results(batches, plan.ra_number, limit)
+
         result = {
             "success": True,
             "query": query,
             "limit": limit,
             "total_results": len(results),
             "results": results,
-            "note": payload.get("note"),
+            "note": None,
             "search_type": "juris_mcp",
             "cached": False,
         }
@@ -338,6 +376,28 @@ def search_republic_acts(query: str = None, limit: int = 5, year: int = None) ->
             "error": str(e),
             "message": f"Republic Act search failed: {e}",
         }
+
+
+def _merge_ra_results(batches: list, ra_number, limit: int) -> list:
+    """Combines several search_republic_acts query variants into one list, deduplicated by id.
+    The act with the exact RA number goes first — semantic search can rank it well behind
+    amending acts that merely cite it — otherwise the best relevance score wins."""
+    from ph_legal_query import document_number
+
+    seen: set = set()
+    merged = []
+    for batch in batches:
+        for item in batch:
+            if item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            merged.append(item)
+
+    if ra_number:
+        exact = [it for it in merged if document_number(it.get("ra_number")) == ra_number]
+        rest = [it for it in merged if document_number(it.get("ra_number")) != ra_number]
+        return (exact + rest)[:limit]
+    return sorted(merged, key=lambda it: it.get("score", 0.0), reverse=True)[:limit]
 
 
 def get_case(
@@ -703,12 +763,23 @@ def case_law_grep_judgment(slug: str = None, pattern: str = None, case_insensiti
 
 
 def legislation_search(query: str = None, type: str = None, year: int = None, fulltext: bool = False, limit: int = 20) -> dict:
-    """Search UK Acts and Statutory Instruments via the UK Legal MCP."""
+    """Search UK Acts and Statutory Instruments via the UK Legal MCP.
+
+    A recognised short form ("HRA", "PACE", "DPA") is expanded to the Act's full title before
+    the query is sent — uk-legal-mcp.fly.dev's search only matches close to the literal title,
+    so the acronym alone returns nothing. See uk_legal_query.plan_uk_legislation_query and
+    FORHU/chat-wonder-v2-api#94.
+    """
+    from uk_legal_query import plan_uk_legislation_query, prefer_exact_ref
+
     query = (str(query).strip() if query is not None else "")
     if not query:
         return {"success": False, "error": "query is required"}
+
+    plan = plan_uk_legislation_query(query)
+
     args = {}
-    args["query"] = query
+    args["query"] = plan.query
     if type is not None:
         args["type"] = str(type)
     if year is not None:
@@ -723,7 +794,9 @@ def legislation_search(query: str = None, type: str = None, year: int = None, fu
         if rows is not None:
             from uk_legal_mcp.scoring import fill_missing_scores
 
-            fill_missing_scores(rows, query)
+            fill_missing_scores(rows, plan.query)
+            if plan.ref is not None:
+                rows[:] = prefer_exact_ref(rows, plan.ref)
         return {"success": True, **payload}
     except Exception as e:
         return {"success": False, "error": str(e), "message": f"legislation_search failed: {e}"}
