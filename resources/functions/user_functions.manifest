@@ -446,6 +446,24 @@
           "case_number": {
             "type": "string",
             "description": "Docket/case number. Left blank in the draft if omitted."
+          },
+          "authorities": {
+            "type": "array",
+            "description": "Verified case law / Republic Acts to cite in the argument, already fetched via search_jurisprudence, get_case, search_republic_acts, or get_republic_act earlier in this conversation. Pass every citation exactly as returned by those tools — never type one from memory. Omit entirely if no research was done; the draft will then argue the grounds without inventing citations.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "citation": {
+                  "type": "string",
+                  "description": "The citation exactly as returned by the research tool, e.g. 'Heirs of Malate v. Gamboa, G.R. No. 170338, Dec. 8, 2010' or 'Republic Act No. 8791, Sec. 43'."
+                },
+                "proposition": {
+                  "type": "string",
+                  "description": "The point this authority supports, in your own words (e.g. 'a mortgagee in good faith is protected despite a defect in the mortgagor's title')."
+                }
+              },
+              "required": ["citation", "proposition"]
+            }
           }
         },
         "required": [
@@ -1887,6 +1905,24 @@
             "type": "string",
             "enum": ["docx", "pdf"],
             "description": "Output format. Defaults to 'docx'. Use 'pdf' if the user asks for a PDF."
+          },
+          "authorities": {
+            "type": "array",
+            "description": "Verified case law / legislation to cite, already fetched via case_law_search, judgment_get_header, judgment_get_paragraph, legislation_search, legislation_get_section, or citations_resolve earlier in this conversation. Pass every citation exactly as returned by those tools (OSCOLA form via citations_format_oscola where available) — never type one from memory. Omit entirely if no research was done; the draft will then be limited to CPR rules and practice directions, as before.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "citation": {
+                  "type": "string",
+                  "description": "The citation exactly as returned by the research tool, e.g. 'De Bank Haycocks v ADP RPO UK Ltd [2024] EWCA Civ 1291' or 'Consumer Rights Act 2015, s 62'."
+                },
+                "proposition": {
+                  "type": "string",
+                  "description": "The point this authority supports, in your own words."
+                }
+              },
+              "required": ["citation", "proposition"]
+            }
           }
         },
         "required": [

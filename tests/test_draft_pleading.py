@@ -91,6 +91,37 @@ class DraftPleadingTests(unittest.TestCase):
         # actual document, not describe what it should contain.
         self.assertIn("Never respond with a description", system_content)
 
+    def test_no_authorities_forbids_inventing_a_citation(self):
+        """#73: with no verified research handed in, the drafter must not cite from memory."""
+        fake = _FakeClient(DRAFTED_TEXT)
+        with patch("openai.OpenAI", return_value=fake):
+            uf.draft_pleading(pleading_type="Motion to Dismiss", case_facts="Facts.", grounds="Grounds.")
+        user_content = next(m["content"] for m in fake.calls[0]["messages"] if m["role"] == "user")
+        self.assertIn("Never invent a case name, citation, or statutory section from memory", user_content)
+
+    def test_authorities_are_passed_verbatim_into_the_prompt(self):
+        """#73: verified citations fetched earlier in the conversation must reach the drafting
+        prompt exactly as given, with an instruction not to cite anything outside that list."""
+        fake = _FakeClient(DRAFTED_TEXT)
+        with patch("openai.OpenAI", return_value=fake):
+            uf.draft_pleading(
+                pleading_type="Opposition",
+                case_facts="Facts.",
+                grounds="Grounds.",
+                authorities=[
+                    {"citation": "Heirs of Malate v. Gamboa, G.R. No. 170338, Dec. 8, 2010", "proposition": "a mortgagee in good faith is protected"},
+                ],
+            )
+        user_content = next(m["content"] for m in fake.calls[0]["messages"] if m["role"] == "user")
+        self.assertIn("Heirs of Malate v. Gamboa, G.R. No. 170338, Dec. 8, 2010", user_content)
+        self.assertIn("a mortgagee in good faith is protected", user_content)
+        self.assertIn("Do not cite any case, statute, or provision that is not in that list", user_content)
+
+    def test_manifest_declares_authorities_field_on_draft_pleading(self):
+        tool = next(x["function"] for x in srv._context.all_fun_manifest if x["function"]["name"] == "draft_pleading")
+        self.assertIn("authorities", tool["parameters"]["properties"])
+        self.assertNotIn("authorities", tool["parameters"]["required"])
+
     def test_optional_fields_default_to_blanks_not_omitted(self):
         fake = _FakeClient(DRAFTED_TEXT)
         with patch("openai.OpenAI", return_value=fake):
