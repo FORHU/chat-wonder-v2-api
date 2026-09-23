@@ -153,6 +153,13 @@ class ChatState:
         self.pending_session_id: Optional[str] = None
         self.pending_tools: Optional[list] = None
         self.pending_addendum: Optional[str] = None
+        # Reply-language pinned for this session once established — see
+        # prepare_chat_messages. langid misclassifies both short queries
+        # ("uk law" -> Indonesian) and English legal citations ("De Bank
+        # Haycocks v ADP RPO UK Ltd [2024] EWCA Civ 1291" -> Slovenian), so
+        # re-running it every turn let a single bad classification hijack the
+        # whole conversation's reply language.
+        self.language: Optional[str] = None
 
     def __getstate__(self):
         """Exclude the live OpenAI client from pickling — it wraps open sockets/threads and
@@ -1255,13 +1262,34 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
         prevs = state.summary
 
     context = ("\n\n[Past Conversation]\n" + prevs) if prevs else ""
-    language, _ = langid.classify(query)
-    # langid is unreliable on short queries: e.g. "uk law" classifies as 'id' (Indonesian),
-    # producing an Indonesian answer for an English UK-law question. legal_uk serves
-    # English-language UK jurisdictions, so don't let a short/noisy guess override that
-    # unless there's enough text for the detector to have a real signal.
-    if persona == "legal_uk" and len(query.split()) < 5:
-        language = "en"
+    if state.language:
+        # Language already established for this session — don't let a fresh,
+        # potentially-noisy per-message classification override it. The
+        # instruction below still tells the model to honor an explicit
+        # in-query request to switch languages.
+        language = state.language
+    else:
+        # langid.classify() picks whichever of ~97 languages scores highest
+        # with no margin check, so short queries ("uk law" -> Indonesian) and
+        # English text full of proper nouns/citations ("De Bank Haycocks v
+        # ADP RPO UK Ltd [2024] EWCA Civ 1291" -> Slovenian) can easily
+        # outscore English by a hair. langid.rank() exposes every language's
+        # score for the same input, so we only trust a non-English result
+        # when it clears English by a wide margin — a genuine non-English
+        # message (e.g. a French sentence) beats English by 80+, while these
+        # false positives beat it by 1-2. Default to English unless a
+        # non-English result is unambiguous: measured false positives top
+        # out around a margin of 2, genuine non-English messages start
+        # around 20 — 15 sits in the gap with headroom on both sides.
+        ranked = langid.rank(query)
+        top_lang, top_score = ranked[0]
+        en_score = dict(ranked).get("en", float("-inf"))
+        NON_ENGLISH_MARGIN = 15.0
+        if top_lang != "en" and (top_score - en_score) > NON_ENGLISH_MARGIN:
+            language = top_lang
+        else:
+            language = "en"
+        state.language = language
 
     system_content = ""
     if addendum_override:
