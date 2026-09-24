@@ -103,5 +103,22 @@ class PrefillTests(unittest.TestCase):
         self.assertEqual(self._prefill("draft_pleading_uk", {"authorities": mine}, [dict(SECTION_8)])["authorities"], mine)
 
 
+class EveryTraceSiteIsCoveredTests(unittest.TestCase):
+    """Legal personas run on the Responses-API chain in legal_responses_chain.py, not only the
+    loops in the_server.py. Every place that traces a proposed tool call must fill authorities
+    first, or the tracer shows the model's raw (empty) arguments."""
+
+    def test_every_proposed_tool_call_trace_is_preceded_by_the_prefill(self):
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for name in ("the_server.py", "legal_responses_chain.py"):
+            lines = (root / name).read_text(encoding="utf-8").splitlines()
+            sites = [i for i, ln in enumerate(lines) if "Proposed tool call:" in ln]
+            self.assertTrue(sites, f"no trace sites found in {name}")
+            for i in sites:
+                window = "\n".join(lines[max(0, i - 6):i])
+                self.assertIn("_prefill_uk_pleading_authorities", window, f"{name}:{i + 1} traces a proposed call without the prefill")
+
+
 if __name__ == "__main__":
     unittest.main()

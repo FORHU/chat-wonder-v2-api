@@ -190,6 +190,7 @@ def run_function_chain_responses(
         _summarize_tool_result,
         broadcast_trace,
         execute_function_call,
+        _prefill_uk_pleading_authorities,
     )
 
     available_manifest = to_responses_tools(tools if tools is not None else _context.fun_manifest)
@@ -261,6 +262,7 @@ def run_function_chain_responses(
             )
 
         if function_call:
+            _prefill_uk_pleading_authorities(function_call, session_id)
             _tool_desc = next(
                 (t["description"] for t in available_manifest if t["name"] == function_call["name"]), ""
             )
@@ -433,6 +435,7 @@ async def streaming_run_function_chain_responses(
         _trace_label_for_call,
         broadcast_trace,
         execute_function_call,
+        _prefill_uk_pleading_authorities,
     )
 
     available_manifest = to_responses_tools(tools if tools is not None else _context.fun_manifest)
@@ -548,6 +551,7 @@ async def streaming_run_function_chain_responses(
             await asyncio.sleep(0)
 
         if function_call:
+            _prefill_uk_pleading_authorities(function_call, session_id)
             _tool_desc = next(
                 (t["description"] for t in available_manifest if t["name"] == function_call["name"]), ""
             )
