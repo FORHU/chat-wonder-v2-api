@@ -26,6 +26,7 @@ import tiktoken
 import langid
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query
+from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -322,6 +323,14 @@ async def trace_stream():
 
 class ChatRequest(BaseModel):
     user_input: str = ""
+    # Locale the reply should be written in ("en", "tl", "ko"), decided upstream by
+    # ilovelawyer-api's Jev triage and passed in rather than guessed here. When absent we fall
+    # back to langid on the query, which is unreliable on legal text: "uk law" classifies as
+    # Indonesian, "CPR 15.4 defence deadline" as French, "reclusion perpetua bail" as Indonesian.
+    # Because the detected locale becomes a hard instruction to the model ("always respond in the
+    # `{language}`-locale language", with zero-tolerance language-mixing rules in the legal
+    # prompts), a bad guess produces a confidently wrong-language answer rather than a small slip.
+    reply_language: Optional[str] = None
     user_history_select: Optional[str] = None
     session_id: Optional[str] = None
     document_context: Optional[str] = None
@@ -1255,13 +1264,22 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
         prevs = state.summary
 
     context = ("\n\n[Past Conversation]\n" + prevs) if prevs else ""
-    language, _ = langid.classify(query)
-    # langid is unreliable on short queries: e.g. "uk law" classifies as 'id' (Indonesian),
-    # producing an Indonesian answer for an English UK-law question. legal_uk serves
-    # English-language UK jurisdictions, so don't let a short/noisy guess override that
-    # unless there's enough text for the detector to have a real signal.
-    if persona == "legal_uk" and len(query.split()) < 5:
-        language = "en"
+    # Caller-supplied locale wins: ilovelawyer-api resolves it from the same Jev call that does
+    # urgency/intent triage, and falls back to the tenant default when Jev is unsure, so by the
+    # time it arrives here it is a decision rather than a guess. langid stays as the fallback for
+    # callers that send nothing (the cosmetics/garment personas, /chat used directly, older
+    # clients).
+    supplied = (getattr(state, "reply_language", None) or "").strip().lower()
+    if supplied:
+        language = supplied
+    else:
+        language, _ = langid.classify(query)
+        # langid is unreliable on short queries: e.g. "uk law" classifies as 'id' (Indonesian),
+        # producing an Indonesian answer for an English UK-law question. legal_uk serves
+        # English-language UK jurisdictions, so don't let a short/noisy guess override that
+        # unless there's enough text for the detector to have a real signal.
+        if persona == "legal_uk" and len(query.split()) < 5:
+            language = "en"
 
     system_content = ""
     if addendum_override:
@@ -1772,7 +1790,12 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             "stream": True,
             "temperature": temperature if temperature is not None else _context.temperature,
         }
-        if reasoning_effort:
+        # "none" is the sentinel for "no reasoning effort" (see _legal_model_override, which
+        # keys the temperature decision off reasoning_effort != "none"), NOT a value to send:
+        # /v1/chat/completions rejects the parameter outright with "Unrecognized request
+        # argument supplied: reasoning_effort". Sending it made the documented Chat Completions
+        # rollback path (LEGAL_USE_RESPONSES_API=false) fail every legal turn with a 400.
+        if reasoning_effort and reasoning_effort != "none":
             args["reasoning_effort"] = reasoning_effort
         if available_manifest:
             args["tools"] = available_manifest
@@ -2530,7 +2553,12 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             "stream": True,
             "temperature": temperature if temperature is not None else _context.temperature,
         }
-        if reasoning_effort:
+        # "none" is the sentinel for "no reasoning effort" (see _legal_model_override, which
+        # keys the temperature decision off reasoning_effort != "none"), NOT a value to send:
+        # /v1/chat/completions rejects the parameter outright with "Unrecognized request
+        # argument supplied: reasoning_effort". Sending it made the documented Chat Completions
+        # rollback path (LEGAL_USE_RESPONSES_API=false) fail every legal turn with a 400.
+        if reasoning_effort and reasoning_effort != "none":
             args["reasoning_effort"] = reasoning_effort
         if available_manifest:
             args["tools"] = available_manifest
@@ -2813,6 +2841,17 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+@app.get("/healthz")
+async def liveness():
+    """Liveness only: 200 whenever the process is up and the event loop is turning. This is what
+    a container HEALTHCHECK, a load-balancer target check, or an uptime probe should hit — NOT
+    /health below, which is a readiness check that returns 503 whenever a dependency (juris.ph
+    MCP, OpenAI, the DB) is slow or down and would get a perfectly healthy process restarted.
+    Also answers GET / because the staging host was probing it and logging a 404 per probe."""
+    return {"status": "ok", "service": "chat-wonder-v2", "sessions": len(_context.sessions)}
+
+
 @app.get("/health")
 async def health_check():
     """Check connectivity to all dependent services. Returns 200 if healthy, 503 if any critical service is down."""
@@ -2975,6 +3014,9 @@ def chat(request: ChatRequest):
         if session_id and session_id in _context.sessions:
             # Reset per-turn so a document drafted on turn N doesn't leak into turn N+1's response.
             _context.sessions[session_id].last_generated_file_result = {}
+    if session_id and session_id in _context.sessions:
+        # See the websocket path: prepare_chat_messages reads this off `state`.
+        _context.sessions[session_id].reply_language = request.reply_language
     if persona in ("legal", "legal_uk") and session_id and session_id in _context.sessions:
         # Plain `def chat` runs in Starlette's threadpool, not the main event loop, so this
         # thread has none of its own to await onto — asyncio.run gives sync_active_case_documents
@@ -3603,6 +3645,11 @@ async def chat_stream(websocket: WebSocket):
                     # Reset per-turn so a document drafted on turn N doesn't leak into
                     # turn N+1's [GENERATED_FILE_DATA] frame — mirrors /chat's reset.
                     _context.sessions[session_id].last_generated_file_result = {}
+            # Stash the caller's reply locale on the session so prepare_chat_messages can prefer
+            # it over langid — it takes `state`, not the request, and threading a new argument
+            # through both reason loops would touch far more code than this.
+            if session_id and session_id in _context.sessions:
+                _context.sessions[session_id].reply_language = request.reply_language
             if persona in ("legal", "legal_uk"):
                 await sync_active_case_documents(
                     session_id,
@@ -3917,8 +3964,15 @@ async def chat_stream(websocket: WebSocket):
                     "/chat-stream [%s] ERROR after %.2fs session=%s: %s",
                     persona, time.time() - _ws_t_start, session_id, e,
                 )
-                await websocket.send_text(f"[Error] {e}")
-                await websocket.send_text(_context.__END__)
+                # The error may BE the socket dying (keepalive ping timeout, client gone, process
+                # draining for a restart) — sending the [Error] frame then raises a second
+                # ConnectionClosedError from inside the handler and produces the ASGI traceback
+                # instead of this one-line warning. Only report to a client that can still hear it.
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_text(f"[Error] {e}")
+                    await websocket.send_text(_context.__END__)
+                else:
+                    logging.warning("/chat-stream [%s] client already disconnected; reply for session=%s is lost", persona, session_id)
                 end_sent = True
             finally:
                 if not end_sent:
