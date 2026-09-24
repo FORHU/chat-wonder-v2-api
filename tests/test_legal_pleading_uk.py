@@ -71,6 +71,37 @@ class DraftPleadingUkTests(unittest.TestCase):
             uf.draft_pleading_uk(pleading_type="Reply", case_facts="Some facts.", grounds="Some grounds.")
         self.assertIn("Court: [___]", _user_prompt(fake))
 
+    def test_authorities_lift_the_case_law_ban(self):
+        """#73: when verified authorities are supplied, the outright case-law/statute ban
+        must be replaced with an instruction to cite only from that list."""
+        fake = _FakeClient()
+        with patch("openai.OpenAI", return_value=fake):
+            uf.draft_pleading_uk(
+                pleading_type="Particulars of Claim",
+                case_facts="Unpaid invoice.",
+                grounds="Breach of contract.",
+                authorities=[
+                    {"citation": "De Bank Haycocks v ADP RPO UK Ltd [2024] EWCA Civ 1291", "proposition": "unfair dismissal on consultation grounds"},
+                ],
+            )
+        prompt = _user_prompt(fake)
+        self.assertIn("De Bank Haycocks v ADP RPO UK Ltd [2024] EWCA Civ 1291", prompt)
+        self.assertIn("unfair dismissal on consultation grounds", prompt)
+        self.assertNotIn("Do not cite case law or any statute.", prompt)
+        self.assertIn("Do not cite any case law or statute that is not listed under Authorities", prompt)
+
+    def test_no_authorities_keeps_the_existing_cpr_only_ban(self):
+        fake = _FakeClient()
+        with patch("openai.OpenAI", return_value=fake):
+            uf.draft_pleading_uk(pleading_type="Defence", case_facts="Facts.", grounds="Grounds.")
+        prompt = _user_prompt(fake)
+        self.assertIn("Cite only the CPR rules and practice directions named above. Do not cite case law or any statute.", prompt)
+
+    def test_manifest_declares_authorities_field_on_draft_pleading_uk(self):
+        tool = next(x["function"] for x in srv._context.all_fun_manifest if x["function"]["name"] == "draft_pleading_uk")
+        self.assertIn("authorities", tool["parameters"]["properties"])
+        self.assertNotIn("authorities", tool["parameters"]["required"])
+
 
 class UkPleadingWiringTests(unittest.TestCase):
     @staticmethod

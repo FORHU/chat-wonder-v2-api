@@ -1678,6 +1678,7 @@ def draft_pleading_uk(
     claim_number: str = None,
     party_role: str = None,
     format: str = "docx",
+    authorities: list = None,
     **kwargs,
 ) -> dict:
     """Draft a complete statement of case or similar court document for England and Wales, in full prose."""
@@ -1696,6 +1697,18 @@ def draft_pleading_uk(
         f"\n- Relief sought: {relief_sought}" if relief_sought
         else "\n- Relief sought: not specified — infer the standard claim or order sought for this document type from the grounds given."
     )
+    authorities_block, _ = _format_authorities_block(authorities)
+    if authorities:
+        citation_scope = (
+            "Cite the CPR rules and practice directions named above, plus the case law and legislation "
+            "listed under Authorities above, exactly as given there. Do not cite any case law or statute "
+            "that is not listed under Authorities — if a point needs an authority you don't have, leave it "
+            "unsupported rather than naming a case or section from memory."
+        )
+    else:
+        citation_scope = (
+            "Cite only the CPR rules and practice directions named above. Do not cite case law or any statute."
+        )
 
     prompt = f"""Draft a complete {pleading_type} for civil proceedings in England and Wales, ready to file.
 
@@ -1704,7 +1717,7 @@ def draft_pleading_uk(
 - Title of proceedings: {case_title}
 - Party this document is for: {party_role}{responding_to_block}
 - Facts: {case_facts}
-- Grounds: {grounds}{relief_block}
+- Grounds: {grounds}{relief_block}{authorities_block}
 
 Write the full document now — not an outline, not a summary of what it should say. Follow this layout:
 1. Heading: the name of the court (if none given, use "IN THE COUNTY COURT AT [___]" or "IN THE HIGH COURT OF JUSTICE, KING'S BENCH DIVISION" as suits the claim), the claim number, the title of the proceedings with each party and their role (Claimant / Defendant), and the title of this document.
@@ -1716,7 +1729,7 @@ Write the full document now — not an outline, not a summary of what it should 
 4. Statement of truth (CPR Part 22 and PD 22), in these words: "I believe that the facts stated in [this / these] [name of document, in lower case, e.g. these particulars of claim, this defence] are true. I understand that proceedings for contempt of court may be brought against anyone who makes, or causes to be made, a false statement in a document verified by a statement of truth without an honest belief in its truth." Follow with a signature line, printed name, position (e.g. Claimant) and date.
 5. Finish with the date and the party's name and address for service (leave blanks if not supplied).
 
-Cite only the CPR rules and practice directions named above. Do not cite case law or any statute. If interest is claimed but the user gave no rate, start date or legal basis, write those as [___] — never state a rate or a statutory basis the user did not give. Do not add alternative causes of action or heads of loss the user did not raise. Leave a blank [___] for anything not supplied — never make up a fact, date, name or amount."""
+{citation_scope} If interest is claimed but the user gave no rate, start date or legal basis, write those as [___] — never state a rate or a statutory basis the user did not give. Do not add alternative causes of action or heads of loss the user did not raise. Leave a blank [___] for anything not supplied — never make up a fact, date, name or amount."""
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     try:
@@ -2363,6 +2376,44 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
         return {"success": False, "error": str(e)}
 
 
+def _format_authorities_block(authorities: list) -> tuple[str, str]:
+    """Render a caller-supplied authorities list into a prompt section plus a citation instruction.
+
+    `authorities` is expected to hold {"citation": ..., "proposition": ...} dicts already fetched by
+    a research tool earlier in the conversation (see draft_pleading's docstring/manifest) — this only
+    formats them, it never invents or looks anything up.
+    """
+    if not authorities:
+        return "", (
+            "No verified authorities were supplied for this draft — argue the grounds from the facts "
+            "and general legal principles without citing a specific case or provision. Never invent a "
+            "case name, citation, or statutory section from memory."
+        )
+    lines = []
+    for a in authorities:
+        if not isinstance(a, dict):
+            continue
+        citation = a.get("citation", "").strip()
+        proposition = a.get("proposition", "").strip()
+        if not citation:
+            continue
+        lines.append(f"- {citation}" + (f" — {proposition}" if proposition else ""))
+    if not lines:
+        return "", (
+            "No verified authorities were supplied for this draft — argue the grounds from the facts "
+            "and general legal principles without citing a specific case or provision. Never invent a "
+            "case name, citation, or statutory section from memory."
+        )
+    block = "\n- Authorities (already verified — cite exactly as given, do not alter):\n" + "\n".join(lines)
+    instruction = (
+        "Weave the Authorities listed above into the argument to support the propositions they're paired "
+        "with, citing each exactly as given. Do not cite any case, statute, or provision that is not in "
+        "that list — if a point would benefit from an authority you don't have, argue it on the facts "
+        "and general principles instead of naming one from memory."
+    )
+    return block, instruction
+
+
 def draft_pleading(
     pleading_type: str,
     case_facts: str,
@@ -2373,6 +2424,7 @@ def draft_pleading(
     case_title: str = None,
     case_number: str = None,
     format: str = "markdown",
+    authorities: list = None,
     **kwargs,
 ) -> dict:
     """Draft a complete Philippine court pleading in full prose.
@@ -2401,6 +2453,7 @@ def draft_pleading(
         f"\n- Relief sought: {relief_sought}" if relief_sought
         else "\n- Relief sought: not specified — infer the standard prayer appropriate to this pleading type from the grounds given."
     )
+    authorities_block, citation_instruction = _format_authorities_block(authorities)
 
     prompt = f"""Draft a complete Philippine {pleading_type}, ready to file.
 
@@ -2408,7 +2461,7 @@ def draft_pleading(
 - Case: {case_title}
 - Case No.: {case_number}{responding_to_block}
 - Facts: {case_facts}
-- Grounds: {grounds}{relief_block}
+- Grounds: {grounds}{relief_block}{authorities_block}
 
 Write the full pleading text now — not an outline, not a summary of what it should say. Expand the grounds above into properly developed legal argument in numbered paragraphs, applying the facts to the applicable law/rules. Include:
 1. Caption block (court, parties, case number, pleading title, formatted as a PH pleading)
@@ -2417,6 +2470,8 @@ Write the full pleading text now — not an outline, not a summary of what it sh
 4. Prayer/WHEREFORE clause requesting the relief sought
 5. Verification and Certification Against Forum Shopping block (standard boilerplate, leave signature/notary details blank)
 6. Signature block for counsel (leave name/roll number/address blank)
+
+{citation_instruction}
 
 Leave blanks (___) only for information that was not provided above — never leave the argument itself as a placeholder or description."""
 

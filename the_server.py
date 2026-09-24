@@ -38,6 +38,7 @@ import s3_storage
 from juris_mcp.client import get_client as get_juris_mcp_client
 from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from uk_legal_mcp import urls as uk_urls
+from uk_legal_mcp.authorities import authorities_from_pool as uk_authorities_from_pool
 from legal_citations import apply_legal_citation_pipeline, select_related_cases
 from legal_fact_boost import (
     append_critical_doctrine_guards,
@@ -1500,6 +1501,49 @@ def _build_case_document_injection(state) -> str:
 _DOCUMENT_TOOLS = ("generate_legal_document", "draft_pleading", "generate_legal_document_uk", "draft_pleading_uk")
 
 
+def _derive_uk_pleading_authorities(session_id: str) -> list:
+    state = _context.sessions.get(session_id)
+    return uk_authorities_from_pool(getattr(state, "last_search_legal_results", None))
+
+
+def _prefill_uk_pleading_authorities(function_call: dict, session_id: str) -> None:
+    """Fill an empty `authorities` on a proposed draft_pleading_uk call from the session's
+    fetched sources, before the trace shows the call — so the trace shows the real arguments."""
+    if function_call.get("name") != "draft_pleading_uk" or not session_id:
+        return
+    try:
+        args = json.loads(function_call.get("arguments") or "{}")
+    except Exception:
+        return
+    _pool_n = len(getattr(_context.sessions.get(session_id), "last_search_legal_results", None) or [])
+    logging.info(
+        "prefill_uk_authorities: model_sent=%d pool=%d session=%s",
+        len(args.get("authorities") or []) if isinstance(args, dict) else -1, _pool_n, session_id,
+    )
+    if not isinstance(args, dict) or args.get("authorities"):
+        return
+    derived = _derive_uk_pleading_authorities(session_id)
+    if not derived:
+        _pool = getattr(_context.sessions.get(session_id), "last_search_legal_results", None) or []
+        broadcast_trace(
+            "control",
+            f"No fetched sources to fill `authorities` from: this session's research pool has {len(_pool)} "
+            "entries, none of them a legislation section or judgment the model opened.",
+            session_id,
+            summary="The server looked for sources to pass into the draft and found none.",
+        )
+        return
+    args["authorities"] = derived
+    function_call["arguments"] = json.dumps(args, ensure_ascii=False)
+    broadcast_trace(
+        "control",
+        "Filled `authorities` from this session's fetched sources (the model left it empty):\n"
+        + "\n".join(f"- {a['citation']}" for a in derived),
+        session_id,
+        summary="The model left the authorities list empty, so the server passed in the sources it had already fetched.",
+    )
+
+
 def execute_function_call(function_call: dict, session_id: str = None):
     func_name = function_call.get("name")
     try:
@@ -1554,6 +1598,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
         if _cached_case_document is not None:
             result = {"success": True, "partial": False, **_cached_case_document}
         else:
+            if func_name == "draft_pleading_uk" and session_id and not func_args.get("authorities"):
+                _derived = _derive_uk_pleading_authorities(session_id)
+                if _derived:
+                    func_args["authorities"] = _derived
             result = globals()[func_name](**func_args)
         _LEGAL_RESULT_TOOLS = {
             "search_jurisprudence",
@@ -1861,6 +1909,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             broadcast_trace("cognition", f"Reasoning: {_xai_reason}", session_id,
                 summary=f"In the AI's own words, it explained its decision: \"{_xai_reason}\"")
 
+        _prefill_uk_pleading_authorities(function_call, session_id)
         if function_call["name"]:
             _tool_desc = next((t['function'].get('description', '') for t in available_manifest if t['function']['name'] == function_call['name']), '')
             _why_lines = [f"Proposed tool call: `{function_call['name']}`"]
@@ -2659,6 +2708,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
                 summary=f"In the AI's own words, it explained its decision: \"{_xai_reason}\"")
             await asyncio.sleep(0)
 
+        _prefill_uk_pleading_authorities(function_call, session_id)
         if function_call["name"]:
             _tool_desc = next((t['function'].get('description', '') for t in available_manifest if t['function']['name'] == function_call['name']), '')
             _why_lines = [f"Proposed tool call: `{function_call['name']}`"]
