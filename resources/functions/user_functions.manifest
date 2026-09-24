@@ -1875,7 +1875,7 @@
           },
           "grounds": {
             "type": "string",
-            "description": "The claim or defence to be advanced, as a summary — this tool expands it into full, properly developed paragraphs. Do not pre-write the full text yourself; give the substance and let the tool draft it."
+            "description": "The claim or defence to be advanced, as a plain-language summary — this tool expands it into full, properly developed paragraphs. Do not pre-write the full text yourself; give the substance and let the tool draft it. Do NOT put case or statute citations here — every authority goes in `authorities`, otherwise it is unverified."
           },
           "relief_sought": {
             "type": "string",
