@@ -358,6 +358,18 @@ class ChatRequest(BaseModel):
     # It always sends the plain "[legal ai]" text tag regardless of jurisdiction; this field
     # is what actually distinguishes a UK request from the PH default.
     jurisdiction: Optional[str] = None
+    # ilovelawyer-api sets this on a case chat turn that asks for a strategy map — the only way to
+    # tell: its MINDMAP_RULE (appended to every case turn's user_input) itself says "mind map", so
+    # matching user_input would fire on every case turn. Gates _generate_mind_map.
+    mind_map_requested: Optional[bool] = None
+    # Plain-text case summary (findings, key dates, strategy, document names; ≤ ~6k chars) sent
+    # with a map request, so the map is grounded in the case and not only in this one answer.
+    # Best-effort on the API side — may be absent even when mind_map_requested is set.
+    case_mind_map_context: Optional[str] = None
+    # Skip the legal verify→refine self-check for this turn. For one-shot structured calls
+    # (ilovelawyer-api's document-built case mind map), whose reply is JSON rather than an answer
+    # a lawyer reads: auditing it for quotations and contradictions only adds a rewrite round.
+    skip_legal_verify: Optional[bool] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -758,8 +770,8 @@ _AUDIO_OVERVIEW_TRIGGER_RE = re.compile(r"audio overview", re.IGNORECASE)
 
 
 def _wants_audio_overview(user_input: str) -> bool:
-    """Gates the extra _generate_audio_overview_script call below — unlike timeline/mindMap
-    (folded into the always-on _generate_structured_data call since they're cheap), a 20-30
+    """Gates the extra _generate_audio_overview_script call below — unlike the timeline
+    (folded into the always-on _generate_structured_data call since it's cheap), a 20-30
     turn podcast script is expensive enough that it must NOT run on every legal turn. Only
     ilovelawyer-app's hidden Audio Overview trigger message matches this."""
     return bool(_AUDIO_OVERVIEW_TRIGGER_RE.search(user_input or ""))
@@ -830,28 +842,17 @@ def _generate_audio_overview_script(legal_response: str, state) -> dict | None:
 
 
 def _generate_structured_data(legal_response: str, state) -> dict | None:
-    """Second lightweight LLM call to produce TIMELINE and MINDMAP from the completed legal analysis."""
+    """Second lightweight LLM call to produce the TIMELINE from the completed legal analysis.
+
+    It used to build the mind map too, on every legal turn — ilovelawyer-api saved each one, so
+    any chat reply quietly replaced the case's map. The map now has its own generator
+    (_generate_mind_map), run only on turns that ask for one, sent as [MINDMAP_DATA]."""
     try:
         prompt = (
             "You are a legal UI data generator. Based on the legal analysis below, "
-            "return ONLY a JSON object with two keys: 'timeline' and 'mindMap'.\n\n"
+            "return ONLY a JSON object with one key: 'timeline'.\n\n"
             "timeline: array of 3–6 concrete legal steps the user should take.\n"
             "Each item: {\"title\": str, \"description\": str, \"status\": \"pending\", \"requires_previous\": bool}\n\n"
-            "mindMap: tree rooted at the core legal issue, at least 2 levels deep — "
-            "don't just label the branches, populate them with the actual specifics "
-            "from the analysis below.\n"
-            "Shape: {\"id\": \"root\", \"label\": str, \"isRoot\": true, \"children\": [{\"id\": str, \"label\": str, \"description\": str, \"children\": [...]}]}\n"
-            "description (required on every non-root node): 1-3 sentences of the actual "
-            "reasoning/evidence for that node — the specific facts, citations, or analysis "
-            "from the legal analysis below that support it. Markdown allowed. Only leave "
-            "it empty (\"\") when the analysis genuinely has nothing more to say for that "
-            "node than its label.\n"
-            "First-level children (fixed, in this order): Legal Basis, Key Facts, Remedies, Risks, Next Steps. Labels ≤ 6 words.\n"
-            "Each first-level node needs 2-4 second-level children drawn from concrete "
-            "details in the analysis (e.g. under Key Facts: specific events/dates; under "
-            "Risks: specific named risks; under Remedies: specific remedies sought) — "
-            "never leave a first-level node's children empty. Add a third level wherever "
-            "the analysis has that much specific detail to break out further.\n\n"
             f"Legal analysis (first 2500 chars):\n{legal_response[:2500]}"
         )
         t0 = time.time()
@@ -868,6 +869,114 @@ def _generate_structured_data(legal_response: str, state) -> dict | None:
         return json.loads(raw)
     except Exception as e:
         logging.warning("_generate_structured_data failed: %s", e)
+        return None
+
+
+# The five first-level branches every map is built around, by the ids ilovelawyer-api keys them on
+# (MIND_MAP_FIXED_BRANCH_IDS there) — it also recognises them by label, so translated labels work.
+_MIND_MAP_BRANCHES = (
+    ("legalBasis", "Legal Basis"),
+    ("keyFacts", "Key Facts"),
+    ("remedies", "Remedies"),
+    ("risks", "Risks"),
+    ("nextSteps", "Next Steps"),
+)
+# How much of the answer the map reads. The old in-_generate_structured_data map read 2,500 chars,
+# which is why it rarely got past two levels.
+_MIND_MAP_ANSWER_CHARS = 12000
+# ilovelawyer-api's caps (MIND_MAP_LIMITS) are 6 levels / 150 nodes and it trims past them; the
+# prompt aims well below so nothing useful gets trimmed.
+_MIND_MAP_TARGET_MAX_NODES = 80
+_MIND_MAP_MAX_TOKENS = 6000
+
+
+def _mind_map_prompt(legal_response: str, case_context: str | None) -> str:
+    branches = ", ".join(f'"{bid}" ({label})' for bid, label in _MIND_MAP_BRANCHES)
+    context = (
+        # ilovelawyer-api may include the case's current map with the lawyer's own edits marked
+        # (added/reworded/removed by the lawyer) — those are the lawyer's decisions, not facts the
+        # new analysis can overrule.
+        "CASE SUMMARY (from the case file — use it, but the analysis below wins on any conflict, "
+        "except the lawyer's own changes to the current map, which always stand):\n"
+        f"{case_context.strip()}\n\n"
+        if case_context and case_context.strip()
+        else ""
+    )
+    return (
+        "Build the case strategy mind map for the legal analysis below: the lawyer's one-page view "
+        "of what the case rests on, the facts that matter, what is sought, what could go wrong, and "
+        "what to do next — every point specific to this matter.\n\n"
+        "Return ONLY a JSON object: the tree's root.\n"
+        "Shape: {\"id\": \"root\", \"label\": str, \"isRoot\": true, \"children\": [...]}; every node is "
+        "{\"id\": str, \"label\": str, \"description\": str, \"children\": [...]} and may add \"hasMore\": true.\n"
+        f"- Root label: the matter in at most 6 words.\n"
+        f"- Exactly five first-level children, in this order, with these ids (labels may be translated "
+        f"into the analysis's language): {branches}.\n"
+        "- Below them, 2 to 4 children per node, going 3 to 4 levels below the root wherever the "
+        "analysis supports it — e.g. Legal Basis → cause of action → element to prove → the evidence "
+        "for it; Risks → specific risk → mitigation; Next Steps → step → sub-task or deadline.\n"
+        f"- At most {_MIND_MAP_TARGET_MAX_NODES} nodes in total, never more than 6 levels below the root. "
+        "Where a branch could clearly go further but you stopped, set \"hasMore\": true on that node.\n"
+        "- \"label\": at most 8 words, specific (names, dates, sums, sections) — never a generic category.\n"
+        "- \"description\" on every non-root node: 1-3 sentences of the actual reasoning or evidence "
+        "for it, from the analysis. Markdown allowed.\n"
+        "- A branch the analysis says nothing about gets one child naming what is missing (e.g. "
+        "\"No demand letter yet\") rather than invented content. Do not invent parties, amounts, "
+        "dates or authorities.\n"
+        "- Write in the same language as the analysis. \"children\": [] on leaves.\n\n"
+        f"{context}"
+        f"LEGAL ANALYSIS:\n{legal_response[:_MIND_MAP_ANSWER_CHARS]}"
+    )
+
+
+def _mind_map_stats(node: dict, depth: int = 0) -> tuple[int, int]:
+    """(node count, deepest level) of a tree, for the log line."""
+    children = [c for c in (node.get("children") or []) if isinstance(c, dict)]
+    count, deepest = 1, depth
+    for child in children:
+        c, d = _mind_map_stats(child, depth + 1)
+        count += c
+        deepest = max(deepest, d)
+    return count, deepest
+
+
+def _generate_mind_map(legal_response: str, state, case_context: str | None = None) -> dict | None:
+    """The case strategy mind map, as its own lightweight LLM call — run only when ilovelawyer-api
+    marks the turn as a map request (ChatRequest.mind_map_requested) and sent as [MINDMAP_DATA].
+    Reads the whole answer (not the first 2,500 chars) plus the API's case summary when given, and
+    aims 3-4 levels deep. Returns the root node, or None on any failure (a missing map never fails
+    the turn). ilovelawyer-api normalizes the tree (path ids, depth, 6-level/150-node caps)."""
+    try:
+        messages = [
+            {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
+            {"role": "user", "content": _mind_map_prompt(legal_response, case_context)},
+        ]
+        params = dict(model=_context.model, messages=messages, temperature=0.1, max_tokens=_MIND_MAP_MAX_TOKENS)
+        t0 = time.time()
+        try:
+            # JSON mode keeps a long tree parseable. CHAT_MODEL / base_url are configurable, so a
+            # provider that doesn't support it gets the same call without it.
+            completion = state.openai_client.chat.completions.create(**params, response_format={"type": "json_object"})
+        except Exception as e:
+            if "response_format" not in str(e) and "json_object" not in str(e):
+                raise
+            logging.info("_generate_mind_map: response_format unsupported, retrying without it (%s)", e)
+            completion = state.openai_client.chat.completions.create(**params)
+        choice = completion.choices[0]
+        raw = choice.message.content or ""
+        parsed = _extract_json_object(raw)
+        tree = parsed.get("mindMap", parsed) if isinstance(parsed, dict) else None
+        if not isinstance(tree, dict) or not isinstance(tree.get("children"), list) or not tree["children"]:
+            logging.warning("_generate_mind_map: no usable tree (finish_reason=%s, chars=%d)", getattr(choice, "finish_reason", None), len(raw))
+            return None
+        nodes, depth = _mind_map_stats(tree)
+        logging.info(
+            "_generate_mind_map %.2fs nodes=%d depth=%d context=%s finish_reason=%s",
+            time.time() - t0, nodes, depth, bool(case_context and case_context.strip()), getattr(choice, "finish_reason", None),
+        )
+        return tree
+    except Exception as e:
+        logging.warning("_generate_mind_map failed: %s", e)
         return None
 
 
@@ -2876,7 +2985,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     # auto-approves function calls, so /chat and the websocket path never
     # surface a pending_approval response.
     _auto_approval = True
-    if persona in ("legal", "legal_uk"):
+    if persona in ("legal", "legal_uk") and not getattr(state, "skip_legal_verify", False):
         _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
@@ -3852,6 +3961,8 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text("[DONE]")
                 continue
 
+            # Set every turn so one request's opt-out never carries over to the next on this session.
+            state.skip_legal_verify = bool(request.skip_legal_verify)
             try:
                 async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
                     if chunk.startswith("__HITL__"):
@@ -3953,16 +4064,28 @@ async def chat_stream(websocket: WebSocket):
                     "/chat-stream [%s] ttft=%.2fs total=%.2fs chars=%d session=%s",
                     persona, ttft, _ws_t_end - _ws_t_start, len(full_response), session_id,
                 )
-                # Send __END__ now so the client unlocks immediately, then generate
-                # timeline/mindmap in a background thread and send before [DONE].
+                # Send __END__ now so the client unlocks immediately, then generate the
+                # extras (timeline, reasoning, decisions, and the mind map on a map request) in
+                # background threads and send them before [DONE].
                 await websocket.send_text(_context.__END__)
                 end_sent = True
                 # Everything past __END__ is extras on top of an answer the client already has.
                 # A failure here must not become "[Error] ..." (see the except below): ilovelawyer-api
                 # treated any [Error] frame as a failed turn and never persisted the reply, so the
                 # user watched a full answer stream in and then found it gone from history.
+                mind_map_task = None
                 try:
                     if persona in ("legal", "legal_uk") and full_response:
+                        # Only on a map request (see ChatRequest.mind_map_requested). Started first and
+                        # run alongside the other extras, not after them: ilovelawyer-api waits at
+                        # most 60s after __END__ for everything below, and this is the biggest call.
+                        if request.mind_map_requested:
+                            t_mm = time.time()
+                            mind_map_task = asyncio.create_task(
+                                asyncio.to_thread(
+                                    _generate_mind_map, full_response.strip(), state, request.case_mind_map_context
+                                )
+                            )
                         t_sd = time.time()
                         structured = await asyncio.to_thread(_generate_structured_data, full_response.strip(), state)
                         logging.info("_generate_structured_data %.2fs", time.time() - t_sd)
@@ -4002,11 +4125,26 @@ async def chat_stream(websocket: WebSocket):
                             logging.info("_generate_audio_overview_script %.2fs", time.time() - t_ao)
                             if audio_overview:
                                 await websocket.send_text(f"[AUDIO_OVERVIEW_DATA]{json.dumps(audio_overview)}")
+                        if mind_map_task is not None:
+                            mind_map = await mind_map_task
+                            mind_map_task = None
+                            logging.info("_generate_mind_map (wall, alongside other extras) %.2fs", time.time() - t_mm)
+                            if mind_map:
+                                await websocket.send_text(f"[MINDMAP_DATA]{json.dumps(mind_map)}")
                 except Exception as e:
                     logging.warning(
                         "/chat-stream [%s] post-__END__ extras failed after %.2fs session=%s (answer already delivered): %s",
                         persona, time.time() - _ws_t_start, session_id, e,
                     )
+                    # Another extra failed before the map was collected: still deliver the map if it
+                    # finishes — it's the thing this turn asked for.
+                    if mind_map_task is not None:
+                        try:
+                            mind_map = await mind_map_task
+                            if mind_map:
+                                await websocket.send_text(f"[MINDMAP_DATA]{json.dumps(mind_map)}")
+                        except Exception as map_err:
+                            logging.warning("/chat-stream [%s] mind map not delivered: %s", persona, map_err)
                 await websocket.send_text("[DONE]")
 
             except Exception as e:
