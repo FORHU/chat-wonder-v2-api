@@ -791,3 +791,4 @@ venv/Scripts/pythonw.exe
 /.claude
 /.claude
 .claude/settings.local.json
+venv
