@@ -792,3 +792,4 @@ venv/Scripts/pythonw.exe
 /.claude
 .claude/settings.local.json
 venv
+/__pycache__
