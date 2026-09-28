@@ -96,7 +96,7 @@ jobs:
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=${{ env.AWS_REGION }}
+                  AWS_REGION=ap-southeast-1
                   GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                   GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                   OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
@@ -142,7 +142,7 @@ jobs:
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=${{ env.AWS_REGION }}
+                  AWS_REGION=ap-southeast-1
                   COSMETICS_MODEL=${COSMETICS_MODEL}
                   COSMETICS_S3_BUCKET_NAME=${COSMETICS_S3_BUCKET_NAME}
                   COSMETICS_AWS_REGION=${COSMETICS_AWS_REGION}
@@ -159,7 +159,7 @@ jobs:
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=${{ env.AWS_REGION }}
+                  AWS_REGION=ap-southeast-1
                   GARMENTS_API_BASE=${GARMENTS_API_BASE}
                   GARMENTS_API_KEY=${GARMENTS_API_KEY}
                   OUTFITS_API_BASE=${OUTFITS_API_BASE}
