@@ -136,6 +136,10 @@ class ChatState:
         # Every attached document's id/name/category, whether or not its chunks made this
         # turn's cut — see docs/adr/0005. Set by sync_active_case_documents.
         self.case_document_manifest: list = []
+        # The case's Damages & Remedies model from ilovelawyer-api (request.case_damages), replaced
+        # on every legal turn — None when the case has no heads or the turn isn't case-linked. See
+        # _build_case_damages_injection.
+        self.case_damages: Optional[dict] = None
         # Short per-session labels (F1, F2, ...) the model is shown instead of raw case-document
         # UUIDs in any prompt, so it has nothing UUID-shaped to copy into an answer or decision
         # record. Assigned once per document id and kept stable for the session's lifetime — see
@@ -370,6 +374,11 @@ class ChatRequest(BaseModel):
     # (ilovelawyer-api's document-built case mind map), whose reply is JSON rather than an answer
     # a lawyer reads: auditing it for quotations and contradictions only adds a rewrite round.
     skip_legal_verify: Optional[bool] = None
+    # The case's Damages & Remedies model as ilovelawyer-api computes it (damages-compute.ts):
+    # {currency, total, low, high, asOf, provisional, pendingEvidence[], heads:[{category, label,
+    # amount, status, basis, pendingEvidence}]}. Sent on case-linked turns only; injected into the
+    # legal prompt so "how much can we claim?" answers quote the lawyer's own figures.
+    case_damages: Optional[dict] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -679,6 +688,23 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "After the tool completes, respond with exactly 1 warm sentence.\n\n"
             "NEVER show, repeat, or mention any annotation ([FRONTEND_WEATHER:...], [USER_LOCATION:...], "
             "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...], [USER_GENDER:...], [GARMENT_IMAGES:...], [OUTFIT_CATEGORY:...]) in your response — all annotations are internal data only."
+        )
+
+    elif user_input.lower().startswith("[extract]"):
+        # Structured extraction from text the caller already put in the message (ilovelawyer-api's
+        # DamagesExtractSvc sends case documents and asks for a [DAMAGES] block). No tools: there is
+        # nothing to look up, and a legal-persona run would add juris.ph searches, the verify pass
+        # and the post-answer extras for a reply that is only a machine-readable block.
+        persona = "extract"
+        user_input = user_input[9:].strip()
+        filtered_tools = []
+        addendum_override = (
+            "EXTRACTION MODE\n\n"
+            "You extract structured data from the documents included in the message. "
+            "Use only the text of those documents; never outside knowledge, estimates or assumptions. "
+            "Follow the message's instructions for what to extract and how to verify it.\n\n"
+            "OUTPUT: respond with exactly the machine-readable block the message asks for and nothing else — "
+            "no preamble, no explanation, no markdown, no code fences."
         )
 
     elif user_input.lower().startswith("[nav]"):
@@ -1552,6 +1578,73 @@ def _document_context_injection(persona: str, document_context: str) -> str:
             "fashion, ignore this section entirely and do NOT call recommend_cosmetics.]\n"
         )
     return label + document_context
+
+_DAMAGES_CURRENCY_SYMBOL = {"PHP": "₱", "GBP": "£"}
+_DAMAGES_MAX_HEADS = 20
+
+
+def _format_damages_amount(value, currency: str) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "not set"
+    symbol = _DAMAGES_CURRENCY_SYMBOL.get(currency, f"{currency} " if currency else "")
+    text = f"{number:,.2f}".rstrip("0").rstrip(".")
+    return f"{symbol}{text}"
+
+
+def _build_case_damages_injection(model) -> str:
+    """The lawyer's Damages & Remedies model as a prompt block — ilovelawyer-api's damages-compute.ts
+    already did the arithmetic, so the model is told to quote these figures, not redo them. Returns
+    "" for anything malformed or empty, so a bad payload can never break the turn."""
+    if not isinstance(model, dict):
+        return ""
+    heads = model.get("heads")
+    if not isinstance(heads, list) or not heads:
+        return ""
+    currency = str(model.get("currency") or "")
+    money = lambda v: _format_damages_amount(v, currency)  # noqa: E731
+
+    lines = []
+    for head in heads[:_DAMAGES_MAX_HEADS]:
+        if not isinstance(head, dict):
+            continue
+        name = str(head.get("label") or head.get("category") or "Head")
+        category = str(head.get("category") or "")
+        status = str(head.get("status") or "").lower()
+        parts = [f"- {name}" + (f" ({category})" if category and category != name else "") + f": {money(head.get('amount'))}"]
+        details = [d for d in (status, str(head.get("basis") or "")) if d]
+        if head.get("pendingEvidence") and status == "provisional":
+            details.append(f"waiting on {head['pendingEvidence']}")
+        if details:
+            parts.append(f" [{'; '.join(details)}]")
+        lines.append("".join(parts))
+    if not lines:
+        return ""
+
+    total = f"TOTAL: {money(model.get('total'))}"
+    low, high = model.get("low"), model.get("high")
+    if low is not None and high is not None and (low != model.get("total") or high != model.get("total")):
+        total += f" (exposure range {money(low)} to {money(high)})"
+    if model.get("asOf"):
+        total += f", backwages accrued to {model['asOf']}"
+    if model.get("provisional"):
+        pending = model.get("pendingEvidence") or []
+        total += " — PROVISIONAL" + (f" until the {', '.join(str(p) for p in pending)} arrives" if pending else "")
+
+    return (
+        "\n\n[CASE DAMAGES MODEL]\n"
+        "The lawyer's working damages model for this case, as computed by their case workspace:\n"
+        + "\n".join(lines)
+        + f"\n{total}\n"
+        "Rules for these figures:\n"
+        "- When the user asks what the case is worth, what to claim or what to pray for, quote these figures and name them as the lawyer's working model.\n"
+        "- Say which heads are provisional and what they are waiting on. Never present a provisional figure as final.\n"
+        "- Do not recompute, re-add or adjust these amounts yourself, and do not invent amounts for heads that are not listed. "
+        "If the user wants a different figure, say which input (rate, period, percentage, amount) would have to change, and that it is changed in the Damages & Remedies panel.\n"
+        "- Legal bases for a head still need authority you have actually retrieved; the model's figures are not authority.\n"
+    )
+
 
 def _build_case_document_injection(state) -> str:
     """Case-document system-prompt block: a manifest of every attached exhibit (so the model
@@ -3187,6 +3280,7 @@ def chat(request: ChatRequest):
             request.case_document_manifest,
             request.case_document_texts,
         ))
+        _context.sessions[session_id].case_damages = request.case_damages
 
     if persona == "garment" and request.weather:
         try:
@@ -3276,6 +3370,8 @@ def chat(request: ChatRequest):
 
     if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
         addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
+    if persona in ("legal", "legal_uk") and getattr(state, "case_damages", None):
+        addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_damages_injection(state.case_damages)
 
     if not _context.openai_api_key:
         raise HTTPException(status_code=400, detail="API key is required.")
@@ -3817,6 +3913,8 @@ async def chat_stream(websocket: WebSocket):
                     request.case_document_manifest,
                     request.case_document_texts,
                 )
+                if session_id and session_id in _context.sessions:
+                    _context.sessions[session_id].case_damages = request.case_damages
 
             # Inject frontend-provided weather for garment persona
             if persona == "garment" and data.get("weather"):
@@ -3918,6 +4016,8 @@ async def chat_stream(websocket: WebSocket):
 
             if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
+            if persona in ("legal", "legal_uk") and getattr(state, "case_damages", None):
+                addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_damages_injection(state.case_damages)
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
             _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
