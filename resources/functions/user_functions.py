@@ -1412,6 +1412,18 @@ UK_DRAFTER_SYSTEM_PROMPT = (
     "no commentary before or after it, and no markdown code fences."
 )
 
+# Fixed-form documents (letters, declarations, deeds — generate_legal_document_uk) are formatted with a
+# light markdown skin that the docx/PDF exporter understands (see generated-document-renderer.ts): a
+# single-line heading for the title and **bold** for labels and signature names. Court pleadings
+# (draft_pleading_uk) keep the plain CPR-style caption instead, so this note is not added there.
+UK_FIXED_FORM_SYSTEM_PROMPT = UK_DRAFTER_SYSTEM_PROMPT + (
+    " Format the document in Markdown: give it one single-line heading (any level from # to ######, alone "
+    "on its own line with a blank line before and after) for its title, and use **bold** for field labels "
+    "(e.g. **Date:**, **To:**, **Private and Confidential**) and for names in signature blocks. Do not use "
+    "bullet or numbered markdown lists, blockquotes, inline code or code fences — write numbered paragraphs "
+    "as plain text, e.g. '1. ...', not as a markdown list."
+)
+
 UK_DISCLAIMER = (
     "This is an AI-drafted document for England and Wales, prepared from public rules and forms. It has not "
     "been reviewed by a solicitor. Check it against the current rules and get it reviewed before you sign, "
@@ -1452,11 +1464,11 @@ Facts supplied:
 Layout:
 1. Top right corner (PD 32 para 17.2): party on whose behalf the statement is made; the witness's initials and surname; the number of the statement (e.g. 1st); identifying initials and numbers of exhibits; the date the statement was made.
 2. Court name, claim number and title of the proceedings.
-3. Title: WITNESS STATEMENT OF [FULL NAME IN CAPITALS].
+3. Title: a single-line heading "### Witness Statement of [Full Name In Capitals]", alone on its own line.
 4. Opening in the first person (para 18.1): full name, address (or work address), occupation or description, whether a party or an employee of a party, then "state as follows:".
 5. The evidence in consecutively numbered paragraphs, in the first person, each dealing with a distinct point. Say which matters are within the witness's own knowledge and which are information and belief, giving the source of that information. Put all dates and numbers in figures. Refer to each exhibit by its identifying mark.
 6. Statement of truth, in exactly these words: "I believe that the facts stated in this witness statement are true. I understand that proceedings for contempt of court may be brought against anyone who makes, or causes to be made, a false statement in a document verified by a statement of truth without an honest belief in its truth."
-7. Signature line for the witness and a date line.""",
+7. A signature line and a date line, with the witness's printed name in **bold**.""",
     },
     "statutory_declaration": {
         "name": "Statutory Declaration",
@@ -1477,11 +1489,11 @@ Facts supplied:
 - What is being declared: {declaration_facts}
 
 Layout:
-1. Title: STATUTORY DECLARATION.
+1. Title: a single-line heading "### Statutory Declaration", alone on its own line.
 2. Opening: "I, [full name], of [address], [occupation], do solemnly and sincerely declare as follows:"
 3. The facts in consecutively numbered paragraphs, in the first person, stating only what the declarant says is true. If the declaration is about a lost item, cover what it is, when and where it was last seen, what was done to look for it, and that it has not been found.
 4. Closing, in exactly these words: "AND I make this solemn declaration conscientiously believing the same to be true, and by virtue of the provisions of the Statutory Declarations Act 1835."
-5. Signature line for the declarant, then: "Declared at [place] this [day] of [month] [year]" and "Before me," followed by a signature line and blanks for the name and capacity of the person taking the declaration (solicitor, commissioner for oaths or notary public).""",
+5. A signature line for the declarant in **bold**, then: "Declared at [place] this [day] of [month] [year]" and "Before me," followed by a signature line and blanks for the name and capacity of the person taking the declaration (solicitor, commissioner for oaths or notary public).""",
     },
     "letter_before_claim": {
         "name": "Letter Before Claim",
@@ -1509,15 +1521,16 @@ Facts supplied:
 - Days allowed to respond: {response_days}
 
 The letter must:
-1. Be dated, with both addresses and the reference.
-2. Give concise details of the claim: the basis on which it is made and a summary of the facts.
-3. State clearly what the sender wants the recipient to do, and, where money is claimed, how the amount is calculated.
-4. List the key documents the claim relies on and say copies are enclosed or available.
-5. Allow a reasonable time to respond — use the number of days given above, or 14 days if it says [___].
-6. Ask the recipient to reply saying whether the claim is accepted and, if not, why, which facts and parts of the claim are disputed, and whether they intend to make a counterclaim.
-7. Say the sender is willing to consider alternative dispute resolution, such as mediation, if the recipient prefers it.
-8. Say that if there is no satisfactory response the sender may start court proceedings without further notice, will ask the court to take the recipient's non-compliance with the pre-action requirements into account on costs, and will claim interest and costs.
-9. Close formally, with a signature block for the sender.""",
+1. A single-line heading "### Letter Before Claim", alone on its own line.
+2. Be dated, with both addresses and the reference — put the labels **Date:**, **From:**, **To:** and **Reference:** in bold where a value is given for them.
+3. Give concise details of the claim: the basis on which it is made and a summary of the facts.
+4. State clearly what the sender wants the recipient to do, and, where money is claimed, how the amount is calculated.
+5. List the key documents the claim relies on and say copies are enclosed or available.
+6. Allow a reasonable time to respond — use the number of days given above, or 14 days if it says [___].
+7. Ask the recipient to reply saying whether the claim is accepted and, if not, why, which facts and parts of the claim are disputed, and whether they intend to make a counterclaim.
+8. Say the sender is willing to consider alternative dispute resolution, such as mediation, if the recipient prefers it.
+9. Say that if there is no satisfactory response the sender may start court proceedings without further notice, will ask the court to take the recipient's non-compliance with the pre-action requirements into account on costs, and will claim interest and costs.
+10. Close formally, with a signature block for the sender, their printed name in **bold**.""",
     },
     "general_power_of_attorney": {
         "name": "General Power of Attorney",
@@ -1537,10 +1550,10 @@ Facts supplied:
 - Limits on the authority given: {limits_on_authority}
 
 Layout:
-1. Title: GENERAL POWER OF ATTORNEY.
+1. Title: a single-line heading "### General Power of Attorney", alone on its own line.
 2. Operative wording: "THIS GENERAL POWER OF ATTORNEY is made this [day] of [month] [year] by [donor] of [address]. I appoint [attorney] of [address] [jointly / jointly and severally, only if there is more than one attorney] to be my attorney[s] in accordance with section 10 of the Powers of Attorney Act 1971."
 3. If limits on authority were given, add a clause setting them out precisely. If none were given, do NOT add any limit.
-4. Execution as a deed: "Executed as a deed by [donor] in the presence of:" with the donor's signature line and a witness block (signature, full name, address, occupation).""",
+4. Execution as a deed: "Executed as a deed by [donor] in the presence of:" with the donor's printed name in **bold** on the signature line, and a witness block (signature, full name, address, occupation).""",
     },
     "letter_of_authority": {
         "name": "Letter of Authority",
@@ -1560,7 +1573,7 @@ Facts supplied:
 - What the person is authorised to do: {authority_purpose}
 - Valid until: {valid_until}
 
-Include: date; addressee; reference; a clear statement that the writer authorises the named person to act for them for the stated purpose only; the period of validity (or that it lasts until withdrawn in writing); a line that the organisation may deal with the named person and discuss the matter with them; the writer's signature line and printed name.""",
+Include: a single-line heading "### Letter of Authority" alone on its own line; date, addressee and reference, with the labels **Date:**, **To:** and **Reference:** in bold where a value is given for them; a clear statement that the writer authorises the named person to act for them for the stated purpose only; the period of validity (or that it lasts until withdrawn in writing); a line that the organisation may deal with the named person and discuss the matter with them; the writer's signature line and printed name in **bold**.""",
     },
     "loan_agreement": {
         "name": "Loan Agreement",
@@ -1582,7 +1595,7 @@ Facts supplied:
 - Repayment terms: {repayment_terms}
 - Security: {security}
 
-Include clauses for: parties; the loan and the date the money is advanced; interest (say the loan is interest-free if no rate is given); repayment; what happens on late payment or default; that the borrower may repay early without penalty unless the terms above say otherwise; no assignment without written consent; that the agreement is the whole agreement and can be varied only in writing; governing law and the courts of England and Wales. End with signature blocks for both parties, each with a date line.""",
+Start with a single-line heading "### Loan Agreement" alone on its own line. Include clauses for: parties (put the lender's and borrower's names in **bold** where first introduced); the loan and the date the money is advanced; interest (say the loan is interest-free if no rate is given); repayment; what happens on late payment or default; that the borrower may repay early without penalty unless the terms above say otherwise; no assignment without written consent; that the agreement is the whole agreement and can be varied only in writing; governing law and the courts of England and Wales. End with signature blocks for both parties, each with a date line and the signatory's printed name in **bold**.""",
     },
     "deed_poll": {
         "name": "Deed Poll (Change of Name)",
@@ -1602,10 +1615,62 @@ Facts supplied:
 - Date of birth: {date_of_birth}
 
 Layout:
-1. Title: DEED POLL.
+1. Title: a single-line heading "### Deed Poll", alone on its own line.
 2. Opening: "I, [NEW NAME], of [address], [born on date of birth, if given,] formerly known as [FORMER NAME], hereby:"
 3. Numbered declarations: (1) renounce, relinquish and abandon the use of my former name and declare that I have assumed, adopted and determined to take and use from the date of this deed the name [new name] in substitution for it; (2) declare that I shall at all times hereafter in all records, deeds, documents and other writings and in all actions and proceedings, as well as in all dealings and transactions and on all occasions whatsoever, use and subscribe the name [new name] as my name in place of the former name; (3) authorise and require all persons at all times to designate, address and describe me by the name [new name].
-4. "In witness whereof I have signed this deed on [day] of [month] [year]," then "Signed as a deed by the above-named in the presence of:" with the signature line for the person and a witness block (signature, full name, address, occupation).""",
+4. "In witness whereof I have signed this deed on [day] of [month] [year]," then "Signed as a deed by the above-named in the presence of:" with the person's printed name in **bold** on the signature line, and a witness block (signature, full name, address, occupation).""",
+    },
+    "employment_termination_notice": {
+        "name": "Notice of Termination of Employment",
+        "required_fields": [
+            "company_name", "employee_name", "job_title", "termination_reason", "notice_period", "termination_date",
+        ],
+        "optional_fields": [
+            "company_address", "employee_address", "notice_start_date", "during_notice",
+            "appeal_contact_name", "appeal_days", "manager_name", "manager_job_title", "letter_date",
+        ],
+        "next_steps": [
+            "Check the notice period meets or exceeds the statutory minimum under section 86 of the Employment Rights Act 1996, based on the employee's length of service",
+            "Follow a fair dismissal process (investigation, meeting, right to be accompanied) before sending this, particularly for conduct or capability reasons — sending notice without one raises unfair dismissal risk",
+            "Confirm the employment contract actually allows payment in lieu of notice before using it",
+            "Get the letter reviewed by a solicitor or HR professional before it is sent",
+        ],
+        "prompt": """Draft a notice of termination of employment letter for England and Wales.
+
+Facts supplied:
+- Company: {company_name}, {company_address}
+- Employee: {employee_name}, {employee_address}
+- Job title: {job_title}
+- Reason for termination: {termination_reason}
+- Notice period: {notice_period}
+- Notice start date: {notice_start_date}
+- Termination date: {termination_date}
+- During the notice period: {during_notice}
+- Person to receive an appeal: {appeal_contact_name}
+- Days allowed to appeal: {appeal_days}
+- Signed by: {manager_name}, {manager_job_title}
+- Date of letter: {letter_date}
+
+Format the output in Markdown, following this structure exactly:
+1. "**{company_name}**" alone on its own line, then the company address on the following lines, no markdown.
+2. A blank line, then "**Date:** [letter date]".
+3. A blank line, then "**Private and Confidential**".
+4. A blank line, then "**To:** [employee name]" followed by the employee's address on the next line.
+5. A blank line, then the heading "### Notice of Termination of Employment" alone on its own line, on a line by itself with nothing else.
+6. A blank line, then "Dear [employee name],".
+7. Body paragraphs in plain prose, no bullet points, each separated by a blank line, covering in this order:
+   - A formal statement that the company is terminating the employee's employment in the stated job title.
+   - The reason for termination, stated clearly from the facts given — do not embellish or add detail not supplied.
+   - The notice period, referring to the employment contract, stating the notice start date and the termination date. Note that the notice given must be at least the statutory minimum under section 86 of the Employment Rights Act 1996; do not state a specific number of weeks under that section unless the employee's length of service was given in the facts — otherwise refer to the statutory minimum in general terms.
+   - What happens during the notice period, based on the facts given (continuing to work normally, garden leave, or payment in lieu of notice under the contract).
+   - Final pay: salary and other contractual payments due up to the termination date, plus accrued but unused holiday pay, subject to lawful deductions.
+   - A reminder of continuing obligations under the employment contract that survive termination (confidentiality, intellectual property, data protection, post-termination restrictions).
+   - The right to appeal: if a contact and number of days were given, state them; otherwise state that the employee has the right to appeal and should raise it promptly in writing.
+   - A short closing paragraph thanking the employee for their service and wishing them well.
+8. A blank line, then "Yours sincerely,".
+9. A blank line, then "**[manager name]**" alone on its own line, followed by their job title and the company name on their own following lines, no markdown.
+
+Never invent a reason, date, amount or notice period not supplied — write [___] for anything missing.""",
     },
 }
 
@@ -1648,7 +1713,7 @@ def generate_legal_document_uk(document_type: str, details: dict = None, format:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": UK_DRAFTER_SYSTEM_PROMPT},
+                {"role": "system", "content": UK_FIXED_FORM_SYSTEM_PROMPT},
                 {"role": "user", "content": template["prompt"].format(**filled)},
             ],
             temperature=0.2,

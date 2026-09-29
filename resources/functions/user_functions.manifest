@@ -1776,7 +1776,7 @@
     "persona": "legal_uk",
     "function": {
       "name": "generate_legal_document_uk",
-      "description": "Draft a legal document for England and Wales. Supported types: witness_statement, statutory_declaration (including declarations of loss), letter_before_claim, general_power_of_attorney, letter_of_authority, loan_agreement, deed_poll. England and Wales only — Scotland and Northern Ireland are not supported. A downloadable file is produced automatically. If a REQUIRED field is missing, ask the user for it first rather than guessing — but never ask for optional fields: leave them unset unless the user has already given them. If the user asks for a document type not listed, say it is not available rather than substituting another.",
+      "description": "Draft a legal document for England and Wales. Supported types: witness_statement, statutory_declaration (including declarations of loss), letter_before_claim, general_power_of_attorney, letter_of_authority, loan_agreement, deed_poll, employment_termination_notice. England and Wales only — Scotland and Northern Ireland are not supported. A downloadable file is produced automatically. If a REQUIRED field is missing, ask the user for it first rather than guessing — but never ask for optional fields: leave them unset unless the user has already given them. If the user asks for a document type not listed, say it is not available rather than substituting another.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1789,7 +1789,8 @@
               "general_power_of_attorney",
               "letter_of_authority",
               "loan_agreement",
-              "deed_poll"
+              "deed_poll",
+              "employment_termination_notice"
             ],
             "description": "Type of document to draft"
           },
@@ -1844,6 +1845,21 @@
           "new_name": {"type": "string", "description": "deed_poll (required): new name"},
           "address": {"type": "string", "description": "deed_poll (required): address of the person changing their name"},
           "date_of_birth": {"type": "string", "description": "deed_poll (optional): date of birth, if wanted on the deed"},
+          "company_name": {"type": "string", "description": "employment_termination_notice (required): employer's name"},
+          "company_address": {"type": "string", "description": "employment_termination_notice (optional): employer's address"},
+          "employee_name": {"type": "string", "description": "employment_termination_notice (required): employee's full name"},
+          "employee_address": {"type": "string", "description": "employment_termination_notice (optional): employee's address"},
+          "job_title": {"type": "string", "description": "employment_termination_notice (required): employee's job title"},
+          "termination_reason": {"type": "string", "description": "employment_termination_notice (required): reason for termination (e.g. redundancy, capability, conduct)"},
+          "notice_period": {"type": "string", "description": "employment_termination_notice (required): notice period being given, e.g. '4 weeks'"},
+          "notice_start_date": {"type": "string", "description": "employment_termination_notice (optional): date the notice period starts"},
+          "termination_date": {"type": "string", "description": "employment_termination_notice (required): date employment ends"},
+          "during_notice": {"type": "string", "description": "employment_termination_notice (optional): what happens during notice — continue working, garden leave, or payment in lieu"},
+          "appeal_contact_name": {"type": "string", "description": "employment_termination_notice (optional): person/role to receive an appeal"},
+          "appeal_days": {"type": "string", "description": "employment_termination_notice (optional): days allowed to appeal"},
+          "manager_name": {"type": "string", "description": "employment_termination_notice (optional): name of the person signing the letter"},
+          "manager_job_title": {"type": "string", "description": "employment_termination_notice (optional): job title of the person signing"},
+          "letter_date": {"type": "string", "description": "employment_termination_notice (optional): date of the letter"},
           "format": {
             "type": "string",
             "enum": ["docx", "pdf"],
