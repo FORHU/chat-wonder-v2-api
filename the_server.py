@@ -690,23 +690,6 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "[SKIN_ANALYSIS:...], [SITEMAP_CONTEXT:...], [USER_GENDER:...], [GARMENT_IMAGES:...], [OUTFIT_CATEGORY:...]) in your response — all annotations are internal data only."
         )
 
-    elif user_input.lower().startswith("[extract]"):
-        # Structured extraction from text the caller already put in the message (ilovelawyer-api's
-        # DamagesExtractSvc sends case documents and asks for a [DAMAGES] block). No tools: there is
-        # nothing to look up, and a legal-persona run would add juris.ph searches, the verify pass
-        # and the post-answer extras for a reply that is only a machine-readable block.
-        persona = "extract"
-        user_input = user_input[9:].strip()
-        filtered_tools = []
-        addendum_override = (
-            "EXTRACTION MODE\n\n"
-            "You extract structured data from the documents included in the message. "
-            "Use only the text of those documents; never outside knowledge, estimates or assumptions. "
-            "Follow the message's instructions for what to extract and how to verify it.\n\n"
-            "OUTPUT: respond with exactly the machine-readable block the message asks for and nothing else — "
-            "no preamble, no explanation, no markdown, no code fences."
-        )
-
     elif user_input.lower().startswith("[nav]"):
         persona = "nav"
         user_input = user_input[5:].strip()
