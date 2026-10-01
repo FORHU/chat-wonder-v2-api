@@ -2689,7 +2689,7 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
     # PH and UK are configured independently via *_PH / *_UK env vars (empty counts as unset).
     reasoning_effort = (
         os.getenv(f"LEGAL_REASONING_EFFORT_{suffix}")
-        or ("high" if use_responses else "none")
+        or ("low" if use_responses else "none")
     )
     # temperature is meaningless/rejected once real reasoning_effort is in play
     # on /v1/responses; only the Chat Completions fallback path uses it.
@@ -2717,7 +2717,7 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
         int(os.getenv("LEGAL_MAX_CHAINS_CEILING", "80")),
     )
     return (
-        os.getenv(f"LEGAL_CHAT_MODEL_{suffix}") or "gpt-5.6-terra",
+        os.getenv(f"LEGAL_CHAT_MODEL_{suffix}") or "gpt-5.6-luna",
         reasoning_effort,
         temperature,
         max_chains,
