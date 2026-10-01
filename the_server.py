@@ -2679,8 +2679,8 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
 
     temperature is NOT included here: confirmed live that gpt-5.6-terra rejects it
     outright on /v1/responses ("Unsupported parameter: 'temperature' is not
-    supported with this model."). LEGAL_TEMPERATURE_PH / LEGAL_TEMPERATURE_UK
-    only apply on the Chat Completions fallback path (LEGAL_USE_RESPONSES_API=false).
+    supported with this model."). LEGAL_TEMPERATURE only applies on the Chat
+    Completions fallback path (LEGAL_USE_RESPONSES_API=false), read directly there.
     """
     if persona not in ("legal", "legal_uk"):
         return None, None, None, None
@@ -2693,9 +2693,7 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
     )
     # temperature is meaningless/rejected once real reasoning_effort is in play
     # on /v1/responses; only the Chat Completions fallback path uses it.
-    temperature = None if (use_responses and reasoning_effort != "none") else float(
-        os.getenv(f"LEGAL_TEMPERATURE_{suffix}") or "0.2"
-    )
+    temperature = None if (use_responses and reasoning_effort != "none") else float(os.getenv("LEGAL_TEMPERATURE", "0.2"))
     # Raised from 12: the case-document diligence instruction (legal_prompt.txt/legal_prompt_uk.txt)
     # now routinely asks the model to fetch manifest-listed exhibits on demand mid-turn,
     # on top of jurisprudence searches — a document-heavy turn needs headroom for both.
