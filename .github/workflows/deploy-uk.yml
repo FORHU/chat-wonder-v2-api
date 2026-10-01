@@ -93,7 +93,6 @@ jobs:
               run: |
                   mkdir -p resources/functions
                   cat > resources/functions/user_functions.env << 'FUNCEOF'
-                  JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
                   AWS_REGION=${{ env.AWS_REGION }}
@@ -141,7 +140,6 @@ jobs:
                   LEGAL_CHAT_MODEL_UK=${{ vars.LEGAL_CHAT_MODEL_UK }}
                   LEGAL_REASONING_EFFORT_PH=${{ vars.LEGAL_REASONING_EFFORT_PH }}
                   LEGAL_REASONING_EFFORT_UK=${{ vars.LEGAL_REASONING_EFFORT_UK }}
-                  JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
                   AWS_REGION=${{ env.AWS_REGION }}
@@ -158,7 +156,6 @@ jobs:
                   ENVEOF
 
                   cat > functions.env << FUNCEOF
-                  JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
                   AWS_REGION=${{ env.AWS_REGION }}
