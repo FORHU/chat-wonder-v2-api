@@ -2,15 +2,15 @@ name: Deploy to EC2 (UK)
 
 # FORHU/chat-wonder-v2-api → the chat-wonder UK host (eu-west-2).
 #
-# Same build as production-deploy.yml, with three differences:
+# Same build as deploy.yml (Singapore), with three differences:
 #   * OIDC instead of AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for the pipeline;
 #   * SSM Run Command instead of ssh-action — the UK host has no SSH port and no
 #     key pair;
 #   * both env files travel through Parameter Store, encrypted, instead of being
 #     written over an SSH session.
 #
-# Runs on every push to main, and on demand. Note that Singapore's pipeline also
-# triggers on push to main, so one merge deploys both regions from the same
+# Runs on every push to staging, and on demand. Note that Singapore's pipeline also
+# triggers on push to staging, so one merge deploys both regions from the same
 # commit; the concurrency group below only serialises the UK side.
 #
 # Images are tagged uk-<sha> in the same ap-southeast-1 registry, so Singapore's
@@ -18,13 +18,13 @@ name: Deploy to EC2 (UK)
 
 on:
     push:
-        branches: [main]
+        branches: [staging]
     workflow_dispatch:
         inputs:
             ref:
                 description: "Branch, tag, or SHA to deploy (ignored on push)"
                 required: true
-                default: main
+                default: staging
             image_tag:
                 description: "Existing image tag to deploy. Leave blank to build from ref."
                 required: false
@@ -48,7 +48,7 @@ jobs:
         name: Build, Push & Deploy (UK)
         # x86_64: the UK chat-wonder host is t3.large.
         runs-on: ubuntu-latest
-        environment: production
+        environment: staging
 
         permissions:
             id-token: write
@@ -96,7 +96,7 @@ jobs:
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=ap-southeast-1
+                  AWS_REGION=${{ env.AWS_REGION }}
                   GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
                   GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
                   OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
@@ -144,7 +144,7 @@ jobs:
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=ap-southeast-1
+                  AWS_REGION=${{ env.AWS_REGION }}
                   COSMETICS_MODEL=${COSMETICS_MODEL}
                   COSMETICS_S3_BUCKET_NAME=${COSMETICS_S3_BUCKET_NAME}
                   COSMETICS_AWS_REGION=${COSMETICS_AWS_REGION}
@@ -161,7 +161,7 @@ jobs:
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=ap-southeast-1
+                  AWS_REGION=${{ env.AWS_REGION }}
                   GARMENTS_API_BASE=${GARMENTS_API_BASE}
                   GARMENTS_API_KEY=${GARMENTS_API_KEY}
                   OUTFITS_API_BASE=${OUTFITS_API_BASE}
