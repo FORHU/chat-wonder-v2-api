@@ -2679,16 +2679,23 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
 
     temperature is NOT included here: confirmed live that gpt-5.6-terra rejects it
     outright on /v1/responses ("Unsupported parameter: 'temperature' is not
-    supported with this model."). LEGAL_TEMPERATURE only applies on the Chat
-    Completions fallback path (LEGAL_USE_RESPONSES_API=false), read directly there.
+    supported with this model."). LEGAL_TEMPERATURE_PH / LEGAL_TEMPERATURE_UK
+    only apply on the Chat Completions fallback path (LEGAL_USE_RESPONSES_API=false).
     """
     if persona not in ("legal", "legal_uk"):
         return None, None, None, None
     use_responses = _legal_use_responses_api()
-    reasoning_effort = os.getenv("LEGAL_REASONING_EFFORT", "high" if use_responses else "none")
+    suffix = "UK" if persona == "legal_uk" else "PH"
+    # PH and UK are configured independently via *_PH / *_UK env vars (empty counts as unset).
+    reasoning_effort = (
+        os.getenv(f"LEGAL_REASONING_EFFORT_{suffix}")
+        or ("high" if use_responses else "none")
+    )
     # temperature is meaningless/rejected once real reasoning_effort is in play
     # on /v1/responses; only the Chat Completions fallback path uses it.
-    temperature = None if (use_responses and reasoning_effort != "none") else float(os.getenv("LEGAL_TEMPERATURE", "0.2"))
+    temperature = None if (use_responses and reasoning_effort != "none") else float(
+        os.getenv(f"LEGAL_TEMPERATURE_{suffix}") or "0.2"
+    )
     # Raised from 12: the case-document diligence instruction (legal_prompt.txt/legal_prompt_uk.txt)
     # now routinely asks the model to fetch manifest-listed exhibits on demand mid-turn,
     # on top of jurisprudence searches — a document-heavy turn needs headroom for both.
@@ -2712,7 +2719,7 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
         int(os.getenv("LEGAL_MAX_CHAINS_CEILING", "80")),
     )
     return (
-        os.getenv("LEGAL_CHAT_MODEL", "gpt-5.6-terra"),
+        os.getenv(f"LEGAL_CHAT_MODEL_{suffix}") or "gpt-5.6-terra",
         reasoning_effort,
         temperature,
         max_chains,

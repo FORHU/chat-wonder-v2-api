@@ -137,8 +137,10 @@ jobs:
                   cat > app.env << ENVEOF
                   OPENAI_API_KEY=${OPENAI_API_KEY}
                   CHAT_MODEL=${{ vars.CHAT_MODEL }}
-                  LEGAL_CHAT_MODEL=${{ vars.LEGAL_CHAT_MODEL }}
-                  LEGAL_REASONING_EFFORT=${{ vars.LEGAL_REASONING_EFFORT }}
+                  LEGAL_CHAT_MODEL_PH=${{ vars.LEGAL_CHAT_MODEL_PH }}
+                  LEGAL_CHAT_MODEL_UK=${{ vars.LEGAL_CHAT_MODEL_UK }}
+                  LEGAL_REASONING_EFFORT_PH=${{ vars.LEGAL_REASONING_EFFORT_PH }}
+                  LEGAL_REASONING_EFFORT_UK=${{ vars.LEGAL_REASONING_EFFORT_UK }}
                   JURIS_MCP_URL=${{ vars.UK_JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
