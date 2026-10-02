@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" xmlns:leg="http://www.legislation.gov.uk/namespaces/legislation" xmlns:ukm="http://www.legislation.gov.uk/namespaces/metadata" xmlns:theme="http://www.legislation.gov.uk/namespaces/theme" xmlns:openSearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:parameters="http://a9.com/-/spec/opensearch/extensions/parameters/1.0/">
+			<id>http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;title=Births%20and%20Deaths%20Registration</id>
+			<link rel="self" type="application/atom+xml" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;title=Births%20and%20Deaths%20Registration"/>
+			
+			<link rel="alternate" type="text/csv" href="http://www.legislation.gov.uk/search/data.csv?type=ukpga&amp;title=Births%20and%20Deaths%20Registration"/>
+			<updated>2026-07-10T23:59:59+01:00</updated>
+			<title>Search Results</title>
+			<openSearch:Query role="request" leg:type="ukpga" leg:title="Births and Deaths Registration"> </openSearch:Query>
+			<openSearch:itemsPerPage>20</openSearch:itemsPerPage>
+			<openSearch:startIndex>1</openSearch:startIndex>
+			<leg:page>1</leg:page>
+			<leg:morePages>1</leg:morePages>
+			<leg:facets>
+								
+								<leg:facetTypes remove="http://www.legislation.gov.uk/title/births%20and%20deaths%20registration/data.feed"><leg:facetType type="UnitedKingdomPublicGeneralAct" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;title=Births%20and%20Deaths%20Registration" value="18"/></leg:facetTypes>
+								<leg:facetYears><leg:facetYear year="1965" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1965&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1957" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1957&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1953" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1953&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1947" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1947&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1934" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1934&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1926" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1926&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1910" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1910&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1901" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1901&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1880" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1880&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1879" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1879&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1874" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1874&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1863" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1863&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1860" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1860&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1858" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1858&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1855" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1855&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1854" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1854&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1837" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1837&amp;title=Births%20and%20Deaths%20Registration" total="1"/><leg:facetYear year="1836" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;year=1836&amp;title=Births%20and%20Deaths%20Registration" total="1"/></leg:facetYears>
+								<leg:facetHundreds/>
+								
+							</leg:facets>
+			<leg:title><leg:and><leg:term>Births</leg:term><leg:term ignored="true">and</leg:term><leg:term>Deaths</leg:term><leg:term>Registration</leg:term></leg:and></leg:title>
+			<openSearch:totalResults>18</openSearch:totalResults>
+			<link rel="first" type="application/atom+xml" href="http://www.legislation.gov.uk/search/data.feed?type=ukpga&amp;title=Births%20and%20Deaths%20Registration"/><entry>
+			<id>http://www.legislation.gov.uk/id/ukpga/1965/49</id>
+			<title>Registration of Births, Deaths and Marriages (Scotland) Act 1965</title>
+			<link rel="self" href="http://www.legislation.gov.uk/id/ukpga/1965/49"/>
+			<link href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30"/>
+			<link rel="alternate" type="application/xml" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.xml" title="XML"/><link rel="alternate" type="application/rdf+xml" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.rdf" title="RDF/XML"/><link rel="alternate" type="application/akn+xml" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.akn" title="AKN"/><link rel="alternate" type="application/xhtml+xml" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.xht" title="HTML snippet"/><link rel="alternate" type="application/akn+xhtml" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.html" title="HTML5"/><link rel="alternate" type="text/html" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.htm" title="Website (XHTML) Default View"/><link rel="alternate" type="text/csv" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.csv" title="CSV"/><link rel="alternate" type="application/pdf" href="http://www.legislation.gov.uk/ukpga/1965/49/2023-11-30/data.pdf" title="PDF"/>
+			<link rel="http://purl.org/dc/terms/tableOfContents" type="application/xml" href="http://www.legislation.gov.uk/ukpga/1965/49/contents" title="Table of Contents"/>
+			<author><name/></author>
+			<updated>2025-03-20T20:30:20+01:00</updated>
+			<published>1965-08-05T00:00:00+01:00</published>
+			<ukm:DocumentMainType Value="UnitedKingdomPublicGeneralAct"/><ukm:Year Value="1965"/><ukm:Number Value="49"/><ukm:ISBN Value="9780105185857"/><ukm:CreationDate Date="1965-08-05"/>
+			
+			
+			<category term="Registration of births"/><category term="Register offices"/><category term="Registration of deaths"/><category term="Registration of marriages"/><category term="Land searches"/>
+			<summary>An Act to make new provision as respects the registration of births, deaths and marriages in Scotland, and as respects the recording of changes of name or surname there, and for purposes connected therewith.</summary>
+		</entry>
+<entry>
+			<id>http://www.legislation.gov.uk/id/ukpga/Eliz2/1-2/20</id>
+			<title>Births and Deaths Registration Act 1953</title>
+			<link rel="self" href="http://www.legislation.gov.uk/id/ukpga/Eliz2/1-2/20"/>
+			<link href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19"/>
+			<link rel="alternate" type="application/xml" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.xml" title="XML"/><link rel="alternate" type="application/rdf+xml" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.rdf" title="RDF/XML"/><link rel="alternate" type="application/akn+xml" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.akn" title="AKN"/><link rel="alternate" type="application/xhtml+xml" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.xht" title="HTML snippet"/><link rel="alternate" type="application/akn+xhtml" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.html" title="HTML5"/><link rel="alternate" type="text/html" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.htm" title="Website (XHTML) Default View"/><link rel="alternate" type="text/csv" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.csv" title="CSV"/><link rel="alternate" type="application/pdf" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/2025-06-19/data.pdf" title="PDF"/>
+			<link rel="http://purl.org/dc/terms/tableOfContents" type="application/xml" href="http://www.legislation.gov.uk/ukpga/Eliz2/1-2/20/contents" title="Table of Contents"/>
+			<author><name/></author>
+			<updated>2025-07-09T12:03:14+01:00</updated>
+			<published>1953-07-14T00:00:00+01:00</published>
+			<ukm:DocumentMainType Value="UnitedKingdomPublicGeneralAct"/><ukm:Year Value="1953"/><ukm:Number Value="20"/><ukm:ISBN Value="9780105173892"/><ukm:AlternativeNumber Category="Regnal" Value="1_and_2_Eliz_2"/><ukm:CreationDate Date="1953-07-14"/>
+			
+			
+			<category term="Registration of deaths"/><category term="Registration of births"/><category term="Death"/>
+			<summary>An Act to consolidate certain enactments relating to the registration of births and deaths in England and Wales with corrections and improvements made under the Consolidation of Enactments (Procedure) Act, 1949.</summary>
+		</entry>
+</feed>

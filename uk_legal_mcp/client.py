@@ -24,6 +24,14 @@ class UkLegalMcpError(McpError):
     """Raised when the UK Legal MCP server returns a JSON-RPC or protocol error."""
 
 
+class UkLegalMcpToolError(UkLegalMcpError):
+    """The tool ran but reported failure (`isError: true`), e.g. legislation.gov.uk's WAF challenging the server.
+
+    The transport succeeded, so mcp_client.unwrap_tool_result hands the error text back as an ordinary payload
+    ({"text": "Internal error: ...", "raw_result": {"isError": true}}). Callers raise this instead of passing
+    that off as a successful result."""
+
+
 class UkLegalMcpClient(McpClient):
     def __init__(self, url: Optional[str] = None, timeout: float = 60.0):
         super().__init__(url=url or os.getenv("UK_LEGAL_MCP_URL") or DEFAULT_URL, timeout=timeout)

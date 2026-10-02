@@ -641,15 +641,59 @@ def get_case_document(
 # UK Legal MCP (uk-legal-mcp.fly.dev) — [legal ai uk] persona. See ADR-0003.
 # ---------------------------------------------------------------------------
 
+def _uk_tool_failure(payload) -> str:
+    """The error text when a tool call came back flagged `isError`, else ''.
+
+    The server answers HTTP 200 and the unwrap in mcp_client hands the error text back as an ordinary result
+    ({"text": "Internal error: ...", "raw_result": {"isError": true}}), so without this check a failed search
+    was reported to the model — and the trace — as `success: true`."""
+    if not isinstance(payload, dict):
+        return ""
+    raw = payload.get("raw_result")
+    if isinstance(raw, dict) and raw.get("isError"):
+        return str(payload.get("text") or "the UK Legal MCP reported an error")[:500]
+    return ""
+
+
 def _uk_call(tool_name: str, arguments: dict) -> dict:
-    """Call one UK Legal MCP tool and unwrap its JSON-RPC result."""
-    from uk_legal_mcp.client import get_client
+    """Call one UK Legal MCP tool and unwrap its JSON-RPC result. Raises UkLegalMcpToolError if the tool failed."""
+    from uk_legal_mcp.client import UkLegalMcpToolError, get_client
 
     t0 = time.perf_counter()
     payload = get_client().call_tool(tool_name, arguments)
     elapsed_ms = (time.perf_counter() - t0) * 1000
     _logger.info("uk_legal_mcp %s elapsed=%.0fms", tool_name, elapsed_ms)
+    failure = _uk_tool_failure(payload)
+    if failure:
+        raise UkLegalMcpToolError(failure)
     return payload if isinstance(payload, dict) else {"data": payload}
+
+
+def _uk_direct_fallback_enabled() -> bool:
+    return os.getenv("UK_LEGISLATION_DIRECT_FALLBACK", "true").strip().lower() not in ("false", "0", "no")
+
+
+def _uk_with_direct_fallback(tool_name: str, arguments: dict, direct_call) -> dict:
+    """The UK Legal MCP first; legislation.gov.uk itself if the MCP fails.
+
+    uk-legal-mcp.fly.dev cannot currently get past legislation.gov.uk's AWS WAF challenge, while our own hosts
+    can (see uk_legal_mcp/direct.py). `direct_call` receives that module and returns the same shape as the MCP.
+    Both failing raises one error naming both reasons. UK_LEGISLATION_DIRECT_FALLBACK=false turns it off."""
+    try:
+        return _uk_call(tool_name, arguments)
+    except Exception as mcp_exc:
+        if not _uk_direct_fallback_enabled():
+            raise
+        _logger.warning("uk_legal_mcp %s failed (%s); trying legislation.gov.uk directly", tool_name, mcp_exc)
+        from uk_legal_mcp import direct as uk_direct
+
+        t0 = time.perf_counter()
+        try:
+            result = direct_call(uk_direct)
+        except Exception as direct_exc:
+            raise RuntimeError(f"{mcp_exc}; direct legislation.gov.uk lookup also failed: {direct_exc}") from direct_exc
+        _logger.info("legislation_direct %s elapsed=%.0fms", tool_name, (time.perf_counter() - t0) * 1000)
+        return {**result, "fallback": uk_direct.SOURCE, "mcp_error": str(mcp_exc)[:300]}
 
 
 def _uk_result_rows(payload: dict):
@@ -789,7 +833,14 @@ def legislation_search(query: str = None, type: str = None, year: int = None, fu
     if limit is not None:
         args["limit"] = int(limit)
     try:
-        payload = _uk_call("legislation_search", args)
+        payload = _uk_with_direct_fallback(
+            "legislation_search",
+            args,
+            lambda d: d.search_legislation(
+                plan.query, type=args.get("type"), year=args.get("year"),
+                fulltext=args.get("fulltext", False), limit=args.get("limit", 20),
+            ),
+        )
         rows = _uk_result_rows(payload)
         if rows is not None:
             from uk_legal_mcp.scoring import fill_missing_scores
@@ -904,7 +955,11 @@ def legislation_get_section(type: str = None, year: int = None, number: int = No
     if max_chars is not None:
         args["max_chars"] = int(max_chars)
     try:
-        payload = _uk_call("legislation_get_section", args)
+        payload = _uk_with_direct_fallback(
+            "legislation_get_section",
+            args,
+            lambda d: d.get_section(type, year, number, section, max_chars=args.get("max_chars", 10000)),
+        )
         return {"success": True, **payload}
     except Exception as e:
         return {"success": False, "error": str(e), "message": f"legislation_get_section failed: {e}"}
