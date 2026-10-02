@@ -162,6 +162,20 @@ def _strip_reason_line(text: str):
     return text, None
 
 
+def _manifest_has_tool(manifest: list, name: Optional[str]) -> bool:
+    """True if `name` is one of the tools offered to the model (Responses or Chat Completions manifest shape)."""
+    if not name:
+        return False
+    return any((t.get("name") or (t.get("function") or {}).get("name")) == name for t in manifest or [])
+
+
+def _tool_choice_for(force: list) -> object:
+    """`tool_choice` for the next model call. `force` is a one-item holder ([name] or [None]) that is emptied when
+    used, so only the first call of a turn is forced and later calls go back to "auto"."""
+    name, force[0] = force[0], None
+    return {"type": "function", "name": name} if name else "auto"
+
+
 def run_function_chain_responses(
     state,
     messages: list,
@@ -174,6 +188,7 @@ def run_function_chain_responses(
     temperature: float = None,
     auto_approval: bool = False,
     verify: Optional[Verifier] = None,
+    force_first_tool: Optional[str] = None,
 ):
     """Legal-persona equivalent of the_server.run_function_chain(), on /v1/responses
     instead of /v1/chat/completions, so real reasoning_effort can be combined
@@ -194,6 +209,8 @@ def run_function_chain_responses(
     )
 
     available_manifest = to_responses_tools(tools if tools is not None else _context.fun_manifest)
+    # Require this tool on the first model call only (see the_server._uk_forced_first_tool).
+    _force_first = [force_first_tool if _manifest_has_tool(available_manifest, force_first_tool) else None]
     input_items = chat_messages_to_input_items(messages)
     funcall_chains = []
     full_response = ""
@@ -211,7 +228,7 @@ def run_function_chain_responses(
             args["reasoning"] = {"effort": reasoning_effort}
         if available_manifest:
             args["tools"] = available_manifest
-            args["tool_choice"] = "auto"
+            args["tool_choice"] = _tool_choice_for(_force_first)
             args["parallel_tool_calls"] = False
         return state.openai_client.responses.create(**args)
 
@@ -419,6 +436,7 @@ async def streaming_run_function_chain_responses(
     temperature: float = None,
     auto_approval: bool = False,
     verify: Optional[Verifier] = None,
+    force_first_tool: Optional[str] = None,
 ):
     """Streaming (async generator) counterpart of run_function_chain_responses,
     structurally mirroring the_server.streaming_run_function_chain -- same
@@ -439,6 +457,8 @@ async def streaming_run_function_chain_responses(
     )
 
     available_manifest = to_responses_tools(tools if tools is not None else _context.fun_manifest)
+    # Require this tool on the first model call only (see the_server._uk_forced_first_tool).
+    _force_first = [force_first_tool if _manifest_has_tool(available_manifest, force_first_tool) else None]
     input_items = chat_messages_to_input_items(messages)
     funcall_chains = []
     full_response = ""
@@ -459,7 +479,7 @@ async def streaming_run_function_chain_responses(
             args["reasoning"] = {"effort": reasoning_effort}
         if available_manifest:
             args["tools"] = available_manifest
-            args["tool_choice"] = "auto"
+            args["tool_choice"] = _tool_choice_for(_force_first)
             args["parallel_tool_calls"] = False
         return state.openai_client.responses.create(**args)
 
