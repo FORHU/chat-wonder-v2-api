@@ -1,6 +1,7 @@
 """legislation_search wired to plan_uk_legislation_query (FORHU/chat-wonder-v2-api#94) —
 _uk_call is mocked, so this checks the query sent and result reordering, not uk-legal-mcp itself."""
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -67,7 +68,9 @@ class LegislationSearchTests(unittest.TestCase):
         self.assertEqual(sent, ["HRA damages claim"])
 
     def test_a_transport_failure_surfaces_as_a_normal_tool_error(self):
-        with patch.object(uf, "_uk_call", side_effect=RuntimeError("uk-legal-mcp unreachable")):
+        # With the legislation.gov.uk fallback off (tests/test_uk_direct_legislation.py covers it on), a service
+        # failure is reported as a failed tool call.
+        with patch.dict(os.environ, {"UK_LEGISLATION_DIRECT_FALLBACK": "false"}),                 patch.object(uf, "_uk_call", side_effect=RuntimeError("uk-legal-mcp unreachable")):
             res = uf.legislation_search(query="HRA", limit=5)
         self.assertFalse(res["success"])
         self.assertIn("error", res)
