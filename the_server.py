@@ -374,6 +374,10 @@ class ChatRequest(BaseModel):
     # (ilovelawyer-api's document-built case mind map), whose reply is JSON rather than an answer
     # a lawyer reads: auditing it for quotations and contradictions only adds a rewrite round.
     skip_legal_verify: Optional[bool] = None
+    # Whether this turn must research before it answers (UK legal persona only; see _uk_forced_first_tool).
+    # None = the server default (UK_REQUIRE_RESEARCH, on). A caller whose turn is not a legal question to be
+    # answered, e.g. a one-shot structured call, sends false to opt out.
+    require_research: Optional[bool] = None
     # The case's Damages & Remedies model as ilovelawyer-api computes it (damages-compute.ts):
     # {currency, total, low, high, asOf, provisional, pendingEvidence[], heads:[{category, label,
     # amount, status, basis, pendingEvidence}]}. Sent on case-linked turns only; injected into the
@@ -2724,6 +2728,33 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
     )
 
 
+UK_RESEARCH_TOOL = "get_legal_recommendation_uk"
+_MIN_WORDS_FOR_REQUIRED_RESEARCH = 6
+
+
+def _uk_forced_first_tool(persona: str, state, query: str, tools) -> Optional[str]:
+    """The tool the first model call of this turn must use, or None to leave the choice to the model.
+
+    The UK persona may only state law it has fetched, but whether it fetched anything was left to the model
+    (tool_choice "auto"). Live, in ~15 turns the model made no legislation search at all, answered from memory and cited
+    nothing; which model and effort were configured changed how often (a detailed fact pattern was researched at
+    low effort, a short personal question only at high). So the first step of a real legal question is required to
+    be the UK research lookup, whatever the model. Later calls are "auto" again, so it still chooses what to fetch.
+
+    Not required for: other personas; turns the caller marked skip_legal_verify (structured one-shot calls);
+    turns where the caller sent require_research=false; very short messages ("thanks"); or if the tool is not offered."""
+    if persona != "legal_uk":
+        return None
+    if os.getenv("UK_REQUIRE_RESEARCH", "true").strip().lower() in ("false", "0", "no"):
+        return None
+    if getattr(state, "skip_legal_verify", False) or getattr(state, "require_research", None) is False:
+        return None
+    if len((query or "").split()) < _MIN_WORDS_FOR_REQUIRED_RESEARCH:
+        return None
+    offered = {(t.get("function") or {}).get("name") or t.get("name") for t in (tools or [])}
+    return UK_RESEARCH_TOOL if UK_RESEARCH_TOOL in offered else None
+
+
 def reason_loop(state, query: str, session_id: str = None, tools: list = None, addendum_override: str = None, persona: str = "auto"):
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override, persona=persona)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
@@ -2737,7 +2768,10 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     if persona in ("legal", "legal_uk"):
         _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
-        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
+        _research = _uk_forced_first_tool(persona, state, query, tools)
+        if _research:
+            logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
+        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
     else:
         result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     _broadcast_turn_confidence(state, session_id)
@@ -3069,7 +3103,10 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     if persona in ("legal", "legal_uk") and not getattr(state, "skip_legal_verify", False):
         _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
-        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
+        _research = _uk_forced_first_tool(persona, state, query, tools)
+        if _research:
+            logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
+        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
     else:
         chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     async for chunk in chain:
@@ -4051,6 +4088,7 @@ async def chat_stream(websocket: WebSocket):
 
             # Set every turn so one request's opt-out never carries over to the next on this session.
             state.skip_legal_verify = bool(request.skip_legal_verify)
+            state.require_research = request.require_research
             try:
                 async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
                     if chunk.startswith("__HITL__"):
