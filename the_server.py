@@ -14,6 +14,7 @@ import subprocess
 import importlib.util
 import logging
 import pickle
+import hmac
 import zipfile
 import tempfile
 import shutil
@@ -25,7 +26,7 @@ import pandas as pd
 import tiktoken
 import langid
 from openai import OpenAI
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query, Header
 from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
@@ -153,6 +154,9 @@ class ChatState:
         self.openai_client = None
         self.last_used: float = time.time()
         self.user_id: Optional[str] = None
+        # Set at the start of every turn from ChatRequest.trace_turn_id (see broadcast_trace).
+        # Read via getattr elsewhere: sessions restored from sessions.pkl predate this field.
+        self.trace_turn_id: Optional[str] = None
         # HITL pending state
         self.pending_function_call: Optional[dict] = None
         self.pending_messages: Optional[list] = None
@@ -233,7 +237,11 @@ _app_event_loop = None  # captured at startup so worker threads can schedule on 
 _metric_counters: dict = {}
 
 def broadcast_trace(event_type: str, text: str, session_id: str = None, summary: str = None):
-    data = json.dumps({"type": event_type, "text": text.strip(), "summary": summary.strip() if summary else None, "session_id": session_id, "ts": time.time()})
+    # Resolved here, not in a ContextVar: this runs from worker threads too, and the session
+    # object already carries every other per-turn field (one turn at a time per session).
+    _state = _context.sessions.get(session_id) if session_id else None
+    turn_id = getattr(_state, "trace_turn_id", None)
+    data = json.dumps({"type": event_type, "text": text.strip(), "summary": summary.strip() if summary else None, "session_id": session_id, "turn_id": turn_id, "ts": time.time()})
     def _put_all():
         for q in list(_trace_queues):
             try:
@@ -322,6 +330,66 @@ async def trace_stream():
                                  "Access-Control-Allow-Origin": "*",
                              })
 
+
+# Event types a customer may see, and the only fields of them that leave the server. `text` is
+# developer-grade (session ids, raw tool output); `summary` is the plain-language explanation
+# that broadcast_trace's callers already write for exactly this purpose. Metric events and
+# anything without a summary are dropped.
+_USER_TRACE_TYPES = frozenset({"request", "cognition", "action", "retrieval", "control", "memory"})
+
+
+def _user_trace_event(raw: str, session_id: str) -> Optional[str]:
+    """Reduces one broadcast_trace payload to the customer-safe shape, or None to drop it."""
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        return None
+    if event.get("session_id") != session_id or event.get("type") not in _USER_TRACE_TYPES:
+        return None
+    summary = event.get("summary")
+    if not summary:
+        return None
+    return json.dumps({"type": event["type"], "summary": summary, "turn_id": event.get("turn_id"), "ts": event.get("ts")})
+
+
+def _require_trace_key(provided: Optional[str]) -> None:
+    """Fails closed: with TRACE_STREAM_API_KEY unset the scoped stream is simply unavailable,
+    rather than open to anyone who can reach this server."""
+    expected = os.getenv("TRACE_STREAM_API_KEY", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Scoped trace stream is not configured.")
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid API key.")
+
+
+@app.get("/trace-stream/{session_id}", summary="Session-scoped, customer-safe trace SSE stream (consumed by ilovelawyer-api)")
+async def scoped_trace_stream(session_id: str, x_api_key: Optional[str] = Header(default=None)):
+    """Unlike the unscoped /trace-stream above, this only yields events for `session_id`, only the
+    summary of each, and requires x-api-key. Clients should wait for the `connected` event before
+    starting the turn they want traced: the subscription is registered when streaming begins."""
+    _require_trace_key(x_api_key)
+
+    async def _generator():
+        q: asyncio.Queue = asyncio.Queue(maxsize=200)
+        _trace_queues.add(q)
+        try:
+            yield "data: {\"type\":\"connected\"}\n\n"
+            while True:
+                try:
+                    raw = await asyncio.wait_for(q.get(), timeout=25)
+                except asyncio.TimeoutError:
+                    yield "data: {\"type\":\"ping\"}\n\n"
+                    continue
+                payload = _user_trace_event(raw, session_id)
+                if payload is not None:
+                    yield f"data: {payload}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _trace_queues.discard(q)
+    return StreamingResponse(_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 # ---------------------------------------------------------------------------
 # Pydantic Models
 # ---------------------------------------------------------------------------
@@ -383,6 +451,11 @@ class ChatRequest(BaseModel):
     # amount, status, basis, pendingEvidence}]}. Sent on case-linked turns only; injected into the
     # legal prompt so "how much can we claim?" answers quote the lawyer's own figures.
     case_damages: Optional[dict] = None
+    # ilovelawyer-api's id for this turn (the user Message it created). Stamped on every trace
+    # event the turn emits so the scoped trace stream can attribute events to a turn and, through
+    # it, to the user who asked — a session id alone cannot, because collaborators on a shared
+    # case share one session. Opaque to chat-wonder; None for callers that don't send it.
+    trace_turn_id: Optional[str] = None
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -3390,6 +3463,8 @@ def chat(request: ChatRequest):
 
     state = _context.sessions[session_id]
     state.last_used = time.time()
+    # Always overwritten, so a caller that stops sending it can't inherit the previous turn's id.
+    state.trace_turn_id = request.trace_turn_id
     if request.user_id:
         state.user_id = request.user_id
 
@@ -3903,6 +3978,7 @@ async def chat_stream(websocket: WebSocket):
 
             state = _context.sessions[session_id]
             state.last_used = time.time()
+            state.trace_turn_id = request.trace_turn_id
             if data.get("user_id"):
                 state.user_id = data["user_id"]
             init_openai_client(state, _context.openai_api_key)
