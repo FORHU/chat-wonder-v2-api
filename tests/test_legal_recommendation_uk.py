@@ -155,6 +155,11 @@ class TraceTextTests(unittest.TestCase):
         self.assertIn("notice period", srv._describe_tool_args(TOOL, json.dumps({"legal_issue": "notice period"})))
         self.assertIn("notice period", srv._trace_label_for_call(TOOL, {"legal_issue": "notice period"}))
 
+    def test_label_keeps_a_long_issue_in_full(self):
+        issue = "How to amend or correct a name discrepancy on a birth certificate, including the evidence needed"
+        self.assertGreater(len(issue), 80)
+        self.assertEqual(srv._trace_label_for_call(TOOL, {"legal_issue": issue}), f"Looking up UK law: {issue}")
+
 
 if __name__ == "__main__":
     unittest.main()
