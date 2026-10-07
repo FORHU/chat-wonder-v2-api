@@ -2522,10 +2522,10 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
             return f"Fetching Republic Act: {ident}" if ident else "Fetching Republic Act"
         if tool_name == "get_legal_recommendation_uk":
             issue = args.get("legal_issue", "")
-            return f"Looking up UK law: {issue[:80]}" if issue else "Looking up UK law"
+            return f"Looking up UK law: {issue}" if issue else "Looking up UK law"
         if tool_name == "get_legal_recommendation":
             issue = args.get("legal_issue", "")
-            return f"Researching: {issue[:80]}" if issue else "Researching"
+            return f"Researching: {issue}" if issue else "Researching"
         if tool_name in ("generate_legal_document_uk", "draft_pleading_uk"):
             doc_type = args.get("document_type") or args.get("pleading_type") or "document"
             return f"Drafting {doc_type}"
