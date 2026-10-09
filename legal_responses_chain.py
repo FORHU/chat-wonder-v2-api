@@ -31,6 +31,22 @@ from typing import List, Optional
 from legal_verify import DRAFT_DISCARD, Verifier, inject_verifier_feedback, verifier_trace_text
 
 
+def create_response(client, **args):
+    """The only place this app calls the Responses API.
+
+    The Responses API stores every response on OpenAI's side unless told not to, and
+    this app sends client documents and case facts through it. store=False is forced
+    here, after the caller's arguments, so no call site can switch it back on. The loop
+    in this module resends the whole conversation on every call (it never uses
+    previous_response_id), so nothing depends on a stored response.
+
+    This does not remove OpenAI's own short-lived abuse-monitoring copy; that needs
+    Zero Data Retention on the OpenAI account. test_responses_store.py fails if a
+    direct responses.create call is added anywhere else.
+    """
+    return client.responses.create(**{**args, "store": False})
+
+
 def to_responses_tools(chat_completions_tools: Optional[list]) -> list:
     """Flatten {"type": "function", "function": {...}} -> Responses tool shape."""
     if not chat_completions_tools:
@@ -230,7 +246,7 @@ def run_function_chain_responses(
             args["tools"] = available_manifest
             args["tool_choice"] = _tool_choice_for(_force_first)
             args["parallel_tool_calls"] = False
-        return state.openai_client.responses.create(**args)
+        return create_response(state.openai_client, **args)
 
     refine_round = 0
     # One extra iteration is reserved for a verify->refine round only: a draft produced
@@ -414,7 +430,7 @@ def run_function_chain_responses(
             }
             if reasoning_effort and reasoning_effort != "none":
                 args["reasoning"] = {"effort": reasoning_effort}
-            forced = state.openai_client.responses.create(**args)
+            forced = create_response(state.openai_client, **args)
             full_response = (forced.output_text or "").strip()
         except Exception as e:
             import logging
@@ -481,7 +497,7 @@ async def streaming_run_function_chain_responses(
             args["tools"] = available_manifest
             args["tool_choice"] = _tool_choice_for(_force_first)
             args["parallel_tool_calls"] = False
-        return state.openai_client.responses.create(**args)
+        return create_response(state.openai_client, **args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
     # on the last research iteration can still be audited and revised, while the
@@ -726,7 +742,7 @@ async def streaming_run_function_chain_responses(
             }
             if reasoning_effort and reasoning_effort != "none":
                 args["reasoning"] = {"effort": reasoning_effort}
-            forced = await asyncio.to_thread(state.openai_client.responses.create, **args)
+            forced = await asyncio.to_thread(create_response, state.openai_client, **args)
             forced_text = (forced.output_text or "").strip()
             if forced_text:
                 full_response = forced_text
