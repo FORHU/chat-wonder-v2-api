@@ -26,6 +26,9 @@ import pandas as pd
 import tiktoken
 import langid
 from openai import OpenAI
+import contextvars
+import llm_usage
+from llm_usage import make_openai_client
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query, Header
 from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
@@ -540,7 +543,7 @@ def init_openai_client(state, api_key, base_url=None):
     params = {}
     if base_url:
         params["base_url"] = base_url
-    state.openai_client = OpenAI(api_key=api_key, **params)
+    state.openai_client = make_openai_client(api_key=api_key, **params)
 
 # ---------------------------------------------------------------------------
 # Persona detection
@@ -2116,6 +2119,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             # argument fragments interleaved into one invalid JSON blob,
             # which fails to parse and makes the model retry forever.
             args["parallel_tool_calls"] = False
+        llm_usage.current().add_pass()
         return state.openai_client.chat.completions.create(**args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
@@ -2275,6 +2279,7 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
         # Force one final tool-free completion from what's already been
         # gathered instead of returning an empty answer.
         try:
+            llm_usage.current().add_pass()
             forced = state.openai_client.chat.completions.create(
                 model=model or _context.model,
                 messages=messages + [{
@@ -2867,7 +2872,9 @@ async def _astream_llm(perform_chat_fn, messages):
         finally:
             loop.call_soon_threadsafe(q.put_nowait, None)
 
-    Thread(target=_run, daemon=True).start()
+    # A plain Thread doesn't inherit ContextVars; run under a copy so this thread's calls land in the turn's usage (#104).
+    _ctx = contextvars.copy_context()
+    Thread(target=lambda: _ctx.run(_run), daemon=True).start()
 
     while True:
         item = await q.get()
@@ -2912,6 +2919,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             # See matching comment in run_function_chain's perform_chat: the
             # streaming tool-call accumulator only tracks one in-flight call.
             args["parallel_tool_calls"] = False
+        llm_usage.current().add_pass()
         return state.openai_client.chat.completions.create(**args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
@@ -3128,6 +3136,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         # Force one final tool-free completion from what's already been
         # gathered instead of yielding an empty answer.
         try:
+            llm_usage.current().add_pass()
             forced = await asyncio.to_thread(
                 state.openai_client.chat.completions.create,
                 model=model or _context.model,
@@ -3350,6 +3359,7 @@ async def get_new_session_id():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+    llm_usage.start_turn()
     _t_start = time.time()
     session_id = request.session_id
     user_input = request.user_input or request.user_history_select or ""
@@ -3535,6 +3545,7 @@ def chat(request: ChatRequest):
 
         logging.info("/chat [stylist/combined] %.2fs session=%s", time.time() - _t_start, session_id)
         return {
+            "usage": llm_usage.current().to_dict(),
             "outfit_reply": _outfit_reply,
             "cosmetics_reply": _cosm_reply,
             "outfit_ids": state.last_outfit_ids_result,
@@ -3571,6 +3582,7 @@ def chat(request: ChatRequest):
             logging.warning(f"[stylist] search_outfits_by_category failed: {_outfit_result.get('error')}")
         logging.info("/chat [stylist/direct] %.2fs session=%s", time.time() - _t_start, session_id)
         return {
+            "usage": llm_usage.current().to_dict(),
             "response": _outfit_reply,
             "outfit_ids": state.last_outfit_ids_result,
             "nav_result": {"target_url": "/ai-recommendation-fashion", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
@@ -3604,6 +3616,7 @@ def chat(request: ChatRequest):
             logging.warning(f"[stylist] search_cosmetics_by_skin_type failed: {_cosm_result.get('error')}")
         logging.info("/chat [stylist/cosmetics-direct] %.2fs session=%s", time.time() - _t_start, session_id)
         return {
+            "usage": llm_usage.current().to_dict(),
             "response": _cosm_reply,
             "cosmetics_ids": state.last_cosmetics_ids_result,
             "nav_result": {"target_url": "/ai-recommendation-cosmetic", "confidence": 1.0, "extracted_entities": None, "system_message": ""},
@@ -3628,6 +3641,7 @@ def chat(request: ChatRequest):
             args_parsed = {}
         logging.info("/chat [hitl:%s] %.2fs session=%s", fc["name"], time.time() - _t_start, session_id)
         return {
+            "usage": llm_usage.current().to_dict(),
             "status": "pending_approval",
             "tool_name": fc["name"],
             "arguments": args_parsed,
@@ -3682,6 +3696,7 @@ def chat(request: ChatRequest):
 
     logging.info("/chat [%s] %.2fs session=%s", persona, time.time() - _t_start, session_id)
     return {
+        "usage": llm_usage.current().to_dict(),
         "response": final_text,
         "lookup": state.lookup,
         "source_metadata": state.source_metadata,
@@ -3701,6 +3716,7 @@ def chat(request: ChatRequest):
 
 @app.post("/approve")
 def approve(request: ApproveRequest):
+    llm_usage.start_turn()
     session_id = request.session_id
     decision = _normalize_hitl_decision(request.decision)
 
@@ -3736,6 +3752,7 @@ def approve(request: ApproveRequest):
     if decision == "rejected":
         _context.sessions[session_id] = state
         return {
+            "usage": llm_usage.current().to_dict(),
             "status": "rejected",
             "response": f"Action '{fc['name']}' was rejected.",
             "hitl_decision": hitl_decision_record,
@@ -3793,6 +3810,7 @@ def approve(request: ApproveRequest):
         except Exception:
             args_parsed = {}
         return {
+            "usage": llm_usage.current().to_dict(),
             "status": "pending_approval",
             "tool_name": new_fc["name"],
             "arguments": args_parsed,
@@ -3814,6 +3832,7 @@ def approve(request: ApproveRequest):
     _context.sessions[session_id] = state
 
     return {
+        "usage": llm_usage.current().to_dict(),
         "status": "completed",
         "response": final_text,
         "hitl_decision": hitl_decision_record,
@@ -3846,6 +3865,15 @@ def hitl_status():
     return {"auto_approval": _context.manual_auto_approval}
 
 
+async def _send_usage(websocket, session_id):
+    """Send this turn's token usage as a {"type":"usage"} frame (#104). Never raises:
+    a failed turn still reports what it spent, and a dead socket must not mask the real error."""
+    try:
+        await websocket.send_text(json.dumps({"type": "usage", "session_id": session_id, "data": llm_usage.current().to_dict()}))
+    except Exception:
+        pass
+
+
 @app.websocket("/chat-stream")
 async def chat_stream(websocket: WebSocket):
     await websocket.accept()
@@ -3859,6 +3887,7 @@ async def chat_stream(websocket: WebSocket):
                 continue
 
             msg_type = data.get("type", "chat")
+            llm_usage.start_turn()
 
             if msg_type == "approve":
                 session_id = data.get("session_id")
@@ -3888,6 +3917,7 @@ async def chat_stream(websocket: WebSocket):
 
                 if decision == "rejected":
                     await websocket.send_text(f"Action '{fc['name']}' was rejected.")
+                    await _send_usage(websocket, session_id)
                     await websocket.send_text(_context.__END__)
                     continue
 
@@ -3964,6 +3994,7 @@ async def chat_stream(websocket: WebSocket):
                         await websocket.send_text(final_text)
                     state.generated.append(final_text)
                 _context.sessions[session_id] = state
+                await _send_usage(websocket, session_id)
                 await websocket.send_text(_context.__END__)
                 continue
 
@@ -4153,11 +4184,13 @@ async def chat_stream(websocket: WebSocket):
                     _context.sessions[session_id] = state
                     await websocket.send_text(system_message)
                     await websocket.send_text(f"[NAV_DATA]{json.dumps(state.last_nav_result)}")
+                    await _send_usage(websocket, session_id)
                     await websocket.send_text(_context.__END__)
                     await websocket.send_text("[DONE]")
                 except Exception as e:
                     logging.warning("/chat-stream [nav] ERROR session=%s: %s", session_id, e)
                     await websocket.send_text("[Error] Navigation failed.")
+                    await _send_usage(websocket, session_id)
                     await websocket.send_text(_context.__END__)
                     await websocket.send_text("[DONE]")
                 continue
@@ -4347,6 +4380,7 @@ async def chat_stream(websocket: WebSocket):
                                 await websocket.send_text(f"[MINDMAP_DATA]{json.dumps(mind_map)}")
                         except Exception as map_err:
                             logging.warning("/chat-stream [%s] mind map not delivered: %s", persona, map_err)
+                await _send_usage(websocket, session_id)
                 await websocket.send_text("[DONE]")
 
             except Exception as e:
@@ -4359,6 +4393,7 @@ async def chat_stream(websocket: WebSocket):
                 # ConnectionClosedError from inside the handler and produces the ASGI traceback
                 # instead of this one-line warning. Only report to a client that can still hear it.
                 if websocket.client_state == WebSocketState.CONNECTED:
+                    await _send_usage(websocket, session_id)
                     await websocket.send_text(f"[Error] {e}")
                     await websocket.send_text(_context.__END__)
                 else:
@@ -4615,13 +4650,14 @@ async def categorize_document(request: CategorizeDocumentRequest):
     extraction pipeline right after text extraction, alongside chunking/embedding. Always
     returns 200 (success: false on failure) so a categorization miss never surfaces as an
     HTTP error to a caller that's treating this as best-effort."""
+    llm_usage.start_turn()
     session_id = getattr(request, "session_id", None)
     broadcast_trace("request", f"Categorize document — file: {request.filename or 'unknown'}", session_id,
         summary=f"Categorizing uploaded document '{request.filename or 'unknown'}'.")
     if not _context.openai_api_key:
-        return {"success": False, "category": None}
+        return {"success": False, "category": None, "usage": llm_usage.current().to_dict()}
     try:
-        client = OpenAI(api_key=_context.openai_api_key)
+        client = make_openai_client(api_key=_context.openai_api_key)
         prompt = (
             "You are categorizing an uploaded legal case document. Based on its content, "
             "return ONLY a JSON object with one key: 'category' — a short (2-5 word) label "
@@ -4648,20 +4684,21 @@ async def categorize_document(request: CategorizeDocumentRequest):
         if not isinstance(category, str) or not category.strip():
             broadcast_trace("cognition", "Categorization failed — no category returned", session_id,
                 summary="The AI did not return a usable category label.")
-            return {"success": False, "category": None}
+            return {"success": False, "category": None, "usage": llm_usage.current().to_dict()}
         broadcast_trace("cognition", f"Category assigned: {category.strip()}", session_id,
             summary=f"Document categorized as '{category.strip()}'.")
-        return {"success": True, "category": category.strip()}
+        return {"success": True, "category": category.strip(), "usage": llm_usage.current().to_dict()}
     except Exception as e:
         logging.warning(f"[Categorize Document] failed: {e}")
         broadcast_trace("cognition", f"Categorization failed — {e}", session_id,
             summary="Categorization failed due to an error.")
-        return {"success": False, "category": None}
+        return {"success": False, "category": None, "usage": llm_usage.current().to_dict()}
 
 
 @app.post("/api/legal/analyze-document")
 async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
     """Download a document from S3, extract its text, and return a structured AI legal analysis."""
+    llm_usage.start_turn()
     s3_key = request.s3_key
     filename = request.filename or os.path.basename(s3_key)
     ext = os.path.splitext(filename)[1].lower()
@@ -4728,7 +4765,7 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
             try:
                 broadcast_trace("action", "Transcribing audio with Whisper...", session_id,
                     summary="Converting audio to text using speech recognition.")
-                client = OpenAI(api_key=_context.openai_api_key)
+                client = make_openai_client(api_key=_context.openai_api_key)
                 with open(local_path, "rb") as audio_file:
                     transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
                 extracted_text = transcription.text
@@ -4744,7 +4781,7 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
                 import base64, mimetypes
                 b64 = base64.b64encode(contents).decode("utf-8")
                 mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext[1:]}"
-                client = OpenAI(api_key=_context.openai_api_key)
+                client = make_openai_client(api_key=_context.openai_api_key)
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": [
@@ -4778,7 +4815,7 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
             try:
                 broadcast_trace("action", "Analysing document content with LLM...", session_id,
                     summary="The AI is reading the document and producing a structured legal analysis.")
-                client = OpenAI(api_key=_context.openai_api_key)
+                client = make_openai_client(api_key=_context.openai_api_key)
                 system_prompt = (
                     "You are an expert Philippine legal document analyst with deep knowledge of Philippine law, "
                     "jurisprudence, and the Civil Code, Revised Penal Code, Labor Code, and Supreme Court decisions. "
@@ -4823,6 +4860,7 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
         file_url = s3_storage.generate_presigned_get(s3_key)
 
         return {
+            "usage": llm_usage.current().to_dict(),
             "success": True,
             "filename": filename,
             "s3_key": s3_key,
@@ -4876,6 +4914,7 @@ async def upload_and_analyze(file: UploadFile = File(...)):
 @app.post("/api/legal/synthesize-documents")
 async def synthesize_documents(request: SynthesizeDocumentsRequest):
     """Cross-document synthesis: takes multiple AI summaries and produces a unified strategic analysis."""
+    llm_usage.start_turn()
     if not request.summaries:
         raise HTTPException(status_code=400, detail="No summaries provided for synthesis.")
     if not _context.openai_api_key:
@@ -4885,7 +4924,7 @@ async def synthesize_documents(request: SynthesizeDocumentsRequest):
     broadcast_trace("request", f"Legal synthesis — {len(request.summaries)} document(s)", session_id,
         summary=f"Starting cross-document synthesis across {len(request.summaries)} document(s).")
 
-    client = OpenAI(api_key=_context.openai_api_key)
+    client = make_openai_client(api_key=_context.openai_api_key)
 
     system_prompt = """
 You are an expert Philippine legal analyst and strategic advisor. The user has uploaded MULTIPLE legal documents.
@@ -4931,7 +4970,7 @@ Be legally precise, referencing Philippine law where applicable. Synthesize — 
         broadcast_trace("cognition", f"Synthesis complete — {len(synthesis)} chars", session_id,
             summary=f"Synthesis complete. The AI produced a {len(synthesis)}-character unified analysis across all documents.")
         logging.info(f"[Synthesize Documents] Synthesis generated for {len(request.summaries)} documents.")
-        return {"success": True, "synthesis": synthesis}
+        return {"success": True, "synthesis": synthesis, "usage": llm_usage.current().to_dict()}
     except Exception as e:
         logging.error(f"[Synthesize Documents] Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate synthesis: {e}")
@@ -5094,7 +5133,7 @@ async def tailor_generate_outfit(
     )
 
     from openai import OpenAI
-    client = OpenAI(api_key=_context.openai_api_key)
+    client = make_openai_client(api_key=_context.openai_api_key)
     try:
         broadcast_trace("action", "Calling gpt-image-1 to render the combined outfit...", None,
             summary="The AI is generating a ghost-mannequin product photo from the garment canvas.")

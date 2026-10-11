@@ -28,6 +28,7 @@ import asyncio
 import json
 from typing import List, Optional
 
+import llm_usage
 from legal_verify import DRAFT_DISCARD, Verifier, inject_verifier_feedback, verifier_trace_text
 
 
@@ -44,7 +45,22 @@ def create_response(client, **args):
     Zero Data Retention on the OpenAI account. test_responses_store.py fails if a
     direct responses.create call is added anywhere else.
     """
-    return client.responses.create(**{**args, "store": False})
+    turn = llm_usage.current()  # captured now: a stream may be consumed on another thread
+    result = client.responses.create(**{**args, "store": False})
+    try:
+        if args.get("stream"):
+            return _tracked_events(result, turn)
+        turn.add(getattr(result, "usage", None), getattr(result, "model", None) or args.get("model"))
+    except Exception:
+        pass
+    return result
+
+
+def _tracked_events(stream, turn):
+    """Pass every event through unchanged, recording usage from response.completed."""
+    for event in stream:
+        llm_usage.record_response_event(turn, event)
+        yield event
 
 
 def to_responses_tools(chat_completions_tools: Optional[list]) -> list:
@@ -246,6 +262,7 @@ def run_function_chain_responses(
             args["tools"] = available_manifest
             args["tool_choice"] = _tool_choice_for(_force_first)
             args["parallel_tool_calls"] = False
+        llm_usage.current().add_pass()
         return create_response(state.openai_client, **args)
 
     refine_round = 0
@@ -430,6 +447,7 @@ def run_function_chain_responses(
             }
             if reasoning_effort and reasoning_effort != "none":
                 args["reasoning"] = {"effort": reasoning_effort}
+            llm_usage.current().add_pass()
             forced = create_response(state.openai_client, **args)
             full_response = (forced.output_text or "").strip()
         except Exception as e:
@@ -497,6 +515,7 @@ async def streaming_run_function_chain_responses(
             args["tools"] = available_manifest
             args["tool_choice"] = _tool_choice_for(_force_first)
             args["parallel_tool_calls"] = False
+        llm_usage.current().add_pass()
         return create_response(state.openai_client, **args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
@@ -742,6 +761,7 @@ async def streaming_run_function_chain_responses(
             }
             if reasoning_effort and reasoning_effort != "none":
                 args["reasoning"] = {"effort": reasoning_effort}
+            llm_usage.current().add_pass()
             forced = await asyncio.to_thread(create_response, state.openai_client, **args)
             forced_text = (forced.output_text or "").strip()
             if forced_text:

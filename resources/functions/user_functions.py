@@ -10,6 +10,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime, date
+from llm_usage import make_openai_client
 
 # Simple in-memory cache with TTL
 _search_cache = {}
@@ -1763,7 +1764,7 @@ def generate_legal_document_uk(document_type: str, details: dict = None, format:
         if not filled.get(field):
             filled[field] = "[___]"
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = make_openai_client(api_key=os.getenv("OPENAI_API_KEY"))
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -1851,7 +1852,7 @@ Write the full document now — not an outline, not a summary of what it should 
 
 {citation_scope} If interest is claimed but the user gave no rate, start date or legal basis, write those as [___] — never state a rate or a statutory basis the user did not give. Do not add alternative causes of action or heads of loss the user did not raise. Leave a blank [___] for anything not supplied — never make up a fact, date, name or amount."""
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = make_openai_client(api_key=os.getenv("OPENAI_API_KEY"))
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -1891,7 +1892,7 @@ def get_legal_recommendation(legal_issue: str, user_context: str = None) -> dict
                     f"{doc.get('type', 'Document')}: {doc.get('title', '')} ({doc.get('url', '')})"
                 )
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = make_openai_client(api_key=os.getenv("OPENAI_API_KEY"))
     context_section = f"\n\nUser's Situation: {user_context}" if user_context else ""
     materials_section = (
         "\n\nRelevant Legal Materials Found:\n" + "\n".join(relevant_materials)
@@ -2002,7 +2003,7 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
             if not api_key:
                 return {"success": False, "error": "OpenAI API key required for audio transcription."}
             try:
-                client = OpenAI(api_key=api_key)
+                client = make_openai_client(api_key=api_key)
                 with open(tmp_path, "rb") as audio_file:
                     transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
                 extracted_text = transcription.text
@@ -2017,7 +2018,7 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
                 import base64, mimetypes
                 b64 = base64.b64encode(contents).decode("utf-8")
                 mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
-                client = OpenAI(api_key=api_key)
+                client = make_openai_client(api_key=api_key)
                 resp = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": [
@@ -2046,7 +2047,7 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
         if not api_key:
             return {"success": False, "error": "OpenAI API key not configured."}
 
-        client = OpenAI(api_key=api_key)
+        client = make_openai_client(api_key=api_key)
         model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 
         system_prompt = (
@@ -2158,7 +2159,7 @@ def _uk_extract_document_text(path: str, fname: str, contents: bytes) -> dict:
         if not api_key:
             return {"error": "OpenAI API key required for audio transcription and image OCR."}
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        client = make_openai_client(api_key=api_key)
         try:
             if ext in (".mp3", ".wav", ".m4a"):
                 with open(path, "rb") as audio_file:
@@ -2246,7 +2247,7 @@ def scan_cosmetic(front_s3_key: str, back_s3_key: str, skin_type: str = "general
     back_s3_key = back_s3_key.lstrip("/")
     logging.info(f"[scan_cosmetic] bucket={cosmetics_bucket} region={cosmetics_region} model={model}")
 
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client(api_key=api_key)
 
     def _ocr_from_s3(s3_key: str, prompt: str) -> str:
         fname = os.path.basename(s3_key)
@@ -2366,7 +2367,7 @@ def match_cosmetics(
         return {"success": False, "error": "OpenAI API key not configured."}
 
     model = os.getenv("COSMETICS_MODEL", "gpt-4o-mini")
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client(api_key=api_key)
 
     skin_type_normalized = (skin_type or "general").lower().strip()
     if skin_type_normalized not in {"oily", "dry", "sensitive", "combination", "general"}:
@@ -2459,7 +2460,7 @@ def generate_legal_document(document_type: str, details: dict = None, format: st
         if field not in filled:
             filled[field] = "N/A"
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = make_openai_client(api_key=os.getenv("OPENAI_API_KEY"))
     try:
         prompt = template["prompt"].format(**filled)
         response = client.chat.completions.create(
@@ -2595,7 +2596,7 @@ Write the full pleading text now — not an outline, not a summary of what it sh
 
 Leave blanks (___) only for information that was not provided above — never leave the argument itself as a placeholder or description."""
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = make_openai_client(api_key=os.getenv("OPENAI_API_KEY"))
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -2843,7 +2844,7 @@ def search_cosmetics_by_skin_type(
     )
 
     model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client(api_key=api_key)
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -3026,7 +3027,7 @@ def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1, weather_j
         f"Curate {n_sets} distinct skincare routine(s) and return the JSON."
     )
 
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client(api_key=api_key)
     model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
     try:
         resp = client.chat.completions.create(
@@ -3749,7 +3750,7 @@ def recommend_garments(
         f"Select {n_sets} distinct outfits and return the JSON."
     )
 
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client(api_key=api_key)
     model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
     try:
         resp = client.chat.completions.create(
@@ -3906,7 +3907,7 @@ def search_outfits_by_category(
     )
 
     model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client(api_key=api_key)
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -3993,7 +3994,7 @@ def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dic
     if loaded_count == 0:
         return {"success": False, "error": "Could not download any garment images."}
 
-    client = OpenAI(api_key=api_key)
+    client = make_openai_client(api_key=api_key)
     try:
         gen = client.images.edit(
             model="gpt-image-1",
