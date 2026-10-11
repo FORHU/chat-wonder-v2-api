@@ -117,5 +117,24 @@ class ChatStreamUsageTests(_Env):
         self.assertEqual(frame["data"]["pass_count"], 1)
 
 
+class AstreamLlmThreadHopTests(unittest.TestCase):
+    """_astream_llm runs the model call on a plain Thread, which does not inherit ContextVars.
+    It must run under a copied context or that call's tokens never reach the turn's usage."""
+
+    def test_call_on_the_worker_thread_lands_in_the_turn(self):
+        def perform_chat(messages):
+            llm_usage.current().add(NS(prompt_tokens=7, completion_tokens=3), "gpt-5.6-luna")
+            yield "chunk"
+
+        async def run():
+            turn = llm_usage.start_turn()
+            out = [c async for c in srv._astream_llm(perform_chat, [])]
+            return turn, out
+
+        turn, out = asyncio.run(run())
+        self.assertEqual(out, ["chunk"])
+        self.assertEqual(turn.to_dict()["total_tokens"], 10)
+
+
 if __name__ == "__main__":
     unittest.main()
