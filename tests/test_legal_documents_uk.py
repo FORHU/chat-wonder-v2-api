@@ -37,6 +37,7 @@ SAMPLE_DETAILS = {
     "letter_of_authority": dict(authoriser_name="Ann Smith", authorised_person="Bob Jones", authority_purpose="Discuss my account"),
     "loan_agreement": dict(lender_name="Ann Smith", borrower_name="Bob Jones", principal_amount="£1,000", repayment_terms="£100 a month"),
     "deed_poll": dict(former_name="Ann Smith", new_name="Ann Jones", address="1 High St, Leeds"),
+    "employment_termination_notice": dict(company_name="Acme Ltd", employee_name="Ann Smith", job_title="Sales Assistant", termination_reason="Redundancy", notice_period="4 weeks", termination_date="30 November 2026"),
 }
 
 
