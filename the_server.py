@@ -3502,11 +3502,14 @@ def chat(request: ChatRequest):
         _concerns  = request.skin_analysis.get("concerns", [])
         _csets     = max(1, min(6, request.csets or 6))
 
+        # Pool threads do not inherit the turn's context, so each job runs under its own copy of it:
+        # their OpenAI calls would otherwise never reach the turn's usage (#104). One copy per job,
+        # because a Context cannot be entered by two threads at once.
         with ThreadPoolExecutor(max_workers=2) as _pool:
-            _f_outfit = _pool.submit(search_outfits_by_category,
+            _f_outfit = _pool.submit(contextvars.copy_context().run, search_outfits_by_category,
                 gender=_gender, meta_categories=_meta,
                 location=request.location, weather=request.weather, sets=_fsets)
-            _f_cosm = _pool.submit(search_cosmetics_by_skin_type,
+            _f_cosm = _pool.submit(contextvars.copy_context().run, search_cosmetics_by_skin_type,
                 skin_type=_skin_type, concerns=_concerns,
                 skin_analysis=request.skin_analysis,
                 weather=request.weather or {}, location=request.location, sets=_csets)
@@ -4302,6 +4305,12 @@ async def chat_stream(websocket: WebSocket):
                 # Send __END__ now so the client unlocks immediately, then generate the
                 # extras (timeline, reasoning, decisions, and the mind map on a map request) in
                 # background threads and send them before [DONE].
+                # A usage frame for the answer goes first. A caller that only wants the answer
+                # (ilovelawyer-api's resolveOnAnswerEnd: mind map expand, case mind map, damages)
+                # closes the socket at __END__, which also stops the extras, so the final frame
+                # before [DONE] would never reach it and its call would go unmeasured. The
+                # final frame still carries the whole turn, extras included, and supersedes this one.
+                await _send_usage(websocket, session_id)
                 await websocket.send_text(_context.__END__)
                 end_sent = True
                 # Everything past __END__ is extras on top of an answer the client already has.

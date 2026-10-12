@@ -90,7 +90,7 @@ class _FakeWS:
 
 
 class ChatStreamUsageTests(_Env):
-    def test_usage_frame_comes_before_done(self):
+    def test_usage_frames_come_before_end_and_before_done(self):
         async def fake_stream(state, user_input, **kw):
             llm_usage.current().add_pass()
             await asyncio.to_thread(_model_call, state)   # a call from a worker thread
@@ -107,10 +107,19 @@ class ChatStreamUsageTests(_Env):
 
         self.assertIn("[DONE]", ws.sent)
         done_at = ws.sent.index("[DONE]")
+        end_at = ws.sent.index("__END__")
         usage_idx = [i for i, t in enumerate(ws.sent) if t.startswith("{") and '"type": "usage"' in t]
-        self.assertEqual(len(usage_idx), 1, ws.sent)
-        self.assertLess(usage_idx[0], done_at)
-        frame = json.loads(ws.sent[usage_idx[0]])
+        self.assertEqual(len(usage_idx), 2, ws.sent)
+        # The first covers the answer and arrives BEFORE __END__, so a caller that closes the socket
+        # at __END__ (resolveOnAnswerEnd) still gets it; the last, before [DONE], is the whole turn.
+        self.assertLess(usage_idx[0], end_at)
+        self.assertGreater(usage_idx[1], end_at)
+        self.assertLess(usage_idx[1], done_at)
+        answer = json.loads(ws.sent[usage_idx[0]])
+        self.assertEqual(answer["session_id"], "s1")
+        self.assertEqual(answer["data"]["call_count"], 1)       # the loop call only: extras not run yet
+        self.assertEqual(answer["data"]["pass_count"], 1)
+        frame = json.loads(ws.sent[usage_idx[1]])
         self.assertEqual(frame["session_id"], "s1")
         self.assertEqual(frame["data"]["call_count"], 2)        # loop call + extra, both counted
         self.assertEqual(frame["data"]["cached_input_tokens"], 80)
