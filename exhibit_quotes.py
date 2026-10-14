@@ -75,6 +75,18 @@ class _Index:
                 break
         return best, exact, best_at
 
+    def dropped_word_window(self, quoted_tokens: List[str]) -> int:
+        """Start index of an exhibit stretch that is the quote plus ONE extra interior word
+        (the quote dropped it: "adjustments fully implemented" for "adjustments were fully
+        implemented"), or -1. Equal-length matches are handled by best_window."""
+        n = len(quoted_tokens)
+        q_stems = [_stem(t) for t in quoted_tokens]
+        for i in range(0, len(self.stems) - n):
+            window = self.stems[i : i + n + 1]
+            if any(window[:k] + window[k + 1 :] == q_stems for k in range(1, n)):
+                return i
+        return -1
+
     def snippet(self, start: int, n: int) -> str:
         return self.norm[self.tokens[start][1] : self.tokens[start + n - 1][2]]
 
@@ -87,9 +99,15 @@ def _near_miss(quoted: str, index: _Index) -> Tuple[bool, str]:
     if all(t in _STOP or len(t) < 4 for t in tokens):
         return False, ""
     score, exact, at = index.best_window(tokens)
-    if exact or score < _NEAR_MISS_SCORE:
+    if exact:
         return False, ""
-    return True, index.snippet(at, len(tokens))
+    if score >= _NEAR_MISS_SCORE:
+        return True, index.snippet(at, len(tokens))
+    if len(tokens) >= 3:
+        dropped = index.dropped_word_window(tokens)
+        if dropped >= 0:
+            return True, index.snippet(dropped, len(tokens) + 1)
+    return False, ""
 
 
 def _prose_segments(text: str):

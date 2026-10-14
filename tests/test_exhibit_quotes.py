@@ -46,6 +46,18 @@ class FindMisquotesTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertIn("handwritten", found[0][1])
 
+    def test_a_quote_that_drops_one_word_of_the_exhibit_is_caught(self):
+        # Live run: "adjustments fully implemented" for Aldred's "These adjustments were fully
+        # implemented from April 2023 onwards" — one interior word dropped inside quote marks.
+        exhibits = EXHIBITS + ["These adjustments were fully implemented from April 2023 onwards and remained in place."]
+        found = find_exhibit_misquotes('It must not assume "adjustments fully implemented" settles it.', exhibits)
+        self.assertEqual(len(found), 1)
+        self.assertIn("adjustments were fully implemented", found[0][1])
+        # the exact wording, and a label that merely shares words with an exhibit, are not flagged
+        self.assertEqual(find_exhibit_misquotes('He said "fully implemented from April 2023 onwards".', exhibits), [])
+        labelled = EXHIBITS + ["unfair dismissal contrary to section 94 of the Employment Rights Act 1996"]
+        self.assertEqual(find_exhibit_misquotes('Columns: "unfair dismissal loss".', labelled), [])
+
     def test_labels_filenames_and_drafted_wording_are_not_claims_about_an_exhibit(self):
         text = (
             'Columns: "Total sought", "unfair dismissal loss" and "single recovery total". '
