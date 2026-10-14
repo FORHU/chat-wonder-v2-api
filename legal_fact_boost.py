@@ -521,32 +521,102 @@ def _guard_cdm_extent(matter: UkMatter, question: str, text: str) -> List[str]:
     return []
 
 
-_CAP_ALREADY_STATED = re.compile(
-    r"\bcap(?:ped)?\b|\buncapped\b|statutory (?:limit|maximum)|124\(1ZA\)|upper limit"
-    r"|52 weeks|one year'?s (?:gross )?(?:pay|salary)",
+# What counts as the answer STATING the unfair dismissal cap: the cap provision cited, the award said
+# to be capped / the Equality Act award uncapped, or the cap's content (statutory maximum, 52 weeks,
+# a year's pay). A bare mention of the word "cap" does not: a live answer's only mention was a list
+# item, "any statutory cap or other limitation, where relevant", which is not a statement of anything.
+CAP_STATEMENT = re.compile(
+    r"124\(1ZA\)|\bsection 124 of the (?:ERA|Employment Rights Act)|\bs\.? ?124 (?:of )?(?:the )?(?:ERA|Employment Rights Act)"
+    r"|Employment Rights Act 1996,? s(?:ection|\.)? ?124\b|\bERA 1996,? s(?:ection|\.)? ?124\b"
+    r"|\buncapped\b|\bno (?:statutory )?cap\b|\bcapped\b|\bsubject to (?:a|the) (?:statutory )?cap\b"
+    r"|statutory maximum|\b52 weeks|one year'?s (?:gross )?(?:pay|salary)",
+    re.I,
+)
+# ERA 1996 s.126 stated: cited by section, or its rule said in words.
+S126_STATEMENT = re.compile(
+    r"\bsection 126 of the (?:ERA|Employment Rights Act)|\bs\.? ?126 (?:of )?(?:the )?(?:ERA|Employment Rights Act)"
+    r"|Employment Rights Act 1996,? s(?:ection|\.)? ?126\b|\bERA 1996,? s(?:ection|\.)? ?126\b"
+    r"|\bERA s\.? ?126\b|not award compensation under either|cannot be compensated under both",
     re.I,
 )
 
+_REMEDIES_QUESTION = re.compile(
+    r"schedule of loss|counter-schedule|compensat|quantum|double recovery|\bremed(?:y|ies)\b|\bdamages\b|\bawards?\b",
+    re.I,
+)
+_COMPENSATORY_AWARD = re.compile(r"compensatory award", re.I)
+_EQUALITY_ACT = re.compile(r"Equality Act|EqA|discriminat", re.I)
+_UNFAIR_DISMISSAL = re.compile(r"unfair[- ]dismissal|compensatory award", re.I)
+_OVERLAP = re.compile(r"double recovery|double compensation|twice|cumulativ|overlap|duplicat|same loss", re.I)
 
-def _guard_unfair_dismissal_cap(matter: UkMatter, question: str, text: str) -> List[str]:
-    """A combined unfair dismissal + Equality Act answer that discusses the compensatory award but
-    never says it is capped while Equality Act compensation is not (ILL-ARB GT1). The note is law
-    that holds for any such matter and states no figure (the maximum is revised each April)."""
-    if (
-        re.search(r"compensatory award", text, re.I)
-        and re.search(r"Equality Act|EqA|discriminat", f"{question}\n{text}", re.I)
-        and not _CAP_ALREADY_STATED.search(text)
-    ):
-        return [
+
+@dataclass(frozen=True)
+class RequiredProvision:
+    """A controlling provision an answer must state whenever its topic applies — the E2 failure
+    ("law and procedure correct") was an answer that omitted the cap and the bar on double
+    compensation. One entry feeds both the verifier (the model is told what to fetch and state) and
+    the guard (a note is appended if it still did not), so a new provision is one entry here."""
+
+    name: str
+    applies: Callable[[str, str], bool]  # (question, draft) -> does the topic apply?
+    stated: "re.Pattern"  # what counts as the draft stating it
+    fetch_hint: str  # model-facing: what to fetch and state
+    note: str  # appended by the guard when the draft still does not state it
+
+
+REQUIRED_PROVISIONS: List[RequiredProvision] = [
+    RequiredProvision(
+        name="era_s124_cap",
+        applies=lambda q, d: bool(_REMEDIES_QUESTION.search(q) and _COMPENSATORY_AWARD.search(d)),
+        stated=CAP_STATEMENT,
+        fetch_hint=(
+            "the draft discusses the unfair dismissal compensatory award but never says it is subject to a "
+            "statutory cap. Fetch the Employment Rights Act 1996 s.124 (legislation_get_section) and add a "
+            "short paragraph stating that the compensatory award is capped (the lower of a statutory maximum "
+            "and a year's gross pay, as the fetched text says) while Equality Act compensation, including "
+            "injury to feelings, is not, and why that matters to how overlapping loss is allocated. Do not "
+            "state a cap figure you have not fetched."
+        ),
+        note=(
             "- **Unfair dismissal cap v Equality Act compensation:** the unfair dismissal compensatory "
             "award is subject to a statutory cap (ERA 1996 s.124: the lower of a statutory maximum, revised "
             "each April, and 52 weeks' gross pay; the cap does not apply to dismissals such as those under "
             "s.100 or s.103A). Equality Act 2010 compensation, including injury to feelings, has no "
-            "statutory cap. The same loss cannot be compensated under both (ERA 1996 s.126), so where one "
-            "loss supports both claims, which claim carries it decides whether the cap bites. Verify the "
-            "current figures before stating them."
-        ]
-    return []
+            "statutory cap, so where one loss supports both claims, which claim carries it decides whether "
+            "the cap bites. Verify the current figures before stating them."
+        ),
+    ),
+    RequiredProvision(
+        name="era_s126_no_double_compensation",
+        applies=lambda q, d: bool(
+            _EQUALITY_ACT.search(f"{q}\n{d}") and _UNFAIR_DISMISSAL.search(d) and _OVERLAP.search(f"{q}\n{d}")
+        ),
+        stated=S126_STATEMENT,
+        fetch_hint=(
+            "the draft deals with overlap between unfair dismissal and Equality Act compensation but never "
+            "cites the statutory bar on double compensation. Fetch the Employment Rights Act 1996 s.126 "
+            "(legislation_get_section) and state it: where compensation falls to be awarded for the same act "
+            "under both the unfair dismissal provisions and the Equality Act 2010, a tribunal may not award "
+            "compensation under either for any loss or matter taken into account under the other."
+        ),
+        note=(
+            "- **No double compensation (ERA 1996 s.126):** where compensation falls to be awarded for the "
+            "same act under both the unfair dismissal provisions and the Equality Act 2010, the tribunal may "
+            "not award compensation under either for any loss or matter taken into account under the other."
+        ),
+    ),
+]
+
+
+def missing_required_provisions(question: str, draft: str) -> List[RequiredProvision]:
+    """The controlling provisions this question's topic needs that the draft does not state."""
+    q, d = question or "", draft or ""
+    return [p for p in REQUIRED_PROVISIONS if p.applies(q, d) and not p.stated.search(d)]
+
+
+def _guard_required_provisions(matter: UkMatter, question: str, text: str) -> List[str]:
+    """Backstop for the verifier: append a note for each controlling provision still unstated."""
+    return [p.note for p in missing_required_provisions(question, text)]
 
 
 # Every UK guard. A guard is (name, fn(matter, question, text) -> notes). The contract, enforced by
@@ -561,7 +631,7 @@ UK_GUARDS: List[Tuple[str, Callable[[UkMatter, str, str], List[str]]]] = [
     ("ni_extent", _guard_ni_extent),
     ("pace_extent", _guard_pace_extent),
     ("cdm_extent", _guard_cdm_extent),
-    ("unfair_dismissal_cap", _guard_unfair_dismissal_cap),
+    ("required_provisions", _guard_required_provisions),
 ]
 
 

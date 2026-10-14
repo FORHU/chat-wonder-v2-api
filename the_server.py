@@ -44,6 +44,7 @@ from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from uk_legal_mcp import urls as uk_urls
 from uk_legal_mcp.authorities import authorities_from_pool as uk_authorities_from_pool
 from legal_citations import apply_legal_citation_pipeline, select_related_cases
+from attribution_check import attribution_check_enabled
 from exhibit_quotes import exhibit_texts, unquote_exhibit_misquotes
 from legal_fact_boost import (
     append_critical_doctrine_guards,
@@ -2773,6 +2774,30 @@ def _count_sub_questions(query: str) -> int:
     return max(1, len(set(m.group(0).strip() for m in _SUBQ_RE.finditer(query))))
 
 
+def _attribution_judge(state):
+    """The model call the attribution check uses. A small helper model could not tell genuine
+    attributions from fabricated ones reliably (it flagged ~60% of genuine ones in a probe), so this
+    uses the UK legal model at low reasoning effort through the one sanctioned Responses API wrapper
+    (store=False forced, usage recorded). None when the check is switched off or the session has no
+    client, so the verifier simply skips it."""
+    client = getattr(state, "openai_client", None)
+    if client is None or not attribution_check_enabled():
+        return None
+    model = os.getenv("LEGAL_ATTRIBUTION_MODEL") or os.getenv("LEGAL_CHAT_MODEL_UK") or "gpt-5.6-luna"
+
+    def judge(system: str, user: str) -> str:
+        result = legal_responses_chain.create_response(
+            client,
+            model=model,
+            input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            reasoning={"effort": "low"},
+            timeout=90,
+        )
+        return getattr(result, "output_text", "") or ""
+
+    return judge
+
+
 def _legal_model_override(persona: str, state=None, query: str = ""):
     """Legal answers use a stronger model, not the default persona config.
 
@@ -2869,7 +2894,9 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk"):
-        _chain_kwargs["verify"] = make_legal_verifier(state, query=query, uk=(persona == "legal_uk"))
+        _chain_kwargs["verify"] = make_legal_verifier(
+            state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
+        )
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
@@ -3208,7 +3235,9 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk") and not getattr(state, "skip_legal_verify", False):
-        _chain_kwargs["verify"] = make_legal_verifier(state, query=query, uk=(persona == "legal_uk"))
+        _chain_kwargs["verify"] = make_legal_verifier(
+            state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
+        )
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:

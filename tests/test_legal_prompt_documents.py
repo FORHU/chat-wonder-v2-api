@@ -59,6 +59,30 @@ class LegalPromptUkCitationAndQuoteWordingTests(unittest.TestCase):
         self.assertIn("state which award is capped and which is not", UK_PROMPT)
         self.assertIn("Do not state a cap, figure or limit you have not fetched", UK_PROMPT)
 
+    def test_the_prompt_no_longer_demands_a_recap_or_repeated_authorities(self):
+        # ILL-ARB A3: the prompt itself asked for a "direct-answer reprise", for authorities to be
+        # named "again after the sentences they support", and for nested "Bottom line" labels.
+        self.assertNotIn("direct-answer reprise → one clarifying question", UK_PROMPT)
+        self.assertNotIn("and again after the sentences they support", UK_PROMPT)
+        self.assertNotIn("Key point / Bottom line", UK_PROMPT)
+        self.assertIn("No closing recap", UK_PROMPT)
+        self.assertIn("Cite each authority once, where you first rely on it", UK_PROMPT)
+
+    def test_each_issue_is_treated_in_one_place_without_losing_points(self):
+        # Repetition comes out; content never does. A word budget was tried and rejected: cutting a
+        # lengthy, non-repetitive answer to a number leaves the user with an incomplete solution.
+        self.assertIn("No repetition, full completeness", UK_PROMPT)
+        self.assertIn("never drop an issue, authority, gap, step or piece of draft wording to save space", UK_PROMPT)
+        self.assertIn("Remove only repetition", UK_PROMPT)
+        self.assertIn("if two headings would cover the same point", UK_PROMPT)
+        self.assertNotIn("3,500 words", UK_PROMPT)
+        self.assertNotIn("12 sections", UK_PROMPT)
+
+    def test_examples_use_placeholders_not_invented_sums(self):
+        # A live answer built tables around made-up sums ("Full loss of earnings: 40,000").
+        self.assertIn("No invented figures", UK_PROMPT)
+        self.assertIn("labelled placeholders (Amount A, Period 1)", UK_PROMPT)
+
     def test_proposed_wording_is_never_a_blockquote(self):
         # The gate deleted proposed schedule wording set as a blockquote, 14-15 notices per answer.
         self.assertIn("Proposed or draft wording", UK_PROMPT)
