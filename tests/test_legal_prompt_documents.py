@@ -51,6 +51,14 @@ class LegalPromptUkCitationAndQuoteWordingTests(unittest.TestCase):
         self.assertIn("Use them only for text copied exactly", UK_PROMPT)
         self.assertIn("paraphrase WITHOUT quote marks", UK_PROMPT)
 
+    def test_remedies_questions_must_research_every_regime_and_its_cap(self):
+        # ILL-ARB GT1: the answers to a combined unfair dismissal + Equality Act schedule-of-loss
+        # question never said the compensatory award is capped and EqA compensation is not.
+        self.assertIn("identify EVERY statutory regime", UK_PROMPT)
+        self.assertIn("including any statutory cap, limit or deduction on that regime's award", UK_PROMPT)
+        self.assertIn("state which award is capped and which is not", UK_PROMPT)
+        self.assertIn("Do not state a cap, figure or limit you have not fetched", UK_PROMPT)
+
     def test_attribution_requires_the_text_to_say_it(self):
         self.assertIn("only if that text actually says it", UK_PROMPT)
 
