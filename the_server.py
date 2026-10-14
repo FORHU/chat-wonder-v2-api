@@ -1371,10 +1371,17 @@ def _finalize_legal_response(
             out = append_uk_doctrine_guards(out, user_input, case_forum_text(state))
         else:
             out = append_critical_doctrine_guards(out, user_input)
-        from legal_citations import format_legal_citation_links as _format_legal_citation_links, gate_unverified_legal_urls as _gate_unverified_legal_urls
+        from legal_citations import (
+            dedupe_repeated_citation_links as _dedupe_repeated_citation_links,
+            format_legal_citation_links as _format_legal_citation_links,
+            gate_unverified_legal_urls as _gate_unverified_legal_urls,
+        )
 
         out = _gate_unverified_legal_urls(out, search_results)
         out = _format_legal_citation_links(out)
+        if jurisdiction == "UK":
+            # A closing list that re-links what the answer already cited reads as repetition.
+            out = _dedupe_repeated_citation_links(out)
     out = _redact_document_ids(out, state)
     return out
 

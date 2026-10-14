@@ -345,6 +345,68 @@ def format_legal_citation_links(text: str) -> str:
     return text
 
 
+_LEGAL_REF_ANCHOR = re.compile(
+    r'<a href="([^"]+)" class="legal-ref (law|jurisprudence)"[^>]*>(.*?)</a>', re.S
+)
+_CITATION_LABEL_SUFFIX = re.compile(r"\s+(?:Law|Jurisprudence)$")
+
+
+def _citation_key(m: "re.Match") -> tuple:
+    return (re.sub(r"\s+", " ", m.group(3)).strip().lower(), m.group(1))
+
+
+def _drop_repeated_anchor(text: str, m: "re.Match") -> str:
+    """Remove one repeated citation anchor with the least disruption to the sentence around it."""
+    before, after = text[: m.start()], text[m.end() :]
+    line_start = before.rfind("\n") + 1
+    newline = after.find("\n")
+    line_end = len(text) if newline < 0 else m.end() + newline  # index of the newline, or end
+
+    # Followed by "; <next citation>": a trail, so drop this one and its separator.
+    sep = re.match(r"[ \t]*;[ \t]*(?=<a )", after)
+    if sep:
+        return before + after[sep.end() :]
+
+    # Ends its block (optionally before "." or ";"): drop it and the separator in front of it.
+    tail = re.match(r"[ \t]*[.;]?[ \t]*(?=\n|$)", after)
+    if tail:
+        # An attribution or bullet line that was only the citation ("> - [Case Jurisprudence]",
+        # "- [Act, s 1 Law]") has nothing left: delete the whole line.
+        if re.fullmatch(r"[ \t]*(?:>[ \t]*)?(?:[-*][ \t]*)?", text[line_start : m.start()]):
+            return text[:line_start] + text[line_end + 1 :]
+        trimmed = re.sub(r"[ \t]*[;,][ \t]*$", "", before).rstrip(" \t")
+        # Only delete a citation that follows a complete sentence or another citation; one that is
+        # the grammatical object ("It follows from [link].") keeps its words below.
+        if not trimmed or trimmed[-1] in ".?!:)\n" or trimmed.endswith("</a>"):
+            if tail.group(0).strip() == "." and trimmed and trimmed[-1] not in ".?!:)\n":
+                trimmed += "."
+            return trimmed + after[tail.end() :]
+
+    # Inside a sentence or table cell: keep the words, drop the repeated link.
+    return before + _CITATION_LABEL_SUFFIX.sub("", m.group(3)) + after
+
+
+def dedupe_repeated_citation_links(text: str) -> str:
+    """Keep the first occurrence of each citation (same label and href) and drop later repeats.
+
+    A bottom-line or closing list that re-links everything already cited reads as repetition.
+    A different provision of the same document has a different label (its own pinpoint), so it
+    is never treated as a repeat. Run after format_legal_citation_links (anchors are present)."""
+    if not text or not isinstance(text, str) or "legal-ref" not in text:
+        return text
+    for _ in range(500):  # each pass removes one repeat; the bound only guards a runaway loop
+        seen = set()
+        for m in _LEGAL_REF_ANCHOR.finditer(text):
+            key = _citation_key(m)
+            if key in seen:
+                text = _drop_repeated_anchor(text, m)
+                break
+            seen.add(key)
+        else:
+            break
+    return text
+
+
 def apply_legal_citation_pipeline(
     text: str,
     search_results,
