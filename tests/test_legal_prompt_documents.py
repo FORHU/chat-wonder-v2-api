@@ -31,5 +31,29 @@ class LegalPromptDocumentDraftingTests(unittest.TestCase):
         self.assertIn("inline link", PROMPT)
 
 
+UK_PROMPT = (Path(__file__).resolve().parent.parent / "resources" / "prompts" / "legal_prompt_uk.txt").read_text(encoding="utf-8")
+
+
+class LegalPromptUkCitationAndQuoteWordingTests(unittest.TestCase):
+    """Wording pins for ILL-ARB A3/B2/B3: these cannot prove the model obeys the rules, only that
+    the prompt still states them (and no longer tells the model to repeat citations)."""
+
+    def test_prompt_no_longer_tells_the_model_to_repeat_citations(self):
+        self.assertNotIn("again at the end of the paragraphs they support", UK_PROMPT)
+        self.assertIn("Never repeat an identical citation or link", UK_PROMPT)
+        self.assertIn("never leave a proposition uncited", UK_PROMPT)
+
+    def test_different_provision_of_a_cited_document_gets_its_own_pinpoint(self):
+        self.assertIn("DIFFERENT provision or paragraph of a document you have already cited", UK_PROMPT)
+        self.assertIn("pinpoint in both the link text and the sentence", UK_PROMPT)
+
+    def test_exhibit_quote_marks_mean_exact_words(self):
+        self.assertIn("Use them only for text copied exactly", UK_PROMPT)
+        self.assertIn("paraphrase WITHOUT quote marks", UK_PROMPT)
+
+    def test_attribution_requires_the_text_to_say_it(self):
+        self.assertIn("only if that text actually says it", UK_PROMPT)
+
+
 if __name__ == "__main__":
     unittest.main()

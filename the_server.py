@@ -48,6 +48,7 @@ from legal_fact_boost import (
     append_critical_doctrine_guards,
     append_missing_prefetched_mentions,
     append_uk_doctrine_guards,
+    case_forum_text,
     prepare_legal_turn,
 )
 import legal_responses_chain
@@ -1367,7 +1368,7 @@ def _finalize_legal_response(
     if legal_mode:
         out = append_missing_prefetched_mentions(out, search_results)
         if jurisdiction == "UK":
-            out = append_uk_doctrine_guards(out, user_input)
+            out = append_uk_doctrine_guards(out, user_input, case_forum_text(state))
         else:
             out = append_critical_doctrine_guards(out, user_input)
         from legal_citations import format_legal_citation_links as _format_legal_citation_links, gate_unverified_legal_urls as _gate_unverified_legal_urls

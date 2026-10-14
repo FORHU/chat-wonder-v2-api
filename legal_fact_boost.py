@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Tuple
 
 # Always injected for every [legal ai] fact-pattern turn (not tied to Q1–Q5).
 _GENERAL_PROTOCOL = """[LEGAL_ANALYSIS_PROTOCOL — apply to THIS question, whatever the topic]
@@ -299,98 +300,258 @@ def _append_guard_block(text: str, additions: List[str]) -> str:
     return text.rstrip() + block
 
 
-def append_uk_doctrine_guards(text: str, user_input: str) -> str:
+@dataclass(frozen=True)
+class UkMatter:
+    """What the user's matter *is*, read from the question and the case's own exhibits — never
+    from the draft answer, which can mention another forum in passing ("unlike criminal
+    proceedings...") and would otherwise switch a guard on."""
+
+    forums: frozenset  # subset of {"criminal", "employment_tribunal", "civil", "arbitration"}
+
+
+_UK_FORUM_PATTERNS = {
+    "criminal": r"\bcrown court\b|magistrates|\bprosecut\w*|\bcriminal\b|\bCJA 2003\b|criminal justice act 2003"
+    r"|\bindictment\b|\bCPS\b|\bPACE\b|interview under caution|\bR v\b",
+    "employment_tribunal": r"employment tribunal|\bET[13]\b|\bemployment judge\b|unfair dismissal|grounds of resistance",
+    "civil": r"county court|high court|\bCPR\b|civil procedure rules|small claims|technology and construction court"
+    r"|\bTCC\b|civil proceedings",
+    "arbitration": r"\barbitrat\w*",
+}
+
+
+def classify_uk_matter(question: str, case_text: str = "") -> UkMatter:
+    """Forums the matter belongs to. A bundle can span several (a prosecution with a parallel
+    tribunal claim), so this is a set; empty means the forum is unknown."""
+    source = f"{question or ''}\n{case_text or ''}"
+    return UkMatter(
+        frozenset(name for name, pattern in _UK_FORUM_PATTERNS.items() if re.search(pattern, source, re.I))
+    )
+
+
+def case_forum_text(state) -> str:
+    """Forum evidence from the case itself: exhibit names/categories and the opening of each
+    exhibit (court headings such as "IN THE EMPLOYMENT TRIBUNAL"). Empty when no case is
+    attached. Read-only; never raises."""
+    if state is None:
+        return ""
+    parts: List[str] = []
+    for m in getattr(state, "case_document_manifest", None) or []:
+        if isinstance(m, dict):
+            parts.append(f"{m.get('name') or ''} {m.get('category') or ''}")
+    for entry in (getattr(state, "case_document_cache", None) or {}).values():
+        if isinstance(entry, dict):
+            parts.append(str(entry.get("text") or "")[:800])
+    return "\n".join(parts)
+
+
+def _guard_whistleblowing(matter: UkMatter, question: str, text: str) -> List[str]:
+    """Qualifying-service burden and remedies for s.103A. Fires only when qualifying service is
+    actually in play — a stray "one year" (a limitation point, a date) is not that."""
+    both = f"{question}\n{text}"
+    if not (
+        re.search(r"103A|protected disclosure|whistleblow", both, re.I)
+        and re.search(
+            r"less than two years|fewer than two years|under two years|no qualifying service"
+            r"|without qualifying service|qualifying (?:service|period)|two[- ]year",
+            both,
+            re.I,
+        )
+    ):
+        return []
+    notes: List[str] = []
+    if not re.search(r"burden", text, re.I):
+        notes.append(
+            "- **Burden without qualifying service:** where the employee lacks two years' service the "
+            "s.98 route is closed and it is for the *claimant* to prove that the protected disclosure was "
+            "the reason or principal reason for dismissal (the *Smith v Hayle Town Council* / *Kuzel v Roche* "
+            "line) — verify against current authority before relying on it."
+        )
+    if not re.search(r"uncapped|no statutory cap|124\(1A\)|207A|ACAS uplift|injury to feelings", text, re.I):
+        notes.append(
+            "- **Remedies to state, not hedge:** a s.103A compensatory award is not subject to the ordinary "
+            "statutory cap (ERA 1996 s.124(1A)); a s.207A TULRCA 1992 uplift of up to 25% may apply for an "
+            "unreasonable failure to follow the ACAS Code; s.47B detriment can carry injury-to-feelings "
+            "damages. Fetch the sections before quoting figures."
+        )
+    return notes
+
+
+def _guard_dpa_part3(matter: UkMatter, question: str, text: str) -> List[str]:
+    """Part 3 is law-enforcement processing only. The note is true whoever the controller is:
+    it states when Part 3 applies instead of asserting that it does not."""
+    both = f"{question}\n{text}"
+    if (
+        re.search(r"Data Protection Act 2018|DPA 2018", both, re.I)
+        and re.search(r"\bss?\.?\s*3[5-9]\b|\bs\.?\s*40\b|sections? 35|Part 3", both, re.I)
+        and not re.search(
+            r"competent authorit|law[- ]enforcement (?:processing|purposes?)|Part 3 .{0,40}(does not|not) apply", text, re.I
+        )
+    ):
+        return [
+            "- **DPA 2018 Part 3 is for law-enforcement processing only:** ss.29–81 govern processing by "
+            "*competent authorities* for *law-enforcement purposes* (preventing, investigating, detecting "
+            "or prosecuting offences). Any other processing — including an employer's monitoring of its "
+            "staff, even where the employer is a police force — is general processing under the UK GDPR and "
+            "DPA 2018 Part 2. Decide the controller and the purpose first; do not analyse ss.35–40 as if "
+            "they governed unless the processing is for law-enforcement purposes."
+        ]
+    return []
+
+
+_BUSINESS_RECORDS_CRIMINAL = (
+    "- **Business documents (criminal proceedings):** a record created or received in the course of a "
+    "trade, business or public office is admissible under **CJA 2003 s.117** (subject to s.117(6)–(7) "
+    "reliability exclusion); s.114(1)(d) is the residual interests-of-justice route. Identify the "
+    "route, do not leave the record's admissibility as an open question."
+)
+_BUSINESS_RECORDS_BY_FORUM = {
+    "criminal": (
+        _BUSINESS_RECORDS_CRIMINAL,
+        r"\b117\b",
+    ),
+    "employment_tribunal": (
+        "- **Hearsay and records (Employment Tribunal):** a tribunal is not bound by the strict rules of "
+        "evidence on admissibility, so hearsay and business records are generally admitted and the real "
+        "question is weight (reliability, contemporaneity, provenance). CJA 2003 s.117 is a "
+        "criminal-proceedings rule and does not govern the tribunal.",
+        r"strict rules? of evidence|not bound by (?:any |the )?(?:strict )?rules? (?:of|relating to)[^.]{0,40}evidence",
+    ),
+    "civil": (
+        "- **Hearsay and records (civil proceedings):** hearsay is not excluded in civil proceedings "
+        "(Civil Evidence Act 1995 s.1); the question is weight (s.4), subject to the notice requirements "
+        "in CPR Part 33. CJA 2003 s.117 applies only in criminal proceedings.",
+        r"Civil Evidence Act",
+    ),
+    "arbitration": (
+        "- **Hearsay and records (arbitration):** the tribunal decides whether and to what extent strict "
+        "rules of evidence apply (Arbitration Act 1996 s.34 for arbitrations seated in England, Wales or "
+        "Northern Ireland; the Scottish Arbitration Rules for a Scottish seat), so admissibility turns on "
+        "the agreed procedure and the tribunal's directions, and the practical question is weight. "
+        "CJA 2003 s.117 applies only in criminal proceedings.",
+        r"strict rules? of evidence|Arbitration Act 1996|Scottish Arbitration Rules",
+    ),
+}
+_BUSINESS_RECORDS_ANY_FORUM = (
+    "- **Hearsay and records depend on the forum:** in criminal proceedings a business record is "
+    "admissible under CJA 2003 s.117 (subject to s.117(6)–(7)), with s.114(1)(d) as the residual route; "
+    "an Employment Tribunal is not bound by the strict rules of evidence, so the question is weight; in "
+    "civil proceedings hearsay is not excluded (Civil Evidence Act 1995 s.1); in arbitration the "
+    "tribunal's evidential powers govern (Arbitration Act 1996 s.34, or the Scottish Arbitration Rules). "
+    "Identify the forum before analysing admissibility."
+)
+
+
+def _guard_hearsay_records(matter: UkMatter, question: str, text: str) -> List[str]:
+    """Documentary hearsay. The note depends on the forum: s.117 is a criminal rule, so an
+    employment tribunal, civil claim or arbitration gets its own rule, and an unknown forum gets
+    a statement that is true in all of them."""
+    both = f"{question}\n{text}"
+    if not (
+        re.search(r"hearsay", both, re.I)
+        and re.search(r"business record|Met Office|certif(?:ied|icate)|ledger|register|log\b|invoice", both, re.I)
+    ):
+        return []
+    if matter.forums:
+        return [
+            note
+            for forum, (note, covered_by) in _BUSINESS_RECORDS_BY_FORUM.items()
+            if forum in matter.forums and not re.search(covered_by, text, re.I)
+        ]
+    if re.search(r"\b117\b|Civil Evidence Act|strict rules? of evidence", text, re.I):
+        return []
+    return [_BUSINESS_RECORDS_ANY_FORUM]
+
+
+def _guard_ni_extent(matter: UkMatter, question: str, text: str) -> List[str]:
+    """GB employment statutes do not reach Northern Ireland automatically."""
+    if (
+        re.search(r"Northern Ireland|Belfast|Derry|Londonderry", question, re.I)
+        and re.search(r"Employment Rights Act 1996|ERA 1996|Equality Act 2010", f"{question}\n{text}", re.I)
+        and not re.search(
+            r"does not extend|does not apply|separate legislation|Northern Ireland\) Order|mirror"
+            r"|equivalent legislation|own legislation|extent|Great Britain|\bGB\b|1996 Order"
+            r"|Northern Ireland (?:legislation|law)",
+            text,
+            re.I,
+        )
+    ):
+        return [
+            "- **Extent:** the Employment Rights Act 1996 and Equality Act 2010 are Great Britain statutes; "
+            "Northern Ireland has its own mirror legislation (e.g. the Employment Rights (Northern Ireland) "
+            "Order 1996). Check the section's `extent` field before applying a GB provision to a Belfast worker."
+        ]
+    return []
+
+
+def _guard_pace_extent(matter: UkMatter, question: str, text: str) -> List[str]:
+    """PACE 1984 territorial extent — recurring overstatement (Brackenmoor benchmark: a draft
+    stated s.78 "applies throughout the United Kingdom"). Fires on the draft's own
+    overstatement, not on the user naming another nation — this is the model volunteering
+    the error, not answering an NI/Scotland-specific question."""
+    if re.search(r"\bPACE\b|Police and Criminal Evidence Act", text, re.I) and re.search(
+        r"(?:throughout|across|applies (?:in|to)|extends? (?:to|throughout)).{0,40}\b(?:the )?United Kingdom\b|UK-wide",
+        text,
+        re.I,
+    ):
+        return [
+            "- **PACE 1984 extent:** the Police and Criminal Evidence Act 1984 (including s.78) extends to "
+            "England & Wales only. Northern Ireland has its own equivalent (the Police and Criminal Evidence "
+            "(Northern Ireland) Order 1989); Scotland has a separate framework. Do not describe PACE as "
+            "applying UK-wide."
+        ]
+    return []
+
+
+def _guard_cdm_extent(matter: UkMatter, question: str, text: str) -> List[str]:
+    """CDM 2015 territorial extent — recurring overstatement (Brackenmoor benchmark: a draft
+    stated the regulations "apply throughout England, Wales, Scotland and Northern Ireland")."""
+    if (
+        re.search(r"Construction \(Design and Management\) Regulations 2015|\bCDM 2015\b", text, re.I)
+        and re.search(r"Northern Ireland", text, re.I)
+        and not re.search(
+            r"does not extend|does not apply|separate regulations|own regulations|Northern Ireland\) Regulations", text, re.I
+        )
+    ):
+        return [
+            "- **CDM 2015 extent:** the Construction (Design and Management) Regulations 2015 extend to "
+            "England, Wales and Scotland (Great Britain) only. Northern Ireland has separate, broadly "
+            "similar regulations (the Construction (Design and Management) Regulations (Northern Ireland) "
+            "2016) — do not describe CDM 2015 itself as applying there."
+        ]
+    return []
+
+
+# Every UK guard. A guard is (name, fn(matter, question, text) -> notes). The contract, enforced by
+# tests/test_uk_guard_invariants.py: whatever a guard emits is true for ANY matter that can trigger
+# it — forum-specific only when the matter positively matched that forum, otherwise a conditional
+# or all-forums statement — and it never asserts a fact about the user's case that the question did
+# not state. Add new guards here so the invariant test covers them.
+UK_GUARDS: List[Tuple[str, Callable[[UkMatter, str, str], List[str]]]] = [
+    ("whistleblowing", _guard_whistleblowing),
+    ("dpa_part3", _guard_dpa_part3),
+    ("hearsay_records", _guard_hearsay_records),
+    ("ni_extent", _guard_ni_extent),
+    ("pace_extent", _guard_pace_extent),
+    ("cdm_extent", _guard_cdm_extent),
+]
+
+
+def append_uk_doctrine_guards(text: str, user_input: str, case_text: str = "") -> str:
     """
     England & Wales counterpart of append_critical_doctrine_guards — topic-triggered reminders
     for points the Brackenmoor benchmark showed the model hedging or omitting. Same posture:
     light, never exhaustive, only fires when the answer is silent on the point. Each guard is
     a "verify" nudge, not a holding — the model must still fetch the section if it relies on it.
+
+    The forum comes from the question and the case's own exhibits (case_text), not the answer.
     """
     if not text:
         return text
-    u = user_input or ""
-    both = f"{u}\n{text}"
+    question = user_input or ""
+    matter = classify_uk_matter(question, case_text)
     additions: List[str] = []
-
-    # Whistleblowing dismissal with no qualifying service: burden and remedies.
-    if re.search(r"103A|protected disclosure|whistleblow", both, re.I) and re.search(
-        r"less than two years|no qualifying service|without qualifying service|1 year|one year|qualifying period", both, re.I
-    ):
-        if not re.search(r"burden", text, re.I):
-            additions.append(
-                "- **Burden without qualifying service:** where the employee lacks two years' service the "
-                "s.98 route is closed and it is for the *claimant* to prove that the protected disclosure was "
-                "the reason or principal reason for dismissal (the *Smith v Hayle Town Council* / *Kuzel v Roche* "
-                "line) — verify against current authority before relying on it."
-            )
-        if not re.search(r"uncapped|no statutory cap|124\(1A\)|207A|ACAS uplift|injury to feelings", text, re.I):
-            additions.append(
-                "- **Remedies to state, not hedge:** a s.103A compensatory award is not subject to the ordinary "
-                "statutory cap (ERA 1996 s.124(1A)); a s.207A TULRCA 1992 uplift of up to 25% may apply for an "
-                "unreasonable failure to follow the ACAS Code; s.47B detriment can carry injury-to-feelings "
-                "damages. Fetch the sections before quoting figures."
-            )
-
-    # Data Protection Act 2018: Part 3 is law-enforcement processing only.
-    if re.search(r"Data Protection Act 2018|DPA 2018", both, re.I) and re.search(
-        r"\bss?\.?\s*3[5-9]\b|\bs\.?\s*40\b|sections? 35|Part 3", both, re.I
-    ) and not re.search(r"competent authorit|law[- ]enforcement processing|Part 3 .{0,40}(does not|not) apply", text, re.I):
-        additions.append(
-            "- **DPA 2018 Part 3 does not apply to a private employer:** ss.29–81 govern processing by "
-            "*competent authorities* for law-enforcement purposes. An employer's monitoring of staff is "
-            "general processing under the UK GDPR and DPA 2018 Part 2 — say so rather than analysing "
-            "ss.35–40 as if they governed."
-        )
-
-    # Documentary hearsay in criminal proceedings: the business-records route.
-    if re.search(r"hearsay", both, re.I) and re.search(
-        r"business record|Met Office|certif(?:ied|icate)|ledger|register|log\b|invoice", both, re.I
-    ) and not re.search(r"\b117\b", text):
-        additions.append(
-            "- **Business documents:** in the Crown Court a record created or received in the course of a "
-            "trade, business or public office is admissible under **CJA 2003 s.117** (subject to s.117(6)–(7) "
-            "reliability exclusion); s.114(1)(d) is the residual interests-of-justice route. Identify the "
-            "route, do not leave the record's admissibility as an open question."
-        )
-
-    # Territorial extent: GB employment statutes do not reach Northern Ireland automatically.
-    if re.search(r"Northern Ireland|Belfast|Derry|Londonderry", u, re.I) and re.search(
-        r"Employment Rights Act 1996|ERA 1996|Equality Act 2010", both, re.I
-    ) and not re.search(
-        r"does not extend|does not apply|separate legislation|Northern Ireland\) Order|mirror|equivalent legislation|own legislation|extent", text, re.I
-    ):
-        additions.append(
-            "- **Extent:** the Employment Rights Act 1996 and Equality Act 2010 are Great Britain statutes; "
-            "Northern Ireland has its own mirror legislation (e.g. the Employment Rights (Northern Ireland) "
-            "Order 1996). Check the section's `extent` field before applying a GB provision to a Belfast worker."
-        )
-
-    # PACE 1984 territorial extent — recurring overstatement (Brackenmoor benchmark: a draft
-    # stated s.78 "applies throughout the United Kingdom"). Fires on the draft's own
-    # overstatement, not on the user naming another nation — this is the model volunteering
-    # the error, not answering an NI/Scotland-specific question.
-    if re.search(r"\bPACE\b|Police and Criminal Evidence Act", text, re.I) and re.search(
-        r"(?:throughout|across|applies (?:in|to)|extends? (?:to|throughout)).{0,40}\b(?:the )?United Kingdom\b|UK-wide", text, re.I
-    ):
-        additions.append(
-            "- **PACE 1984 extent:** the Police and Criminal Evidence Act 1984 (including s.78) extends to "
-            "England & Wales only. Northern Ireland has its own equivalent (the Police and Criminal Evidence "
-            "(Northern Ireland) Order 1989); Scotland has a separate framework. Do not describe PACE as "
-            "applying UK-wide."
-        )
-
-    # CDM 2015 territorial extent — recurring overstatement (Brackenmoor benchmark: a draft
-    # stated the regulations "apply throughout England, Wales, Scotland and Northern Ireland").
-    if re.search(r"Construction \(Design and Management\) Regulations 2015|\bCDM 2015\b", text, re.I) and re.search(
-        r"Northern Ireland", text, re.I
-    ) and not re.search(r"does not extend|does not apply|separate regulations|own regulations|Northern Ireland\) Regulations", text, re.I):
-        additions.append(
-            "- **CDM 2015 extent:** the Construction (Design and Management) Regulations 2015 extend to "
-            "England, Wales and Scotland (Great Britain) only. Northern Ireland has separate, broadly "
-            "similar regulations (the Construction (Design and Management) Regulations (Northern Ireland) "
-            "2016) — do not describe CDM 2015 itself as applying there."
-        )
-
+    for _name, guard in UK_GUARDS:
+        additions.extend(guard(matter, question, text))
     return _append_guard_block(text, additions)
 
 
