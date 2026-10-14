@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Callable, List, Optional, Set
+from typing import Callable, List, Optional, Set, Tuple
 
 OnEvent = Optional[Callable[[str], None]]
 
@@ -215,18 +215,63 @@ def is_unverified_blockquote(body: str, corpus_norm: str) -> bool:
     return not quote_appears_in_corpus(body, corpus_norm)
 
 
+_UNVERIFIED_QUOTE_NOTICE = (
+    "*[Unverified quotation removed — wording was not found in retrieved "
+    "case/RA text. Rely on the paraphrase and citation above/below.]*"
+)
+_QUOTE_OPENER = re.compile(r'^[\s*_]*["“]')
+_BLOCKQUOTE_BODY = re.compile(r"^\s*>\s?(.*)$")
+
+
+def quotation_blockquote_lines(text: str) -> List[Tuple[int, int, str]]:
+    """(start, end, body) for each line of every blockquote that is a *quotation*.
+
+    A blockquote claims to quote a source only when it is formatted as a quotation — its body
+    opens with a quote mark (`> *"..."*`). Proposed or draft wording (a suggested clause, schedule
+    wording) is sometimes set as a blockquote too; that makes no claim about any source, so it is
+    not returned here. A quotation block runs until the first line that is not part of the
+    blockquote, so a quotation that wraps onto further `>` lines is checked as a whole."""
+    spans: List[Tuple[int, int, str]] = []
+    in_quote = False
+    pos = 0
+    for line in text.split("\n"):
+        start, end = pos, pos + len(line)
+        pos = end + 1
+        m = _BLOCKQUOTE_BODY.match(line)
+        if not m:
+            in_quote = False
+            continue
+        body = m.group(1)
+        if _QUOTE_OPENER.match(body):
+            in_quote = True
+        if in_quote:
+            spans.append((start, end, body))
+    return spans
+
+
 def strip_unverified_blockquotes(
     text: str,
     search_results,
     on_strip: OnEvent = None,
     extra_texts=None,
+    quotation_blocks_only: bool = False,
 ) -> str:
     """Demote blockquote lines whose body is not grounded in tool-result text (or, via
-    extra_texts, the case's own exhibits)."""
+    extra_texts, the case's own exhibits).
+
+    quotation_blocks_only: only blockquotes formatted as a quotation are checked; a blockquote of
+    proposed wording is left alone (see quotation_blockquote_lines)."""
     if not text or not isinstance(text, str):
         return text
 
     corpus = collect_tool_result_text_corpus(search_results, extra_texts)
+    if quotation_blocks_only:
+        spans = [(s, e) for s, e, body in quotation_blockquote_lines(text) if is_unverified_blockquote(body, corpus)]
+        for s, e in reversed(spans):
+            text = text[:s] + _UNVERIFIED_QUOTE_NOTICE + text[e:]
+        if spans and on_strip:
+            on_strip("unverified_blockquote")
+        return text
     stripped = [0]
 
     def repl(m: re.Match) -> str:
@@ -234,10 +279,7 @@ def strip_unverified_blockquotes(
         if not is_unverified_blockquote(body, corpus):
             return m.group(0)
         stripped[0] += 1
-        return (
-            "*[Unverified quotation removed — wording was not found in retrieved "
-            "case/RA text. Rely on the paraphrase and citation above/below.]*"
-        )
+        return _UNVERIFIED_QUOTE_NOTICE
 
     out = _BLOCKQUOTE_LINE.sub(repl, text)
     if stripped[0] and on_strip:
@@ -420,12 +462,17 @@ def apply_legal_citation_pipeline(
     on_gate: OnEvent = None,
     on_strip_quote: OnEvent = None,
     extra_quote_sources=None,
+    quotation_blocks_only: bool = False,
 ) -> str:
     """Repair → (legal) strip bad quotes → (legal) gate URLs → (legal) HTML format."""
     out = repair_legal_source_links(text, search_results, on_repair=on_repair)
     if legal_mode:
         out = strip_unverified_blockquotes(
-            out, search_results, on_strip=on_strip_quote, extra_texts=extra_quote_sources
+            out,
+            search_results,
+            on_strip=on_strip_quote,
+            extra_texts=extra_quote_sources,
+            quotation_blocks_only=quotation_blocks_only,
         )
         out = gate_unverified_legal_urls(out, search_results, on_gate=on_gate)
         out = format_legal_citation_links(out)

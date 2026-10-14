@@ -24,6 +24,7 @@ from legal_citations import (
     classify_href,
     collect_tool_result_text_corpus,
     is_unverified_blockquote,
+    quotation_blockquote_lines,
 )
 from exhibit_quotes import exhibit_texts, find_exhibit_misquotes
 
@@ -212,6 +213,33 @@ def missing_named_authorities(draft: str, names: List[str]) -> List[str]:
     return missing
 
 
+# A remedies question whose draft discusses the unfair-dismissal compensatory award but never says it
+# is capped. The award has a statutory cap (ERA 1996 s.124) that Equality Act compensation does not,
+# which is what drives how overlapping loss is allocated; ILL-ARB GT1 found it missing from every
+# answer to a combined unfair dismissal + discrimination schedule-of-loss question.
+_REMEDIES_QUESTION = re.compile(
+    r"schedule of loss|counter-schedule|compensat|quantum|double recovery|\bremed(?:y|ies)\b|\bdamages\b|\bawards?\b",
+    re.I,
+)
+_COMPENSATORY_AWARD = re.compile(r"compensatory award", re.I)
+_CAP_STATED = re.compile(
+    r"\bcap(?:ped)?\b|\buncapped\b|statutory (?:limit|maximum)|124\(1ZA\)|upper limit"
+    r"|one year'?s (?:gross )?(?:pay|salary)|52 weeks",
+    re.I,
+)
+
+
+def missing_cap_statement(question: str, draft: str) -> bool:
+    """True when a remedies question's draft discusses the compensatory award without stating its cap."""
+    return bool(
+        question
+        and draft
+        and _REMEDIES_QUESTION.search(question)
+        and _COMPENSATORY_AWARD.search(draft)
+        and not _CAP_STATED.search(draft)
+    )
+
+
 @dataclass
 class AuditReport:
     unverified_urls: List[Tuple[str, str]] = field(default_factory=list)
@@ -220,6 +248,8 @@ class AuditReport:
     # (quoted phrase, what the exhibit actually says): inline quotes that nearly match exhibit
     # wording but are not verbatim — see exhibit_quotes.find_exhibit_misquotes.
     exhibit_misquotes: List[Tuple[str, str]] = field(default_factory=list)
+    # UK remedies answer that discusses the compensatory award but never states its cap.
+    missing_cap: bool = False
     allowed: List[Tuple[str, str]] = field(default_factory=list)
     contradiction_resolutions: int = 0
     # 0 = the contradiction-sweep check is disabled for this turn (no case-document bundle to
@@ -243,6 +273,7 @@ class AuditReport:
             or self.truncated_urls
             or self.unverified_quotes
             or self.exhibit_misquotes
+            or self.missing_cap
             or self.contradiction_deficit
             or self.missing_authorities
         )
@@ -259,6 +290,8 @@ class AuditReport:
             parts.append(f"{len(self.unverified_quotes)} unverified quotation(s)")
         if self.exhibit_misquotes:
             parts.append(f"{len(self.exhibit_misquotes)} quotation(s) not verbatim to the exhibit")
+        if self.missing_cap:
+            parts.append("compensatory award cap not stated")
         if self.contradiction_deficit:
             parts.append(f"only {self.contradiction_resolutions}/{self.min_contradiction_resolutions} contradictions resolved")
         if self.missing_authorities:
@@ -318,6 +351,8 @@ def audit_legal_draft(
     min_contradiction_resolutions: int = 0,
     named_authorities: Optional[List[str]] = None,
     extra_quote_sources: Optional[List[str]] = None,
+    uk: bool = False,
+    question: str = "",
 ) -> AuditReport:
     """Report (never rewrite) every citation link / blockquote the finalizer would demote, plus
     (when min_contradiction_resolutions > 0 — see AuditReport) whether the draft shows enough
@@ -339,11 +374,17 @@ def audit_legal_draft(
             report.unverified_urls.append((label, href))
 
     corpus = collect_tool_result_text_corpus(search_results, extra_quote_sources)
-    for m in _BLOCKQUOTE_LINE.finditer(text):
-        body = m.group("body")
+    if uk:
+        # UK: only a blockquote formatted as a quotation claims a source; proposed wording does not.
+        bodies = [body for _s, _e, body in quotation_blockquote_lines(text)]
+    else:
+        bodies = [m.group("body") for m in _BLOCKQUOTE_LINE.finditer(text)]
+    for body in bodies:
         if is_unverified_blockquote(body, corpus):
             report.unverified_quotes.append(body.strip())
     report.exhibit_misquotes = find_exhibit_misquotes(text, extra_quote_sources or [])
+    if uk:
+        report.missing_cap = missing_cap_statement(question, text)
 
     report.contradiction_resolutions = count_contradiction_resolutions(text)
     report.missing_authorities = missing_named_authorities(text, named_authorities or [])
@@ -401,6 +442,18 @@ def build_verifier_feedback(report: AuditReport, *, max_allowed: int = 30) -> st
         lines.append(
             "Quote marks mean the document's exact words. For each: copy the exhibit's wording "
             "exactly inside the quote marks, or paraphrase WITHOUT quote marks."
+        )
+
+    if report.missing_cap:
+        lines.append("")
+        lines.append(
+            "Remedies: the draft discusses the unfair dismissal compensatory award but never says that "
+            "it is subject to a statutory cap. Fetch the Employment Rights Act 1996 s.124 "
+            "(legislation_get_section) and add a short paragraph stating that the compensatory award is "
+            "capped (the lower of a statutory maximum and a year's gross pay, as the fetched text says) "
+            "while Equality Act compensation, including injury to feelings, is not, and why that matters "
+            "to how overlapping loss is allocated and to double recovery. Do not state a cap figure you "
+            "have not fetched."
         )
 
     if report.contradiction_deficit:
@@ -478,7 +531,9 @@ def verify_max_rounds_from_env() -> int:
         return 1
 
 
-def make_legal_verifier(state, *, max_rounds: Optional[int] = None, query: str = "") -> Optional[Verifier]:
+def make_legal_verifier(
+    state, *, max_rounds: Optional[int] = None, query: str = "", uk: bool = False
+) -> Optional[Verifier]:
     """Closure the chain loops call with (draft_text, rounds_done) when the model
     stops calling tools. Returns feedback text to inject, or None to accept the
     draft. Reads state.last_search_legal_results at call time because the pool
@@ -503,6 +558,8 @@ def make_legal_verifier(state, *, max_rounds: Optional[int] = None, query: str =
             min_contradiction_resolutions=min_contradictions,
             named_authorities=named,
             extra_quote_sources=exhibit_texts(state),
+            uk=uk,
+            question=query,
         )
         tags = {
             "round": str(rounds_done),

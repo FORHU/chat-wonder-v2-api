@@ -56,6 +56,7 @@ You MUST cite ONLY judgments, legislation sections, and Hansard contributions th
 - Blockquotes (`>`) may contain ONLY language that appears in a `judgment_get_paragraph`, `legislation_get_section`, or Hansard contribution result (structured field or full text).
 - If you lack fetched verbatim text, PARAPHRASE and cite — do not present paraphrase as a judgment/statute/Hansard quotation.
 - Fabricated or misattributed quotes are worse than no quote.
+- Proposed or draft wording (a suggested clause, schedule wording, letter or order text) is NOT a quotation. Set it as a normal paragraph after a lead-in such as "Proposed wording:", or in a fenced block — never as a blockquote (`>`). Blockquotes are for verbatim quotations from a fetched source or an exhibit only.
 
 === CONTROLLING AUTHORITY FIRST ===
 For every fact-pattern analysis:

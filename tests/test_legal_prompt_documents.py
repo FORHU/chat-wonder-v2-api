@@ -59,6 +59,11 @@ class LegalPromptUkCitationAndQuoteWordingTests(unittest.TestCase):
         self.assertIn("state which award is capped and which is not", UK_PROMPT)
         self.assertIn("Do not state a cap, figure or limit you have not fetched", UK_PROMPT)
 
+    def test_proposed_wording_is_never_a_blockquote(self):
+        # The gate deleted proposed schedule wording set as a blockquote, 14-15 notices per answer.
+        self.assertIn("Proposed or draft wording", UK_PROMPT)
+        self.assertIn("never as a blockquote", UK_PROMPT)
+
     def test_attribution_requires_the_text_to_say_it(self):
         self.assertIn("only if that text actually says it", UK_PROMPT)
 

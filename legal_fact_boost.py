@@ -521,6 +521,34 @@ def _guard_cdm_extent(matter: UkMatter, question: str, text: str) -> List[str]:
     return []
 
 
+_CAP_ALREADY_STATED = re.compile(
+    r"\bcap(?:ped)?\b|\buncapped\b|statutory (?:limit|maximum)|124\(1ZA\)|upper limit"
+    r"|52 weeks|one year'?s (?:gross )?(?:pay|salary)",
+    re.I,
+)
+
+
+def _guard_unfair_dismissal_cap(matter: UkMatter, question: str, text: str) -> List[str]:
+    """A combined unfair dismissal + Equality Act answer that discusses the compensatory award but
+    never says it is capped while Equality Act compensation is not (ILL-ARB GT1). The note is law
+    that holds for any such matter and states no figure (the maximum is revised each April)."""
+    if (
+        re.search(r"compensatory award", text, re.I)
+        and re.search(r"Equality Act|EqA|discriminat", f"{question}\n{text}", re.I)
+        and not _CAP_ALREADY_STATED.search(text)
+    ):
+        return [
+            "- **Unfair dismissal cap v Equality Act compensation:** the unfair dismissal compensatory "
+            "award is subject to a statutory cap (ERA 1996 s.124: the lower of a statutory maximum, revised "
+            "each April, and 52 weeks' gross pay; the cap does not apply to dismissals such as those under "
+            "s.100 or s.103A). Equality Act 2010 compensation, including injury to feelings, has no "
+            "statutory cap. The same loss cannot be compensated under both (ERA 1996 s.126), so where one "
+            "loss supports both claims, which claim carries it decides whether the cap bites. Verify the "
+            "current figures before stating them."
+        ]
+    return []
+
+
 # Every UK guard. A guard is (name, fn(matter, question, text) -> notes). The contract, enforced by
 # tests/test_uk_guard_invariants.py: whatever a guard emits is true for ANY matter that can trigger
 # it — forum-specific only when the matter positively matched that forum, otherwise a conditional
@@ -533,6 +561,7 @@ UK_GUARDS: List[Tuple[str, Callable[[UkMatter, str, str], List[str]]]] = [
     ("ni_extent", _guard_ni_extent),
     ("pace_extent", _guard_pace_extent),
     ("cdm_extent", _guard_cdm_extent),
+    ("unfair_dismissal_cap", _guard_unfair_dismissal_cap),
 ]
 
 

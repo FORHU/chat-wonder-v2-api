@@ -1305,7 +1305,9 @@ def _search_results_to_source_metadata(results: list) -> list:
     ]
 
 
-def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool, extra_quote_sources=None) -> str:
+def _finalize_legal_citations(
+    text: str, search_results, *, legal_mode: bool, extra_quote_sources=None, quotation_blocks_only: bool = False
+) -> str:
     def on_repair(reason: str):
         logging.info("[legal-citation] repaired /sources/ link(s)")
         increment_metric_counter("legal.citation_repair.count", value=1, tags={"reason": reason}, session_id=None)
@@ -1326,6 +1328,7 @@ def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool, ex
         on_gate=on_gate,
         on_strip_quote=on_strip_quote,
         extra_quote_sources=extra_quote_sources,
+        quotation_blocks_only=quotation_blocks_only,
     )
 
 
@@ -1367,7 +1370,15 @@ def _finalize_legal_response(
     Doctrine guards are jurisdiction-specific: the PH guards used to run on UK answers too
     (a UK defamation question could pick up a Civil Code Article 33 reminder)."""
     exhibits = exhibit_texts(state)  # the case's own documents: a legitimate source for quotations
-    out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode, extra_quote_sources=exhibits)
+    out = _finalize_legal_citations(
+        text,
+        search_results,
+        legal_mode=legal_mode,
+        extra_quote_sources=exhibits,
+        # UK: only a blockquote formatted as a quotation is checked — proposed wording set as a
+        # blockquote is not a claim about any source and must not be deleted as one.
+        quotation_blocks_only=(jurisdiction == "UK"),
+    )
     if legal_mode:
         out = append_missing_prefetched_mentions(out, search_results)
         if jurisdiction == "UK":
@@ -2858,7 +2869,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk"):
-        _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
+        _chain_kwargs["verify"] = make_legal_verifier(state, query=query, uk=(persona == "legal_uk"))
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
@@ -3197,7 +3208,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk") and not getattr(state, "skip_legal_verify", False):
-        _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
+        _chain_kwargs["verify"] = make_legal_verifier(state, query=query, uk=(persona == "legal_uk"))
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
