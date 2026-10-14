@@ -151,11 +151,13 @@ def _normalize_quote_text(text: str) -> str:
     return t
 
 
-def collect_tool_result_text_corpus(search_results) -> str:
-    """Flatten retrieved snippets / structured fields for quote verification."""
-    if not search_results:
+def collect_tool_result_text_corpus(search_results, extra_texts=None) -> str:
+    """Flatten retrieved snippets / structured fields for quote verification.
+
+    extra_texts: further text a quotation may legitimately come from — the case's own exhibits."""
+    if not search_results and not extra_texts:
         return ""
-    parts: List[str] = []
+    parts: List[str] = [t.strip() for t in (extra_texts or []) if isinstance(t, str) and t.strip()]
 
     def walk(obj, depth=0):
         if depth > 6 or obj is None:
@@ -175,7 +177,7 @@ def collect_tool_result_text_corpus(search_results) -> str:
             for item in obj[:50]:
                 walk(item, depth + 1)
 
-    for row in search_results:
+    for row in search_results or []:
         walk(row)
     return _normalize_quote_text("\n".join(parts))
 
@@ -217,12 +219,14 @@ def strip_unverified_blockquotes(
     text: str,
     search_results,
     on_strip: OnEvent = None,
+    extra_texts=None,
 ) -> str:
-    """Demote blockquote lines whose body is not grounded in tool-result text."""
+    """Demote blockquote lines whose body is not grounded in tool-result text (or, via
+    extra_texts, the case's own exhibits)."""
     if not text or not isinstance(text, str):
         return text
 
-    corpus = collect_tool_result_text_corpus(search_results)
+    corpus = collect_tool_result_text_corpus(search_results, extra_texts)
     stripped = [0]
 
     def repl(m: re.Match) -> str:
@@ -415,11 +419,14 @@ def apply_legal_citation_pipeline(
     on_repair: OnEvent = None,
     on_gate: OnEvent = None,
     on_strip_quote: OnEvent = None,
+    extra_quote_sources=None,
 ) -> str:
     """Repair → (legal) strip bad quotes → (legal) gate URLs → (legal) HTML format."""
     out = repair_legal_source_links(text, search_results, on_repair=on_repair)
     if legal_mode:
-        out = strip_unverified_blockquotes(out, search_results, on_strip=on_strip_quote)
+        out = strip_unverified_blockquotes(
+            out, search_results, on_strip=on_strip_quote, extra_texts=extra_quote_sources
+        )
         out = gate_unverified_legal_urls(out, search_results, on_gate=on_gate)
         out = format_legal_citation_links(out)
     return out

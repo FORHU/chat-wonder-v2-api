@@ -25,6 +25,7 @@ from legal_citations import (
     collect_tool_result_text_corpus,
     is_unverified_blockquote,
 )
+from exhibit_quotes import exhibit_texts, find_exhibit_misquotes
 
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _BLOCKQUOTE_LINE = re.compile(r"^\s*>\s*(?P<body>.*)$", re.M)
@@ -216,6 +217,9 @@ class AuditReport:
     unverified_urls: List[Tuple[str, str]] = field(default_factory=list)
     truncated_urls: List[Tuple[str, str]] = field(default_factory=list)
     unverified_quotes: List[str] = field(default_factory=list)
+    # (quoted phrase, what the exhibit actually says): inline quotes that nearly match exhibit
+    # wording but are not verbatim — see exhibit_quotes.find_exhibit_misquotes.
+    exhibit_misquotes: List[Tuple[str, str]] = field(default_factory=list)
     allowed: List[Tuple[str, str]] = field(default_factory=list)
     contradiction_resolutions: int = 0
     # 0 = the contradiction-sweep check is disabled for this turn (no case-document bundle to
@@ -238,6 +242,7 @@ class AuditReport:
             self.unverified_urls
             or self.truncated_urls
             or self.unverified_quotes
+            or self.exhibit_misquotes
             or self.contradiction_deficit
             or self.missing_authorities
         )
@@ -252,6 +257,8 @@ class AuditReport:
             parts.append(f"{self.url_issue_count} unverified citation link(s)")
         if self.unverified_quotes:
             parts.append(f"{len(self.unverified_quotes)} unverified quotation(s)")
+        if self.exhibit_misquotes:
+            parts.append(f"{len(self.exhibit_misquotes)} quotation(s) not verbatim to the exhibit")
         if self.contradiction_deficit:
             parts.append(f"only {self.contradiction_resolutions}/{self.min_contradiction_resolutions} contradictions resolved")
         if self.missing_authorities:
@@ -310,6 +317,7 @@ def audit_legal_draft(
     *,
     min_contradiction_resolutions: int = 0,
     named_authorities: Optional[List[str]] = None,
+    extra_quote_sources: Optional[List[str]] = None,
 ) -> AuditReport:
     """Report (never rewrite) every citation link / blockquote the finalizer would demote, plus
     (when min_contradiction_resolutions > 0 — see AuditReport) whether the draft shows enough
@@ -330,11 +338,12 @@ def audit_legal_draft(
         elif verdict == "unverified":
             report.unverified_urls.append((label, href))
 
-    corpus = collect_tool_result_text_corpus(search_results)
+    corpus = collect_tool_result_text_corpus(search_results, extra_quote_sources)
     for m in _BLOCKQUOTE_LINE.finditer(text):
         body = m.group("body")
         if is_unverified_blockquote(body, corpus):
             report.unverified_quotes.append(body.strip())
+    report.exhibit_misquotes = find_exhibit_misquotes(text, extra_quote_sources or [])
 
     report.contradiction_resolutions = count_contradiction_resolutions(text)
     report.missing_authorities = missing_named_authorities(text, named_authorities or [])
@@ -380,7 +389,18 @@ def build_verifier_feedback(report: AuditReport, *, max_allowed: int = 30) -> st
         lines.append(
             "For each: either fetch the passage and quote it verbatim (PH: get_case with "
             "full text; UK: judgment_get_paragraph / legislation_get_section), or rewrite "
-            "it as a paraphrase without blockquote formatting."
+            "it as a paraphrase without blockquote formatting. Wording from a case document "
+            "(an exhibit) must be copied exactly from that exhibit."
+        )
+
+    if report.exhibit_misquotes:
+        lines.append("")
+        lines.append("Quoted wording that is NOT verbatim to the case document it appears to come from:")
+        for quoted, source in report.exhibit_misquotes:
+            lines.append(f"- “{_clip(quoted, 100)}” — the exhibit says: “{_clip(source, 120)}”")
+        lines.append(
+            "Quote marks mean the document's exact words. For each: copy the exhibit's wording "
+            "exactly inside the quote marks, or paraphrase WITHOUT quote marks."
         )
 
     if report.contradiction_deficit:
@@ -482,6 +502,7 @@ def make_legal_verifier(state, *, max_rounds: Optional[int] = None, query: str =
             getattr(state, "last_search_legal_results", None),
             min_contradiction_resolutions=min_contradictions,
             named_authorities=named,
+            extra_quote_sources=exhibit_texts(state),
         )
         tags = {
             "round": str(rounds_done),

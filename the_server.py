@@ -44,6 +44,7 @@ from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from uk_legal_mcp import urls as uk_urls
 from uk_legal_mcp.authorities import authorities_from_pool as uk_authorities_from_pool
 from legal_citations import apply_legal_citation_pipeline, select_related_cases
+from exhibit_quotes import exhibit_texts, unquote_exhibit_misquotes
 from legal_fact_boost import (
     append_critical_doctrine_guards,
     append_missing_prefetched_mentions,
@@ -1304,7 +1305,7 @@ def _search_results_to_source_metadata(results: list) -> list:
     ]
 
 
-def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) -> str:
+def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool, extra_quote_sources=None) -> str:
     def on_repair(reason: str):
         logging.info("[legal-citation] repaired /sources/ link(s)")
         increment_metric_counter("legal.citation_repair.count", value=1, tags={"reason": reason}, session_id=None)
@@ -1324,6 +1325,7 @@ def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) ->
         on_repair=on_repair,
         on_gate=on_gate,
         on_strip_quote=on_strip_quote,
+        extra_quote_sources=extra_quote_sources,
     )
 
 
@@ -1364,7 +1366,8 @@ def _finalize_legal_response(
 
     Doctrine guards are jurisdiction-specific: the PH guards used to run on UK answers too
     (a UK defamation question could pick up a Civil Code Article 33 reminder)."""
-    out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode)
+    exhibits = exhibit_texts(state)  # the case's own documents: a legitimate source for quotations
+    out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode, extra_quote_sources=exhibits)
     if legal_mode:
         out = append_missing_prefetched_mentions(out, search_results)
         if jurisdiction == "UK":
@@ -1382,6 +1385,9 @@ def _finalize_legal_response(
         if jurisdiction == "UK":
             # A closing list that re-links what the answer already cited reads as repetition.
             out = _dedupe_repeated_citation_links(out)
+            # Quote marks claim the document's exact words: where the verifier round did not fix an
+            # inline phrase that nearly matches an exhibit, drop the marks rather than misstate it.
+            out = unquote_exhibit_misquotes(out, exhibits)
     out = _redact_document_ids(out, state)
     return out
 
