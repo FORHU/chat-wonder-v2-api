@@ -44,10 +44,13 @@ from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from uk_legal_mcp import urls as uk_urls
 from uk_legal_mcp.authorities import authorities_from_pool as uk_authorities_from_pool
 from legal_citations import apply_legal_citation_pipeline, select_related_cases
+from attribution_check import attribution_check_enabled
+from exhibit_quotes import exhibit_texts, unquote_exhibit_misquotes
 from legal_fact_boost import (
     append_critical_doctrine_guards,
     append_missing_prefetched_mentions,
     append_uk_doctrine_guards,
+    case_forum_text,
     prepare_legal_turn,
 )
 import legal_responses_chain
@@ -1303,7 +1306,9 @@ def _search_results_to_source_metadata(results: list) -> list:
     ]
 
 
-def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) -> str:
+def _finalize_legal_citations(
+    text: str, search_results, *, legal_mode: bool, extra_quote_sources=None, quotation_blocks_only: bool = False
+) -> str:
     def on_repair(reason: str):
         logging.info("[legal-citation] repaired /sources/ link(s)")
         increment_metric_counter("legal.citation_repair.count", value=1, tags={"reason": reason}, session_id=None)
@@ -1323,6 +1328,8 @@ def _finalize_legal_citations(text: str, search_results, *, legal_mode: bool) ->
         on_repair=on_repair,
         on_gate=on_gate,
         on_strip_quote=on_strip_quote,
+        extra_quote_sources=extra_quote_sources,
+        quotation_blocks_only=quotation_blocks_only,
     )
 
 
@@ -1363,17 +1370,36 @@ def _finalize_legal_response(
 
     Doctrine guards are jurisdiction-specific: the PH guards used to run on UK answers too
     (a UK defamation question could pick up a Civil Code Article 33 reminder)."""
-    out = _finalize_legal_citations(text, search_results, legal_mode=legal_mode)
+    exhibits = exhibit_texts(state)  # the case's own documents: a legitimate source for quotations
+    out = _finalize_legal_citations(
+        text,
+        search_results,
+        legal_mode=legal_mode,
+        extra_quote_sources=exhibits,
+        # UK: only a blockquote formatted as a quotation is checked — proposed wording set as a
+        # blockquote is not a claim about any source and must not be deleted as one.
+        quotation_blocks_only=(jurisdiction == "UK"),
+    )
     if legal_mode:
         out = append_missing_prefetched_mentions(out, search_results)
         if jurisdiction == "UK":
-            out = append_uk_doctrine_guards(out, user_input)
+            out = append_uk_doctrine_guards(out, user_input, case_forum_text(state))
         else:
             out = append_critical_doctrine_guards(out, user_input)
-        from legal_citations import format_legal_citation_links as _format_legal_citation_links, gate_unverified_legal_urls as _gate_unverified_legal_urls
+        from legal_citations import (
+            dedupe_repeated_citation_links as _dedupe_repeated_citation_links,
+            format_legal_citation_links as _format_legal_citation_links,
+            gate_unverified_legal_urls as _gate_unverified_legal_urls,
+        )
 
         out = _gate_unverified_legal_urls(out, search_results)
         out = _format_legal_citation_links(out)
+        if jurisdiction == "UK":
+            # A closing list that re-links what the answer already cited reads as repetition.
+            out = _dedupe_repeated_citation_links(out)
+            # Quote marks claim the document's exact words: where the verifier round did not fix an
+            # inline phrase that nearly matches an exhibit, drop the marks rather than misstate it.
+            out = unquote_exhibit_misquotes(out, exhibits)
     out = _redact_document_ids(out, state)
     return out
 
@@ -2748,6 +2774,30 @@ def _count_sub_questions(query: str) -> int:
     return max(1, len(set(m.group(0).strip() for m in _SUBQ_RE.finditer(query))))
 
 
+def _attribution_judge(state):
+    """The model call the attribution check uses. A small helper model could not tell genuine
+    attributions from fabricated ones reliably (it flagged ~60% of genuine ones in a probe), so this
+    uses the UK legal model at low reasoning effort through the one sanctioned Responses API wrapper
+    (store=False forced, usage recorded). None when the check is switched off or the session has no
+    client, so the verifier simply skips it."""
+    client = getattr(state, "openai_client", None)
+    if client is None or not attribution_check_enabled():
+        return None
+    model = os.getenv("LEGAL_ATTRIBUTION_MODEL") or os.getenv("LEGAL_CHAT_MODEL_UK") or "gpt-5.6-luna"
+
+    def judge(system: str, user: str) -> str:
+        result = legal_responses_chain.create_response(
+            client,
+            model=model,
+            input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            reasoning={"effort": "low"},
+            timeout=90,
+        )
+        return getattr(result, "output_text", "") or ""
+
+    return judge
+
+
 def _legal_model_override(persona: str, state=None, query: str = ""):
     """Legal answers use a stronger model, not the default persona config.
 
@@ -2844,7 +2894,9 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk"):
-        _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
+        _chain_kwargs["verify"] = make_legal_verifier(
+            state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
+        )
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
@@ -3183,7 +3235,9 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     # surface a pending_approval response.
     _auto_approval = True
     if persona in ("legal", "legal_uk") and not getattr(state, "skip_legal_verify", False):
-        _chain_kwargs["verify"] = make_legal_verifier(state, query=query)
+        _chain_kwargs["verify"] = make_legal_verifier(
+            state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
+        )
     if persona in ("legal", "legal_uk") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:

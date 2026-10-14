@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Callable, List, Optional, Set
+from typing import Callable, List, Optional, Set, Tuple
 
 OnEvent = Optional[Callable[[str], None]]
 
@@ -151,11 +151,13 @@ def _normalize_quote_text(text: str) -> str:
     return t
 
 
-def collect_tool_result_text_corpus(search_results) -> str:
-    """Flatten retrieved snippets / structured fields for quote verification."""
-    if not search_results:
+def collect_tool_result_text_corpus(search_results, extra_texts=None) -> str:
+    """Flatten retrieved snippets / structured fields for quote verification.
+
+    extra_texts: further text a quotation may legitimately come from — the case's own exhibits."""
+    if not search_results and not extra_texts:
         return ""
-    parts: List[str] = []
+    parts: List[str] = [t.strip() for t in (extra_texts or []) if isinstance(t, str) and t.strip()]
 
     def walk(obj, depth=0):
         if depth > 6 or obj is None:
@@ -175,7 +177,7 @@ def collect_tool_result_text_corpus(search_results) -> str:
             for item in obj[:50]:
                 walk(item, depth + 1)
 
-    for row in search_results:
+    for row in search_results or []:
         walk(row)
     return _normalize_quote_text("\n".join(parts))
 
@@ -213,16 +215,63 @@ def is_unverified_blockquote(body: str, corpus_norm: str) -> bool:
     return not quote_appears_in_corpus(body, corpus_norm)
 
 
+_UNVERIFIED_QUOTE_NOTICE = (
+    "*[Unverified quotation removed — wording was not found in retrieved "
+    "case/RA text. Rely on the paraphrase and citation above/below.]*"
+)
+_QUOTE_OPENER = re.compile(r'^[\s*_]*["“]')
+_BLOCKQUOTE_BODY = re.compile(r"^\s*>\s?(.*)$")
+
+
+def quotation_blockquote_lines(text: str) -> List[Tuple[int, int, str]]:
+    """(start, end, body) for each line of every blockquote that is a *quotation*.
+
+    A blockquote claims to quote a source only when it is formatted as a quotation — its body
+    opens with a quote mark (`> *"..."*`). Proposed or draft wording (a suggested clause, schedule
+    wording) is sometimes set as a blockquote too; that makes no claim about any source, so it is
+    not returned here. A quotation block runs until the first line that is not part of the
+    blockquote, so a quotation that wraps onto further `>` lines is checked as a whole."""
+    spans: List[Tuple[int, int, str]] = []
+    in_quote = False
+    pos = 0
+    for line in text.split("\n"):
+        start, end = pos, pos + len(line)
+        pos = end + 1
+        m = _BLOCKQUOTE_BODY.match(line)
+        if not m:
+            in_quote = False
+            continue
+        body = m.group(1)
+        if _QUOTE_OPENER.match(body):
+            in_quote = True
+        if in_quote:
+            spans.append((start, end, body))
+    return spans
+
+
 def strip_unverified_blockquotes(
     text: str,
     search_results,
     on_strip: OnEvent = None,
+    extra_texts=None,
+    quotation_blocks_only: bool = False,
 ) -> str:
-    """Demote blockquote lines whose body is not grounded in tool-result text."""
+    """Demote blockquote lines whose body is not grounded in tool-result text (or, via
+    extra_texts, the case's own exhibits).
+
+    quotation_blocks_only: only blockquotes formatted as a quotation are checked; a blockquote of
+    proposed wording is left alone (see quotation_blockquote_lines)."""
     if not text or not isinstance(text, str):
         return text
 
-    corpus = collect_tool_result_text_corpus(search_results)
+    corpus = collect_tool_result_text_corpus(search_results, extra_texts)
+    if quotation_blocks_only:
+        spans = [(s, e) for s, e, body in quotation_blockquote_lines(text) if is_unverified_blockquote(body, corpus)]
+        for s, e in reversed(spans):
+            text = text[:s] + _UNVERIFIED_QUOTE_NOTICE + text[e:]
+        if spans and on_strip:
+            on_strip("unverified_blockquote")
+        return text
     stripped = [0]
 
     def repl(m: re.Match) -> str:
@@ -230,10 +279,7 @@ def strip_unverified_blockquotes(
         if not is_unverified_blockquote(body, corpus):
             return m.group(0)
         stripped[0] += 1
-        return (
-            "*[Unverified quotation removed — wording was not found in retrieved "
-            "case/RA text. Rely on the paraphrase and citation above/below.]*"
-        )
+        return _UNVERIFIED_QUOTE_NOTICE
 
     out = _BLOCKQUOTE_LINE.sub(repl, text)
     if stripped[0] and on_strip:
@@ -345,6 +391,68 @@ def format_legal_citation_links(text: str) -> str:
     return text
 
 
+_LEGAL_REF_ANCHOR = re.compile(
+    r'<a href="([^"]+)" class="legal-ref (law|jurisprudence)"[^>]*>(.*?)</a>', re.S
+)
+_CITATION_LABEL_SUFFIX = re.compile(r"\s+(?:Law|Jurisprudence)$")
+
+
+def _citation_key(m: "re.Match") -> tuple:
+    return (re.sub(r"\s+", " ", m.group(3)).strip().lower(), m.group(1))
+
+
+def _drop_repeated_anchor(text: str, m: "re.Match") -> str:
+    """Remove one repeated citation anchor with the least disruption to the sentence around it."""
+    before, after = text[: m.start()], text[m.end() :]
+    line_start = before.rfind("\n") + 1
+    newline = after.find("\n")
+    line_end = len(text) if newline < 0 else m.end() + newline  # index of the newline, or end
+
+    # Followed by "; <next citation>": a trail, so drop this one and its separator.
+    sep = re.match(r"[ \t]*;[ \t]*(?=<a )", after)
+    if sep:
+        return before + after[sep.end() :]
+
+    # Ends its block (optionally before "." or ";"): drop it and the separator in front of it.
+    tail = re.match(r"[ \t]*[.;]?[ \t]*(?=\n|$)", after)
+    if tail:
+        # An attribution or bullet line that was only the citation ("> - [Case Jurisprudence]",
+        # "- [Act, s 1 Law]") has nothing left: delete the whole line.
+        if re.fullmatch(r"[ \t]*(?:>[ \t]*)?(?:[-*][ \t]*)?", text[line_start : m.start()]):
+            return text[:line_start] + text[line_end + 1 :]
+        trimmed = re.sub(r"[ \t]*[;,][ \t]*$", "", before).rstrip(" \t")
+        # Only delete a citation that follows a complete sentence or another citation; one that is
+        # the grammatical object ("It follows from [link].") keeps its words below.
+        if not trimmed or trimmed[-1] in ".?!:)\n" or trimmed.endswith("</a>"):
+            if tail.group(0).strip() == "." and trimmed and trimmed[-1] not in ".?!:)\n":
+                trimmed += "."
+            return trimmed + after[tail.end() :]
+
+    # Inside a sentence or table cell: keep the words, drop the repeated link.
+    return before + _CITATION_LABEL_SUFFIX.sub("", m.group(3)) + after
+
+
+def dedupe_repeated_citation_links(text: str) -> str:
+    """Keep the first occurrence of each citation (same label and href) and drop later repeats.
+
+    A bottom-line or closing list that re-links everything already cited reads as repetition.
+    A different provision of the same document has a different label (its own pinpoint), so it
+    is never treated as a repeat. Run after format_legal_citation_links (anchors are present)."""
+    if not text or not isinstance(text, str) or "legal-ref" not in text:
+        return text
+    for _ in range(500):  # each pass removes one repeat; the bound only guards a runaway loop
+        seen = set()
+        for m in _LEGAL_REF_ANCHOR.finditer(text):
+            key = _citation_key(m)
+            if key in seen:
+                text = _drop_repeated_anchor(text, m)
+                break
+            seen.add(key)
+        else:
+            break
+    return text
+
+
 def apply_legal_citation_pipeline(
     text: str,
     search_results,
@@ -353,11 +461,19 @@ def apply_legal_citation_pipeline(
     on_repair: OnEvent = None,
     on_gate: OnEvent = None,
     on_strip_quote: OnEvent = None,
+    extra_quote_sources=None,
+    quotation_blocks_only: bool = False,
 ) -> str:
     """Repair → (legal) strip bad quotes → (legal) gate URLs → (legal) HTML format."""
     out = repair_legal_source_links(text, search_results, on_repair=on_repair)
     if legal_mode:
-        out = strip_unverified_blockquotes(out, search_results, on_strip=on_strip_quote)
+        out = strip_unverified_blockquotes(
+            out,
+            search_results,
+            on_strip=on_strip_quote,
+            extra_texts=extra_quote_sources,
+            quotation_blocks_only=quotation_blocks_only,
+        )
         out = gate_unverified_legal_urls(out, search_results, on_gate=on_gate)
         out = format_legal_citation_links(out)
     return out

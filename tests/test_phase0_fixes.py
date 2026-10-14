@@ -140,13 +140,23 @@ class UkDoctrineGuardTests(unittest.TestCase):
     def test_dpa_part3_trap(self):
         q = "Covert monitoring — lawful under Data Protection Act 2018 ss 35-40?"
         out = append_uk_doctrine_guards("The employer must consider necessity.", q)
-        self.assertIn("Part 3 does not apply to a private employer", out)
+        self.assertIn("Part 3 is for law-enforcement processing only", out)
 
     def test_business_records_route(self):
+        # No forum named: the note is the all-forums one, which still carries the s.117 route.
         q = "Hearsay problems with the Met Office certificate and the Halbrook ledger."
         out = append_uk_doctrine_guards("These records may be admissible.", q)
         self.assertIn("CJA 2003 s.117", out)
         self.assertEqual(append_uk_doctrine_guards("Admissible under s 117 CJA 2003.", q), "Admissible under s 117 CJA 2003.")
+
+    def test_business_records_route_is_forum_specific_for_a_tribunal(self):
+        # s.117 is criminal evidence: an Employment Tribunal answer that mentions hearsay and a
+        # rota log/register gets the tribunal's own rule, not a Crown Court note.
+        q = "How should the schedules of loss deal with double recovery in the Employment Tribunal?"
+        text = "The minutes are hearsay-adjacent and the rota register is disputed; the Tribunal weighs both."
+        out = append_uk_doctrine_guards(text, q)
+        self.assertIn("Hearsay and records (Employment Tribunal)", out)
+        self.assertNotIn("Business documents (criminal proceedings)", out)
 
     def test_northern_ireland_extent(self):
         q = "I work in Belfast. Does the Employment Rights Act 1996 protect me as a whistleblower?"

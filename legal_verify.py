@@ -24,7 +24,11 @@ from legal_citations import (
     classify_href,
     collect_tool_result_text_corpus,
     is_unverified_blockquote,
+    quotation_blockquote_lines,
 )
+from attribution_check import check_attributions
+from exhibit_quotes import exhibit_texts, find_exhibit_misquotes
+from legal_fact_boost import RequiredProvision, missing_required_provisions
 
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _BLOCKQUOTE_LINE = re.compile(r"^\s*>\s*(?P<body>.*)$", re.M)
@@ -211,11 +215,26 @@ def missing_named_authorities(draft: str, names: List[str]) -> List[str]:
     return missing
 
 
+def missing_cap_statement(question: str, draft: str) -> bool:
+    """True when a remedies question's draft discusses the compensatory award without stating its cap
+    (ERA 1996 s.124): one of the controlling provisions in legal_fact_boost.REQUIRED_PROVISIONS."""
+    return any(p.name == "era_s124_cap" for p in missing_required_provisions(question, draft))
+
+
 @dataclass
 class AuditReport:
     unverified_urls: List[Tuple[str, str]] = field(default_factory=list)
     truncated_urls: List[Tuple[str, str]] = field(default_factory=list)
     unverified_quotes: List[str] = field(default_factory=list)
+    # (quoted phrase, what the exhibit actually says): inline quotes that nearly match exhibit
+    # wording but are not verbatim — see exhibit_quotes.find_exhibit_misquotes.
+    exhibit_misquotes: List[Tuple[str, str]] = field(default_factory=list)
+    # Controlling provisions (legal_fact_boost.REQUIRED_PROVISIONS) the topic needs but the draft
+    # never states — e.g. the unfair dismissal cap (ERA s.124) and the bar on double compensation (s.126).
+    missing_provisions: List[RequiredProvision] = field(default_factory=list)
+    # (sentence, why) for sentences that attribute a position or statement to a party, witness or
+    # document of the case that no case document records — see attribution_check.
+    unsupported_attributions: List[Tuple[str, str]] = field(default_factory=list)
     allowed: List[Tuple[str, str]] = field(default_factory=list)
     contradiction_resolutions: int = 0
     # 0 = the contradiction-sweep check is disabled for this turn (no case-document bundle to
@@ -233,11 +252,18 @@ class AuditReport:
         )
 
     @property
+    def missing_cap(self) -> bool:
+        return any(p.name == "era_s124_cap" for p in self.missing_provisions)
+
+    @property
     def has_issues(self) -> bool:
         return bool(
             self.unverified_urls
             or self.truncated_urls
             or self.unverified_quotes
+            or self.exhibit_misquotes
+            or bool(self.missing_provisions)
+            or bool(self.unsupported_attributions)
             or self.contradiction_deficit
             or self.missing_authorities
         )
@@ -252,6 +278,13 @@ class AuditReport:
             parts.append(f"{self.url_issue_count} unverified citation link(s)")
         if self.unverified_quotes:
             parts.append(f"{len(self.unverified_quotes)} unverified quotation(s)")
+        if self.exhibit_misquotes:
+            parts.append(f"{len(self.exhibit_misquotes)} quotation(s) not verbatim to the exhibit")
+        if self.missing_provisions:
+            names = ", ".join(p.name for p in self.missing_provisions)
+            parts.append(f"{len(self.missing_provisions)} controlling provision(s) not stated ({names})")
+        if self.unsupported_attributions:
+            parts.append(f"{len(self.unsupported_attributions)} attribution(s) no case document supports")
         if self.contradiction_deficit:
             parts.append(f"only {self.contradiction_resolutions}/{self.min_contradiction_resolutions} contradictions resolved")
         if self.missing_authorities:
@@ -310,6 +343,10 @@ def audit_legal_draft(
     *,
     min_contradiction_resolutions: int = 0,
     named_authorities: Optional[List[str]] = None,
+    extra_quote_sources: Optional[List[str]] = None,
+    uk: bool = False,
+    question: str = "",
+    attribution_judge: Optional[Callable[[str, str], str]] = None,
 ) -> AuditReport:
     """Report (never rewrite) every citation link / blockquote the finalizer would demote, plus
     (when min_contradiction_resolutions > 0 — see AuditReport) whether the draft shows enough
@@ -330,11 +367,22 @@ def audit_legal_draft(
         elif verdict == "unverified":
             report.unverified_urls.append((label, href))
 
-    corpus = collect_tool_result_text_corpus(search_results)
-    for m in _BLOCKQUOTE_LINE.finditer(text):
-        body = m.group("body")
+    corpus = collect_tool_result_text_corpus(search_results, extra_quote_sources)
+    if uk:
+        # UK: only a blockquote formatted as a quotation claims a source; proposed wording does not.
+        bodies = [body for _s, _e, body in quotation_blockquote_lines(text)]
+    else:
+        bodies = [m.group("body") for m in _BLOCKQUOTE_LINE.finditer(text)]
+    for body in bodies:
         if is_unverified_blockquote(body, corpus):
             report.unverified_quotes.append(body.strip())
+    report.exhibit_misquotes = find_exhibit_misquotes(text, extra_quote_sources or [])
+    if uk:
+        report.missing_provisions = missing_required_provisions(question, text)
+        # Meaning, not word overlap: does any case document record the party/witness/document
+        # taking the position the answer attributes to it? Skipped without exhibits or a judge.
+        if attribution_judge is not None and extra_quote_sources:
+            report.unsupported_attributions = check_attributions(text, extra_quote_sources, attribution_judge)
 
     report.contradiction_resolutions = count_contradiction_resolutions(text)
     report.missing_authorities = missing_named_authorities(text, named_authorities or [])
@@ -380,7 +428,38 @@ def build_verifier_feedback(report: AuditReport, *, max_allowed: int = 30) -> st
         lines.append(
             "For each: either fetch the passage and quote it verbatim (PH: get_case with "
             "full text; UK: judgment_get_paragraph / legislation_get_section), or rewrite "
-            "it as a paraphrase without blockquote formatting."
+            "it as a paraphrase without blockquote formatting. Wording from a case document "
+            "(an exhibit) must be copied exactly from that exhibit."
+        )
+
+    if report.exhibit_misquotes:
+        lines.append("")
+        lines.append("Quoted wording that is NOT verbatim to the case document it appears to come from:")
+        for quoted, source in report.exhibit_misquotes:
+            lines.append(f"- “{_clip(quoted, 100)}” — the exhibit says: “{_clip(source, 120)}”")
+        lines.append(
+            "Quote marks mean the document's exact words. For each: copy the exhibit's wording "
+            "exactly inside the quote marks, or paraphrase WITHOUT quote marks."
+        )
+
+    if report.missing_provisions:
+        lines.append("")
+        lines.append("Controlling provisions the answer must state:")
+        for provision in report.missing_provisions:
+            lines.append(f"- {provision.fetch_hint}")
+
+    if report.unsupported_attributions:
+        lines.append("")
+        lines.append(
+            "Sentences that attribute a statement or position to a party, witness or document of this "
+            "case that NO case document records:"
+        )
+        for sentence, why in report.unsupported_attributions:
+            lines.append(f"- {_clip(sentence, 220)} — {_clip(why, 120)}")
+        lines.append(
+            "Never attribute to a party, witness or document what its own text does not say. For each: "
+            "delete it, or recast it as your own inference or argument and say so (for example "
+            "\"nothing in the documents shows X taking this position, but it may argue...\")."
         )
 
     if report.contradiction_deficit:
@@ -458,7 +537,14 @@ def verify_max_rounds_from_env() -> int:
         return 1
 
 
-def make_legal_verifier(state, *, max_rounds: Optional[int] = None, query: str = "") -> Optional[Verifier]:
+def make_legal_verifier(
+    state,
+    *,
+    max_rounds: Optional[int] = None,
+    query: str = "",
+    uk: bool = False,
+    judge: Optional[Callable[[str, str], str]] = None,
+) -> Optional[Verifier]:
     """Closure the chain loops call with (draft_text, rounds_done) when the model
     stops calling tools. Returns feedback text to inject, or None to accept the
     draft. Reads state.last_search_legal_results at call time because the pool
@@ -482,7 +568,16 @@ def make_legal_verifier(state, *, max_rounds: Optional[int] = None, query: str =
             getattr(state, "last_search_legal_results", None),
             min_contradiction_resolutions=min_contradictions,
             named_authorities=named,
+            extra_quote_sources=exhibit_texts(state),
+            uk=uk,
+            question=query,
+            # The judge is a paid call and its finding can only become feedback while a revise round
+            # remains, so it is not made on the final pass.
+            attribution_judge=judge if rounds_done < rounds else None,
         )
+        for sentence, why in report.unsupported_attributions:
+            # Logged so a reviewer can see exactly what the judge flagged and judge it for false alarms.
+            logging.info("[legal-verify] unsupported attribution: %s | why: %s", sentence[:240], why[:160])
         tags = {
             "round": str(rounds_done),
             "urls": str(report.url_issue_count),
