@@ -131,6 +131,29 @@ class SelectRelatedCasesTests(unittest.TestCase):
         self.assertEqual([r["title"] for r in out], ["Infiniteland Ltd v Artisan Contracting Ltd", "Misrepresentation Act 1967"])
         self.assertEqual(out[0]["url"], "https://caselaw.nationalarchives.gov.uk/ewca/civ/2005/758")
 
+    def test_uk_case_law_rows_known_by_uri_become_cards(self):
+        # Shapes as the UK Legal MCP returns them: case_law_search rows carry only a `uri` slug and
+        # `identifiers`; get_legal_recommendation_uk nests rows under `case_law` / `legislation`.
+        search = {
+            "results": [
+                {"uri": "ewhc/bp/2026/2559", "title": "Moller v One Touch Solution Ltd", "court": "High Court",
+                 "identifiers": [{"type": "ukncn", "value": "[2026] EWHC 2559 (BP)"}]},
+            ],
+            "page": 1, "has_more": False, "total_pages": 1,
+        }
+        recommendation = {
+            "issue": "fair disclosure",
+            "case_law": [{"title": "Koza Ltd, Re", "court": "High Court", "uri": "ewhc/bp/2026/2528"}],
+            "legislation": [],
+        }
+        out = select_related_cases([search, recommendation])
+        by_title = {r["title"]: r for r in out}
+        self.assertEqual(set(by_title), {"Moller v One Touch Solution Ltd", "Koza Ltd, Re"})
+        moller = by_title["Moller v One Touch Solution Ltd"]
+        self.assertEqual(moller["url"], "https://caselaw.nationalarchives.gov.uk/ewhc/bp/2026/2559")
+        self.assertEqual(moller["case_number"], "[2026] EWHC 2559 (BP)")
+        self.assertEqual(moller["type"], "case_law")
+
     def test_ranks_by_score_when_unvetted(self):
         pool = [
             {"id": "a", "title": "Low score", "score": 0.2, "type": "jurisprudence"},

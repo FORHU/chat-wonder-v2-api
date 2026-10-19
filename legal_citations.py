@@ -81,6 +81,8 @@ def select_related_cases(search_results, limit: int = 6) -> List[dict]:
             str(row.get("item_id") or row.get("id") or "").strip()
             or str(meta.get("id") or "").strip()
             or str(row.get("url") or meta.get("url") or "").strip()
+            # A UK case-law row is known by its National Archives slug alone.
+            or str(row.get("uri") or "").strip()
         )
 
     def rows(pool):
@@ -93,7 +95,7 @@ def select_related_cases(search_results, limit: int = 6) -> List[dict]:
             if identity(row):
                 yield row
                 continue
-            for key in ("results", "judgments", "items"):
+            for key in ("results", "judgments", "items", "case_law", "legislation"):
                 nested = row.get(key)
                 if isinstance(nested, list):
                     yield from (r for r in nested if isinstance(r, dict))
@@ -115,15 +117,22 @@ def select_related_cases(search_results, limit: int = 6) -> List[dict]:
         key=lambda r: (not r["_vetted"], -(r.get("score") or 0.0)),
     )
 
+    def neutral_citation(row: dict):
+        for ident in row.get("identifiers") or []:
+            if isinstance(ident, dict) and ident.get("type") == "ukncn" and ident.get("value"):
+                return ident["value"]
+        return None
+
     results = []
     for r in ranked[:limit]:
         meta = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+        uri = str(r.get("uri") or "").strip().strip("/")
         results.append(
             {
-                "type": r.get("type") or "legal_document",
+                "type": r.get("type") or ("case_law" if uri else "legal_document"),
                 "title": r.get("title"),
-                "url": r.get("url") or meta.get("url"),
-                "case_number": r.get("case_number"),
+                "url": r.get("url") or meta.get("url") or (f"https://caselaw.nationalarchives.gov.uk/{uri}" if uri else None),
+                "case_number": r.get("case_number") or neutral_citation(r),
                 "ra_number": r.get("ra_number"),
                 "year": r.get("year") or meta.get("year"),
                 "snippet": r.get("snippet"),
