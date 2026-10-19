@@ -83,10 +83,23 @@ def select_related_cases(search_results, limit: int = 6) -> List[dict]:
             or str(row.get("url") or meta.get("url") or "").strip()
         )
 
+    def rows(pool):
+        # A UK Legal MCP call is pooled whole ({"results": [...], "total": ...}), not row by row
+        # like juris.ph's search_* results, so an entry with no identity of its own contributes
+        # the rows inside it. Without this every UK answer got no related cases.
+        for row in pool:
+            if not isinstance(row, dict):
+                continue
+            if identity(row):
+                yield row
+                continue
+            for key in ("results", "judgments", "items"):
+                nested = row.get(key)
+                if isinstance(nested, list):
+                    yield from (r for r in nested if isinstance(r, dict))
+
     best: dict = {}
-    for row in search_results:
-        if not isinstance(row, dict):
-            continue
+    for row in rows(search_results):
         key = identity(row)
         if not key:
             continue
