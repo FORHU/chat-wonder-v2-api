@@ -852,6 +852,20 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "RESPONSE — after the tool completes, respond with exactly 1 short sentence confirming the outfit has been generated."
         )
 
+    elif user_input.lower().startswith("[intake]"):
+        # Case Intake: ilovelawyer-client's consumer-side consultation. Gathers facts for a
+        # solicitor, never gives legal advice. No tools — everything comes from the user, not a
+        # lookup. No model override, no verifier, no citation gate: deliberately outside every
+        # `persona in ("legal", "legal_uk")` guardrail gate, since it has nothing for them to guard.
+        persona = "intake"
+        user_input = user_input[8:].strip()
+        filtered_tools = []
+        try:
+            with open("resources/prompts/intake_prompt.txt", "r", encoding="utf-8") as f:
+                addendum_override = f.read()
+        except Exception as e:
+            logging.error(f"Failed to load intake_prompt.txt: {e}")
+
     return persona, user_input, filtered_tools, addendum_override
 
 # ---------------------------------------------------------------------------
@@ -2717,7 +2731,7 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
             )
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
             summary=_no_rag_summary)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
     _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
@@ -3542,7 +3556,7 @@ def chat(request: ChatRequest):
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -4209,7 +4223,7 @@ async def chat_stream(websocket: WebSocket):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_damages_injection(state.case_damages)
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
