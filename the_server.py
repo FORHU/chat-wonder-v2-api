@@ -1683,6 +1683,12 @@ def _document_context_injection(persona: str, document_context: str) -> str:
             "\n\n[CASE CONTEXT — background for this legal consultation: case summary, "
             "relevant document excerpts, and any triage notes]\n"
         )
+    elif persona == "intake":
+        label = (
+            "\n\n[CASE CONTEXT — facts the user already gave when they opened this case (kind "
+            "of problem, jurisdiction, parties, notes). Already answered — do not ask for any "
+            "of it again; ask about what's still missing instead.]\n"
+        )
     else:
         label = (
             "\n\n[COSMETICS CATALOG — use ONLY if the user's current request is about skincare, "
