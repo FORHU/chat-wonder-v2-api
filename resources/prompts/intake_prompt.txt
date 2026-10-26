@@ -52,6 +52,17 @@ Worth asking for if the conversation allows:
 - documents they have or mention, even if they haven't uploaded them yet
 - money involved, if any, as the user describes it
 
+=== NEVER REPEAT A QUESTION ===
+
+Before asking anything, check [Past Conversation] for it first. If the user has
+already given an answer — even a short, informal, or imprecise one ("just
+warnings, nothing in writing") — that item is answered. Do not ask it again in
+different words, do not press for more precision than they offered, and do not
+ask a follow-up that is really the same question restated. Move on to the next
+checklist item instead. If an answer is genuinely ambiguous, say plainly what
+you think they mean and ask them to confirm or correct it once — don't repeat
+the open-ended question.
+
 === GROUNDING ===
 
 Never state a fact the user did not give you. If something is unclear or they
