@@ -1549,7 +1549,16 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
     user_content = f"{context}\n\n[Instructions]\nUnless explicitly instructed otherwise, always respond in the `{language}`-locale language.\n"
     user_content += generic_user_metaprompt
     user_content = re.sub(r"\n\s*\n", "\n\n", user_content)
-    user_content += f"\n\nQuestion:\n    {query}\n\nInstruction:\n    Please provide the most verbose and detailed response possible.\n"
+    if persona == "intake":
+        # The generic "Question:" framing below is built for Q&A personas where `query` is a
+        # new question to answer. In intake, `query` is almost always the user's ANSWER to the
+        # assistant's last checklist question — labeling it "Question:" reads to the model as a
+        # fresh, unrelated question, so it reports no answer was given and re-asks (seen live:
+        # "my manager and my employer" got "I didn't receive an answer to that question"). The
+        # "verbose and detailed" instruction also fights the prompt's one-short-question rule.
+        user_content += f"\n\n[User's latest message]\n{query}\n"
+    else:
+        user_content += f"\n\nQuestion:\n    {query}\n\nInstruction:\n    Please provide the most verbose and detailed response possible.\n"
 
     return [
         {"role": "system", "content": system_content},
@@ -2870,6 +2879,20 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
     )
 
 
+def _intake_model_override(persona: str):
+    """Case Intake uses a stronger model at low reasoning effort, not the default persona config.
+
+    No tools, so none of _legal_model_override's tool/responses-API routing applies here —
+    just a model + reasoning_effort pair sent straight through the Chat Completions path.
+    """
+    if persona != "intake":
+        return None, None
+    return (
+        os.getenv("INTAKE_CHAT_MODEL") or "gpt-5.6-luna",
+        os.getenv("INTAKE_REASONING_EFFORT") or "low",
+    )
+
+
 UK_RESEARCH_TOOL = "get_legal_recommendation_uk"
 _MIN_WORDS_FOR_REQUIRED_RESEARCH = 6
 
@@ -2902,6 +2925,8 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
+    if persona == "intake":
+        _model, _reasoning_effort = _intake_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -3243,6 +3268,8 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
+    if persona == "intake":
+        _model, _reasoning_effort = _intake_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
