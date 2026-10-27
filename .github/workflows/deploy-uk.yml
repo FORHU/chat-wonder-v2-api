@@ -126,6 +126,8 @@ jobs:
                   CHAT_MODEL=${{ vars.CHAT_MODEL }}
                   LEGAL_CHAT_MODEL_UK=${{ vars.LEGAL_CHAT_MODEL_UK }}
                   LEGAL_REASONING_EFFORT_UK=${{ vars.LEGAL_REASONING_EFFORT_UK }}
+                  INTAKE_CHAT_MODEL=${{ vars.INTAKE_CHAT_MODEL }}
+                  INTAKE_REASONING_EFFORT=${{ vars.INTAKE_REASONING_EFFORT }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
