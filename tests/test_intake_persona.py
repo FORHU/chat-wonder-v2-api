@@ -47,6 +47,17 @@ class IntakeWiringTests(unittest.TestCase):
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] my landlord won't fix the boiler")
         self.assertNotIn("LEGAL ASSISTANT MODE", addendum)
 
+    def test_the_prompt_forbids_declaring_readiness_without_checking_each_item(self):
+        # Regression for a live bug (2026-10-26): after two short exchanges the model declared
+        # "I think I have the main information needed" and wrote "You want to seek money" into
+        # the readiness summary — the user never said that. The prompt must explicitly forbid
+        # summarizing an unasked/unanswered must-have item as settled, and call out the specific
+        # item that got fabricated.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("a guess is not an answer", addendum)
+        self.assertIn("do not write a readiness summary", addendum)
+        self.assertIn("do not include it in a\nreadiness summary as if it were settled", addendum)
+
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
 
