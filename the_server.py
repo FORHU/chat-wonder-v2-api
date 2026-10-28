@@ -854,12 +854,23 @@ def process_persona(user_input: str, jurisdiction: str = None):
 
     elif user_input.lower().startswith("[intake]"):
         # Case Intake: ilovelawyer-client's consumer-side consultation. Gathers facts for a
-        # solicitor, never gives legal advice. No tools — everything comes from the user, not a
-        # lookup. No model override, no verifier, no citation gate: deliberately outside every
-        # `persona in ("legal", "legal_uk")` guardrail gate, since it has nothing for them to guard.
+        # solicitor and, as of the advice refinement, may explain the client's general UK rights
+        # with real citations — but never assesses THEIR case, predicts an outcome, or tells them
+        # what to do (that stays legal_uk-only). Deliberately outside every
+        # `persona in ("legal", "legal_uk")` guardrail gate: no verifier/refine loop, no doctrine
+        # guards, no mind map, no model override from that gate — those exist to police *applied*
+        # legal argument, which intake doesn't do. The citation gate is reused directly as a pure
+        # function (see _finalize_intake_citations), not via that gate.
         persona = "intake"
         user_input = user_input[8:].strip()
-        filtered_tools = []
+        intake_whitelist = [
+            "case_law_search",
+            "judgment_get_header",
+            "legislation_search",
+            "legislation_get_section",
+            "get_case_document",
+        ]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in intake_whitelist]
         try:
             with open("resources/prompts/intake_prompt.txt", "r", encoding="utf-8") as f:
                 addendum_override = f.read()
@@ -1414,6 +1425,36 @@ def _finalize_legal_response(
             # Quote marks claim the document's exact words: where the verifier round did not fix an
             # inline phrase that nearly matches an exhibit, drop the marks rather than misstate it.
             out = unquote_exhibit_misquotes(out, exhibits)
+    out = _redact_document_ids(out, state)
+    return out
+
+
+def _is_intake_addendum(addendum_override) -> bool:
+    """Detects the intake persona from its addendum text alone — the same idiom already used
+    for `_legal_mode`/`_resume_persona` (string presence, not a passed-in persona id) — for the
+    HITL-resume code paths (approve()/the WS 'approve' branch), which only ever have
+    `addendum_override` (from state.pending_addendum), never the original `persona` value."""
+    return bool(addendum_override) and "CASE INTAKE MODE" in addendum_override
+
+
+def _finalize_intake_citations(text: str, search_results, state=None) -> str:
+    """Citation gate for intake's general-rights answers — deliberately NOT
+    _finalize_legal_response: no verifier/refine loop, no doctrine guards (those police
+    *applied* legal argument; intake never makes one). Just the same repair → gate →
+    format pipeline legal_uk uses, called directly as a pure function, so a citation intake
+    names is either backed by a real tool result this turn or stripped — never invented.
+    """
+    exhibits = exhibit_texts(state)
+    out = _finalize_legal_citations(
+        text,
+        search_results,
+        legal_mode=True,
+        extra_quote_sources=exhibits,
+        quotation_blocks_only=True,
+    )
+    from legal_citations import dedupe_repeated_citation_links as _dedupe_repeated_citation_links
+
+    out = _dedupe_repeated_citation_links(out)
     out = _redact_document_ids(out, state)
     return out
 
@@ -3755,17 +3796,20 @@ def chat(request: ChatRequest):
 
     state.prompt.append(user_input.strip())
     final_text = (result or "").strip()
-    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-    final_text = _finalize_legal_response(
-        final_text,
-        state.last_search_legal_results,
-        legal_mode=_legal_mode,
-        user_input=user_input,
-        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-        state=state,
-    )
+    if persona == "intake":
+        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+    else:
+        _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+        final_text = _finalize_legal_response(
+            final_text,
+            state.last_search_legal_results,
+            legal_mode=_legal_mode,
+            user_input=user_input,
+            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+            state=state,
+        )
     related_cases: list = []
-    if persona in ("legal", "legal_uk") and state.last_search_legal_results:
+    if persona in ("legal", "legal_uk", "intake") and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
         related_cases = select_related_cases(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
@@ -3923,15 +3967,18 @@ def approve(request: ApproveRequest):
         }
 
     final_text = (cont_result or "").strip()
-    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-    final_text = _finalize_legal_response(
-        final_text,
-        state.last_search_legal_results,
-        legal_mode=_legal_mode,
-        user_input=state.prompt[-1] if state.prompt else "",
-        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-        state=state,
-    )
+    if _is_intake_addendum(addendum_override):
+        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+    else:
+        _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+        final_text = _finalize_legal_response(
+            final_text,
+            state.last_search_legal_results,
+            legal_mode=_legal_mode,
+            user_input=state.prompt[-1] if state.prompt else "",
+            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+            state=state,
+        )
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -4041,6 +4088,7 @@ async def chat_stream(websocket: WebSocket):
                 available_manifest = [t for t in _context.all_fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
                 full_response = ""
                 _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                _is_intake_resume = _is_intake_addendum(addendum_override)
                 _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto", state)
                 _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
                 _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
@@ -4076,9 +4124,10 @@ async def chat_stream(websocket: WebSocket):
                         if chunk.startswith("[TRACE]"):
                             await websocket.send_text(chunk)
                             continue
-                        # Legal answers are buffered and sent post-finalize below,
-                        # same as the main streaming path — see _finalize_legal_response.
-                        if not _legal_mode:
+                        # Legal and intake answers are buffered and sent post-finalize below,
+                        # same as the main streaming path — see _finalize_legal_response /
+                        # _finalize_intake_citations.
+                        if not _legal_mode and not _is_intake_resume:
                             await websocket.send_text(chunk)
                         full_response += chunk
                 finally:
@@ -4086,15 +4135,18 @@ async def chat_stream(websocket: WebSocket):
 
                 if full_response:
                     final_text = full_response.strip()
-                    final_text = _finalize_legal_response(
-                        final_text,
-                        state.last_search_legal_results,
-                        legal_mode=_legal_mode,
-                        user_input=user_input,
-                        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-                        state=state,
-                    )
-                    if _legal_mode:
+                    if _is_intake_resume:
+                        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+                    else:
+                        final_text = _finalize_legal_response(
+                            final_text,
+                            state.last_search_legal_results,
+                            legal_mode=_legal_mode,
+                            user_input=user_input,
+                            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                            state=state,
+                        )
+                    if _legal_mode or _is_intake_resume:
                         await websocket.send_text(final_text)
                     state.generated.append(final_text)
                 _context.sessions[session_id] = state
@@ -4335,28 +4387,31 @@ async def chat_stream(websocket: WebSocket):
                         continue
                     if _ws_t_first_chunk is None:
                         _ws_t_first_chunk = time.time()
-                    # Legal answers must pass through citation gating/doctrine guards
-                    # (_finalize_legal_response) before the client sees them, so raw
-                    # chunks are buffered instead of streamed live for these personas.
-                    if persona not in ("legal", "legal_uk"):
+                    # Legal and intake answers must pass through citation gating (legal also
+                    # gets doctrine guards) before the client sees them, so raw chunks are
+                    # buffered instead of streamed live for these personas.
+                    if persona not in ("legal", "legal_uk", "intake"):
                         await websocket.send_text(chunk)
                     full_response += chunk
 
                 if full_response:
                     state.prompt.append(user_input)
                     final_text = full_response.strip()
-                    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-                    final_text = _finalize_legal_response(
-                        final_text,
-                        state.last_search_legal_results,
-                        legal_mode=_legal_mode,
-                        user_input=user_input,
-                        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-                        state=state,
-                    )
-                    if persona in ("legal", "legal_uk"):
+                    if persona == "intake":
+                        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+                    else:
+                        _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                        final_text = _finalize_legal_response(
+                            final_text,
+                            state.last_search_legal_results,
+                            legal_mode=_legal_mode,
+                            user_input=user_input,
+                            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                            state=state,
+                        )
+                    if persona in ("legal", "legal_uk", "intake"):
                         await websocket.send_text(final_text)
-                    if persona in ("legal", "legal_uk") and state.last_search_legal_results:
+                    if persona in ("legal", "legal_uk", "intake") and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                         related_cases = select_related_cases(state.last_search_legal_results)
