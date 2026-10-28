@@ -10,10 +10,11 @@ tests, same shape as UkWiringTests in tests/test_legal_recommendation_uk.py: no 
 call, no live data.
 """
 
+import os
 import unittest
+from unittest.mock import patch
 
 import the_server as srv
-from legal_citations import gate_unverified_legal_urls
 
 srv._load_user_functions(overwrite_globals=True)
 
@@ -92,6 +93,22 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn(verified_url, out)
         self.assertNotIn("example.com/not-a-real-case", out)
         self.assertIn("a case the AI made up", out)
+
+    def test_intake_reasoning_effort_falls_back_to_none_without_the_responses_api(self):
+        # Regression for a live bug (2026-10-28): intake's new tool whitelist made the old
+        # "always low effort, always Chat Completions" pairing invalid — gpt-5.6-luna rejects
+        # function tools + a real reasoning_effort on /v1/chat/completions ("Function tools with
+        # reasoning_effort are not supported... To use function tools, use /v1/responses or set
+        # reasoning_effort to 'none'."). _intake_model_override must follow the same
+        # Responses-API-or-none pattern _legal_model_override already uses, or reason_loop's
+        # routing (persona == "intake" and _legal_use_responses_api()) would send "low" straight
+        # into the Chat Completions path whenever that flag is off.
+        with patch.dict(os.environ, {"LEGAL_USE_RESPONSES_API": "true", "INTAKE_REASONING_EFFORT": ""}):
+            _model, effort = srv._intake_model_override("intake")
+            self.assertEqual(effort, "low")
+        with patch.dict(os.environ, {"LEGAL_USE_RESPONSES_API": "false", "INTAKE_REASONING_EFFORT": ""}):
+            _model, effort = srv._intake_model_override("intake")
+            self.assertEqual(effort, "none")
 
     def test_both_persona_label_dicts_know_about_intake(self):
         import re

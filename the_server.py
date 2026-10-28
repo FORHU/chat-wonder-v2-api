@@ -2929,14 +2929,24 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
 def _intake_model_override(persona: str):
     """Case Intake uses a stronger model at low reasoning effort, not the default persona config.
 
-    No tools, so none of _legal_model_override's tool/responses-API routing applies here —
-    just a model + reasoning_effort pair sent straight through the Chat Completions path.
+    Intake now carries a small tool whitelist (the advice refinement — case law/legislation
+    lookup for citations), so the same constraint _legal_model_override documents applies:
+    function tools + a real reasoning_effort are rejected outright on /v1/chat/completions
+    ("Function tools with reasoning_effort are not supported for gpt-5.6-luna in
+    /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to
+    'none'.", confirmed live). reason_loop/streaming_reason_loop route intake through
+    legal_responses_chain (the /v1/responses path) exactly when this returns anything but
+    "none", via the same _legal_use_responses_api() toggle legal/legal_uk use. If that toggle is
+    ever turned off, fall back to "none" here too — same posture as _legal_model_override's own
+    use_responses fallback — rather than reproduce the crash on the Chat Completions path.
     """
     if persona != "intake":
         return None, None
+    configured = os.getenv("INTAKE_REASONING_EFFORT")
+    reasoning_effort = configured or ("low" if _legal_use_responses_api() else "none")
     return (
         os.getenv("INTAKE_CHAT_MODEL") or "gpt-5.6-luna",
-        os.getenv("INTAKE_REASONING_EFFORT") or "low",
+        reasoning_effort,
     )
 
 
@@ -2988,6 +2998,12 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
+    elif persona == "intake" and _legal_use_responses_api():
+        # Same reason as legal/legal_uk (_legal_model_override's docstring): intake's tool
+        # whitelist is non-empty now, and a real reasoning_effort with function tools on
+        # /v1/chat/completions is rejected outright — route through /v1/responses instead,
+        # which is what actually lets INTAKE_REASONING_EFFORT be anything but "none".
+        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
         result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     _broadcast_turn_confidence(state, session_id)
@@ -3331,6 +3347,9 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
+    elif persona == "intake" and _legal_use_responses_api():
+        # Same reason as reason_loop's non-streaming branch — see _intake_model_override.
+        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
         chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     async for chunk in chain:
