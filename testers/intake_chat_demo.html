@@ -544,6 +544,10 @@
       return;
     }
 
+    // The server sends this after __END__, once the post-answer "extras" phase (irrelevant to
+    // intake, but still runs) finishes — a turn boundary marker, never part of the answer.
+    if (chunk === "[DONE]") return;
+
     if (chunk.startsWith("[Sources] ")) {
       try {
         lastSources = JSON.parse(chunk.slice(10)) || [];
@@ -560,11 +564,17 @@
       return;
     }
 
-    if (chunk.startsWith("{") && chunk.includes("pending_approval")) {
+    // Every other typed JSON envelope this socket can send (a {"type":"usage",...} bookkeeping
+    // frame before __END__, a second one after the extras phase, a {"status":"pending_approval",
+    // ...} HITL prompt) — none of these are answer text. Swallow anything JSON-shaped here rather
+    // than letting it fall through to the plain-text branch below and corrupt the bubble.
+    if (chunk.startsWith("{")) {
       try {
         const ev = JSON.parse(chunk);
-        if (ev.status === "pending_approval") {
-          appendSystem(`Tool <strong>${escHtml(ev.tool_name)}</strong> needs approval (unexpected — intake's lookups should be auto-approved).`);
+        if (ev && typeof ev === "object") {
+          if (ev.status === "pending_approval") {
+            appendSystem(`Tool <strong>${escHtml(ev.tool_name)}</strong> needs approval (unexpected — intake's lookups should be auto-approved).`);
+          }
           return;
         }
       } catch {}
