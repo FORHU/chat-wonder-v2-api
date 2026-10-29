@@ -852,6 +852,38 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "RESPONSE — after the tool completes, respond with exactly 1 short sentence confirming the outfit has been generated."
         )
 
+    elif user_input.lower().startswith("[intake]"):
+        # Case Intake: ilovelawyer-client's consumer-side consultation. Gathers facts for a
+        # solicitor and, as of the advice refinement, may explain the client's general UK rights
+        # with real citations — but never assesses THEIR case, predicts an outcome, or tells them
+        # what to do (that stays legal_uk-only). Deliberately outside every
+        # `persona in ("legal", "legal_uk")` guardrail gate: no verifier/refine loop, no doctrine
+        # guards, no mind map, no model override from that gate — those exist to police *applied*
+        # legal argument, which intake doesn't do. The citation gate is reused directly as a pure
+        # function (see _finalize_intake_citations), not via that gate.
+        persona = "intake"
+        user_input = user_input[8:].strip()
+        # get_case_document is deliberately NOT whitelisted here: its scope check
+        # (execute_function_call's allowed_case_document_ids) is only populated by
+        # sync_active_case_documents, which intake never calls — intake gets document awareness
+        # entirely through the excerpts ilovelawyer-api inlines into [CASE CONTEXT] (see
+        # intake-chat.service.ts's documentContext). Whitelisting it here with no scope check
+        # would let any consumer fetch any case's document by UUID. Revisit if intake needs
+        # on-demand document reads: wire case_document_ids through for persona == "intake" too,
+        # the same way legal/legal_uk already do, before re-adding it.
+        intake_whitelist = [
+            "case_law_search",
+            "judgment_get_header",
+            "legislation_search",
+            "legislation_get_section",
+        ]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in intake_whitelist]
+        try:
+            with open("resources/prompts/intake_prompt.txt", "r", encoding="utf-8") as f:
+                addendum_override = f.read()
+        except Exception as e:
+            logging.error(f"Failed to load intake_prompt.txt: {e}")
+
     return persona, user_input, filtered_tools, addendum_override
 
 # ---------------------------------------------------------------------------
@@ -1403,6 +1435,36 @@ def _finalize_legal_response(
     out = _redact_document_ids(out, state)
     return out
 
+
+def _is_intake_addendum(addendum_override) -> bool:
+    """Detects the intake persona from its addendum text alone — the same idiom already used
+    for `_legal_mode`/`_resume_persona` (string presence, not a passed-in persona id) — for the
+    HITL-resume code paths (approve()/the WS 'approve' branch), which only ever have
+    `addendum_override` (from state.pending_addendum), never the original `persona` value."""
+    return bool(addendum_override) and "CASE INTAKE MODE" in addendum_override
+
+
+def _finalize_intake_citations(text: str, search_results, state=None) -> str:
+    """Citation gate for intake's general-rights answers — deliberately NOT
+    _finalize_legal_response: no verifier/refine loop, no doctrine guards (those police
+    *applied* legal argument; intake never makes one). Just the same repair → gate →
+    format pipeline legal_uk uses, called directly as a pure function, so a citation intake
+    names is either backed by a real tool result this turn or stripped — never invented.
+    """
+    exhibits = exhibit_texts(state)
+    out = _finalize_legal_citations(
+        text,
+        search_results,
+        legal_mode=True,
+        extra_quote_sources=exhibits,
+        quotation_blocks_only=True,
+    )
+    from legal_citations import dedupe_repeated_citation_links as _dedupe_repeated_citation_links
+
+    out = _dedupe_repeated_citation_links(out)
+    out = _redact_document_ids(out, state)
+    return out
+
 # ---------------------------------------------------------------------------
 # System prompts
 # ---------------------------------------------------------------------------
@@ -1535,7 +1597,16 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
     user_content = f"{context}\n\n[Instructions]\nUnless explicitly instructed otherwise, always respond in the `{language}`-locale language.\n"
     user_content += generic_user_metaprompt
     user_content = re.sub(r"\n\s*\n", "\n\n", user_content)
-    user_content += f"\n\nQuestion:\n    {query}\n\nInstruction:\n    Please provide the most verbose and detailed response possible.\n"
+    if persona == "intake":
+        # The generic "Question:" framing below is built for Q&A personas where `query` is a
+        # new question to answer. In intake, `query` is almost always the user's ANSWER to the
+        # assistant's last checklist question — labeling it "Question:" reads to the model as a
+        # fresh, unrelated question, so it reports no answer was given and re-asks (seen live:
+        # "my manager and my employer" got "I didn't receive an answer to that question"). The
+        # "verbose and detailed" instruction also fights the prompt's one-short-question rule.
+        user_content += f"\n\n[User's latest message]\n{query}\n"
+    else:
+        user_content += f"\n\nQuestion:\n    {query}\n\nInstruction:\n    Please provide the most verbose and detailed response possible.\n"
 
     return [
         {"role": "system", "content": system_content},
@@ -1659,6 +1730,12 @@ def _document_context_injection(persona: str, document_context: str) -> str:
         label = (
             "\n\n[CASE CONTEXT — background for this legal consultation: case summary, "
             "relevant document excerpts, and any triage notes]\n"
+        )
+    elif persona == "intake":
+        label = (
+            "\n\n[CASE CONTEXT — facts the user already gave when they opened this case (kind "
+            "of problem, jurisdiction, parties, notes). Already answered — do not ask for any "
+            "of it again; ask about what's still missing instead.]\n"
         )
     else:
         label = (
@@ -2717,7 +2794,7 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
             )
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
             summary=_no_rag_summary)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
     _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
@@ -2856,6 +2933,33 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
     )
 
 
+def _intake_model_override(persona: str):
+    """Case Intake uses a stronger model at low reasoning effort, not the default persona config.
+
+    Intake now carries a small tool whitelist (the advice refinement — case law/legislation
+    lookup for citations), so the same constraint _legal_model_override documents applies:
+    function tools + a real reasoning_effort are rejected outright on /v1/chat/completions
+    ("Function tools with reasoning_effort are not supported for gpt-5.6-luna in
+    /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to
+    'none'.", confirmed live). reason_loop/streaming_reason_loop route intake through
+    legal_responses_chain (the /v1/responses path) exactly when this returns anything but
+    "none", via the same _legal_use_responses_api() toggle legal/legal_uk use. If that toggle is
+    ever turned off, fall back to "none" here too — same posture as _legal_model_override's own
+    use_responses fallback — rather than reproduce the crash on the Chat Completions path.
+    """
+    if persona != "intake":
+        return None, None
+    # The "none" fallback must win whenever the Responses API is off, even if
+    # INTAKE_REASONING_EFFORT is configured — a real effort value plus tools is the exact
+    # combination that gets rejected on /v1/chat/completions (see docstring above).
+    configured = os.getenv("INTAKE_REASONING_EFFORT")
+    reasoning_effort = (configured or "low") if _legal_use_responses_api() else "none"
+    return (
+        os.getenv("INTAKE_CHAT_MODEL") or "gpt-5.6-luna",
+        reasoning_effort,
+    )
+
+
 UK_RESEARCH_TOOL = "get_legal_recommendation_uk"
 _MIN_WORDS_FOR_REQUIRED_RESEARCH = 6
 
@@ -2888,6 +2992,8 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
+    if persona == "intake":
+        _model, _reasoning_effort = _intake_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -2902,6 +3008,12 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
+    elif persona == "intake" and _legal_use_responses_api():
+        # Same reason as legal/legal_uk (_legal_model_override's docstring): intake's tool
+        # whitelist is non-empty now, and a real reasoning_effort with function tools on
+        # /v1/chat/completions is rejected outright — route through /v1/responses instead,
+        # which is what actually lets INTAKE_REASONING_EFFORT be anything but "none".
+        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
         result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     _broadcast_turn_confidence(state, session_id)
@@ -3229,6 +3341,8 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
+    if persona == "intake":
+        _model, _reasoning_effort = _intake_model_override(persona)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -3243,6 +3357,9 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
+    elif persona == "intake" and _legal_use_responses_api():
+        # Same reason as reason_loop's non-streaming branch — see _intake_model_override.
+        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
         chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
     async for chunk in chain:
@@ -3542,7 +3659,7 @@ def chat(request: ChatRequest):
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -3708,17 +3825,20 @@ def chat(request: ChatRequest):
 
     state.prompt.append(user_input.strip())
     final_text = (result or "").strip()
-    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-    final_text = _finalize_legal_response(
-        final_text,
-        state.last_search_legal_results,
-        legal_mode=_legal_mode,
-        user_input=user_input,
-        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-        state=state,
-    )
+    if persona == "intake":
+        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+    else:
+        _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+        final_text = _finalize_legal_response(
+            final_text,
+            state.last_search_legal_results,
+            legal_mode=_legal_mode,
+            user_input=user_input,
+            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+            state=state,
+        )
     related_cases: list = []
-    if persona in ("legal", "legal_uk") and state.last_search_legal_results:
+    if persona in ("legal", "legal_uk", "intake") and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
         related_cases = select_related_cases(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
@@ -3876,15 +3996,18 @@ def approve(request: ApproveRequest):
         }
 
     final_text = (cont_result or "").strip()
-    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-    final_text = _finalize_legal_response(
-        final_text,
-        state.last_search_legal_results,
-        legal_mode=_legal_mode,
-        user_input=state.prompt[-1] if state.prompt else "",
-        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-        state=state,
-    )
+    if _is_intake_addendum(addendum_override):
+        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+    else:
+        _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+        final_text = _finalize_legal_response(
+            final_text,
+            state.last_search_legal_results,
+            legal_mode=_legal_mode,
+            user_input=state.prompt[-1] if state.prompt else "",
+            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+            state=state,
+        )
     state.generated.append(final_text)
     _context.sessions[session_id] = state
 
@@ -3994,6 +4117,7 @@ async def chat_stream(websocket: WebSocket):
                 available_manifest = [t for t in _context.all_fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
                 full_response = ""
                 _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                _is_intake_resume = _is_intake_addendum(addendum_override)
                 _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto", state)
                 _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
                 _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
@@ -4029,9 +4153,10 @@ async def chat_stream(websocket: WebSocket):
                         if chunk.startswith("[TRACE]"):
                             await websocket.send_text(chunk)
                             continue
-                        # Legal answers are buffered and sent post-finalize below,
-                        # same as the main streaming path — see _finalize_legal_response.
-                        if not _legal_mode:
+                        # Legal and intake answers are buffered and sent post-finalize below,
+                        # same as the main streaming path — see _finalize_legal_response /
+                        # _finalize_intake_citations.
+                        if not _legal_mode and not _is_intake_resume:
                             await websocket.send_text(chunk)
                         full_response += chunk
                 finally:
@@ -4039,15 +4164,18 @@ async def chat_stream(websocket: WebSocket):
 
                 if full_response:
                     final_text = full_response.strip()
-                    final_text = _finalize_legal_response(
-                        final_text,
-                        state.last_search_legal_results,
-                        legal_mode=_legal_mode,
-                        user_input=user_input,
-                        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-                        state=state,
-                    )
-                    if _legal_mode:
+                    if _is_intake_resume:
+                        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+                    else:
+                        final_text = _finalize_legal_response(
+                            final_text,
+                            state.last_search_legal_results,
+                            legal_mode=_legal_mode,
+                            user_input=user_input,
+                            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                            state=state,
+                        )
+                    if _legal_mode or _is_intake_resume:
                         await websocket.send_text(final_text)
                     state.generated.append(final_text)
                 _context.sessions[session_id] = state
@@ -4209,7 +4337,7 @@ async def chat_stream(websocket: WebSocket):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_damages_injection(state.case_damages)
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -4288,28 +4416,31 @@ async def chat_stream(websocket: WebSocket):
                         continue
                     if _ws_t_first_chunk is None:
                         _ws_t_first_chunk = time.time()
-                    # Legal answers must pass through citation gating/doctrine guards
-                    # (_finalize_legal_response) before the client sees them, so raw
-                    # chunks are buffered instead of streamed live for these personas.
-                    if persona not in ("legal", "legal_uk"):
+                    # Legal and intake answers must pass through citation gating (legal also
+                    # gets doctrine guards) before the client sees them, so raw chunks are
+                    # buffered instead of streamed live for these personas.
+                    if persona not in ("legal", "legal_uk", "intake"):
                         await websocket.send_text(chunk)
                     full_response += chunk
 
                 if full_response:
                     state.prompt.append(user_input)
                     final_text = full_response.strip()
-                    _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-                    final_text = _finalize_legal_response(
-                        final_text,
-                        state.last_search_legal_results,
-                        legal_mode=_legal_mode,
-                        user_input=user_input,
-                        jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
-                        state=state,
-                    )
-                    if persona in ("legal", "legal_uk"):
+                    if persona == "intake":
+                        final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
+                    else:
+                        _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                        final_text = _finalize_legal_response(
+                            final_text,
+                            state.last_search_legal_results,
+                            legal_mode=_legal_mode,
+                            user_input=user_input,
+                            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                            state=state,
+                        )
+                    if persona in ("legal", "legal_uk", "intake"):
                         await websocket.send_text(final_text)
-                    if persona in ("legal", "legal_uk") and state.last_search_legal_results:
+                    if persona in ("legal", "legal_uk", "intake") and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                         related_cases = select_related_cases(state.last_search_legal_results)
