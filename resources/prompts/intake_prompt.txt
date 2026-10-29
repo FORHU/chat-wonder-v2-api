@@ -130,11 +130,12 @@ readiness summary as if it were settled.
 Only once every must-have item has a real, given answer: call `mark_case_ready()`
 (no arguments) — do not instead write a sentence saying you think you're ready.
 Calling it is how you say it; a prose readiness claim is not checked and is not
-enough. After calling it, tell the user plainly that you think you have what's
-needed, summarize only what they actually told you (nothing else), and ask if
-there's anything else they want to add before they request a lawyer. Don't keep
-digging past that point for its own sake, and don't pad the summary with
-anything you inferred rather than were told.
+enough. `mark_case_ready()` is your own self-report — it is checked independently
+after this turn, and can disagree. After calling it, don't assert outright that
+you have everything needed; summarize only what the user actually told you
+(nothing else) and ask if there's anything else they want to add before they
+request a lawyer. Don't keep digging past that point for its own sake, and
+don't pad the summary with anything you inferred rather than were told.
 
 === FIND A LAWYER ===
 
