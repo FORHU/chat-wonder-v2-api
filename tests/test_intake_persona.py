@@ -24,11 +24,15 @@ class IntakeWiringTests(unittest.TestCase):
         persona, cleaned, tools, addendum = srv.process_persona("[intake] my landlord won't fix the boiler")
         self.assertEqual(persona, "intake")
         tool_names = {t["function"]["name"] for t in tools}
-        self.assertEqual(tool_names, {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section", "get_case_document"})
+        self.assertEqual(tool_names, {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section"})
         # Never the legal_uk whitelist's research-chain/drafting tools — intake only informs,
         # it never builds an applied argument or drafts anything.
         for tool in ("draft_pleading_uk", "generate_legal_document_uk", "get_legal_recommendation_uk", "case_law_grep_judgment"):
             self.assertNotIn(tool, tool_names)
+        # Not get_case_document either: its scope check depends on sync_active_case_documents,
+        # which intake never calls, so whitelisting it would let any consumer fetch any case's
+        # document by UUID with no check at all.
+        self.assertNotIn("get_case_document", tool_names)
         self.assertEqual(cleaned, "my landlord won't fix the boiler")
         self.assertTrue(addendum)
 

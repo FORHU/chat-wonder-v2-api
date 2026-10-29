@@ -863,12 +863,19 @@ def process_persona(user_input: str, jurisdiction: str = None):
         # function (see _finalize_intake_citations), not via that gate.
         persona = "intake"
         user_input = user_input[8:].strip()
+        # get_case_document is deliberately NOT whitelisted here: its scope check
+        # (execute_function_call's allowed_case_document_ids) is only populated by
+        # sync_active_case_documents, which intake never calls — intake gets document awareness
+        # entirely through the excerpts ilovelawyer-api inlines into [CASE CONTEXT] (see
+        # intake-chat.service.ts's documentContext). Whitelisting it here with no scope check
+        # would let any consumer fetch any case's document by UUID. Revisit if intake needs
+        # on-demand document reads: wire case_document_ids through for persona == "intake" too,
+        # the same way legal/legal_uk already do, before re-adding it.
         intake_whitelist = [
             "case_law_search",
             "judgment_get_header",
             "legislation_search",
             "legislation_get_section",
-            "get_case_document",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in intake_whitelist]
         try:
@@ -2942,8 +2949,11 @@ def _intake_model_override(persona: str):
     """
     if persona != "intake":
         return None, None
+    # The "none" fallback must win whenever the Responses API is off, even if
+    # INTAKE_REASONING_EFFORT is configured — a real effort value plus tools is the exact
+    # combination that gets rejected on /v1/chat/completions (see docstring above).
     configured = os.getenv("INTAKE_REASONING_EFFORT")
-    reasoning_effort = configured or ("low" if _legal_use_responses_api() else "none")
+    reasoning_effort = (configured or "low") if _legal_use_responses_api() else "none"
     return (
         os.getenv("INTAKE_CHAT_MODEL") or "gpt-5.6-luna",
         reasoning_effort,
