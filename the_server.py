@@ -132,6 +132,10 @@ class ChatState:
         self.last_generated_file_result: dict = {}
         self.last_outfit_ids_result: list = []
         self.last_cosmetics_ids_result: list = []
+        # Intake's find_lawyer/mark_case_ready — reset every turn (see process_persona's caller),
+        # unlike last_outfit_ids_result above, so a result from turn N never resends on turn N+1.
+        self.last_find_lawyer_result: list = []
+        self.last_mark_case_ready: bool = False
         self.active_case_documents: list = []
         self.case_document_cache: dict = {}
         # None = not yet synced this process; empty set = this turn has no case docs.
@@ -869,6 +873,8 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "legislation_search",
             "legislation_get_section",
             "get_case_document",
+            "find_lawyer",
+            "mark_case_ready",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in intake_whitelist]
         try:
@@ -2080,6 +2086,16 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_outfit_ids_result = result.get("ids", [])
+        if func_name == "find_lawyer" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                state.last_find_lawyer_result = result.get("ids", [])
+        if func_name == "mark_case_ready" and session_id and isinstance(result, dict):
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                # This is intake's self-report only — ilovelawyer-api re-checks it against Jev's
+                # independent per-criterion readiness assessment before acting on it.
+                state.last_mark_case_ready = bool(result.get("success"))
         if func_name in ("recommend_cosmetics", "get_cosmetics_by_skin_type") and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
@@ -4207,6 +4223,13 @@ async def chat_stream(websocket: WebSocket):
                     # Reset per-turn so a document drafted on turn N doesn't leak into
                     # turn N+1's [GENERATED_FILE_DATA] frame — mirrors /chat's reset.
                     _context.sessions[session_id].last_generated_file_result = {}
+            elif persona == "intake" and session_id and session_id in _context.sessions:
+                # Reset per-turn, same reasoning as legal's last_generated_file_result above —
+                # unlike the stylist persona's last_outfit_ids_result (which has no such reset
+                # and so resends stale ids on every later turn), intake's [LAWYER_MATCHES] and
+                # [CASE_READY] must never fire on a turn that didn't actually call that tool.
+                _context.sessions[session_id].last_find_lawyer_result = []
+                _context.sessions[session_id].last_mark_case_ready = False
             # Stash the caller's reply locale on the session so prepare_chat_messages can prefer
             # it over langid — it takes `state`, not the request, and threading a new argument
             # through both reason loops would touch far more code than this.
@@ -4459,6 +4482,10 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
                 if persona == "garment" and state.last_garment_result:
                     await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
+                if persona == "intake" and state.last_find_lawyer_result:
+                    await websocket.send_text(f"[LAWYER_MATCHES]{json.dumps(state.last_find_lawyer_result)}")
+                if persona == "intake" and state.last_mark_case_ready:
+                    await websocket.send_text("[CASE_READY]true")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
                 if _garment_gender in ("MALE", "FEMALE"):
                     await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")

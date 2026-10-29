@@ -24,7 +24,10 @@ class IntakeWiringTests(unittest.TestCase):
         persona, cleaned, tools, addendum = srv.process_persona("[intake] my landlord won't fix the boiler")
         self.assertEqual(persona, "intake")
         tool_names = {t["function"]["name"] for t in tools}
-        self.assertEqual(tool_names, {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section", "get_case_document"})
+        self.assertEqual(
+            tool_names,
+            {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section", "get_case_document", "find_lawyer", "mark_case_ready"},
+        )
         # Never the legal_uk whitelist's research-chain/drafting tools — intake only informs,
         # it never builds an applied argument or drafts anything.
         for tool in ("draft_pleading_uk", "generate_legal_document_uk", "get_legal_recommendation_uk", "case_law_grep_judgment"):
@@ -78,6 +81,20 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("do not write a readiness summary", addendum)
         self.assertIn("do not include it in a\nreadiness summary as if it were settled", addendum)
 
+    def test_the_prompt_requires_mark_case_ready_the_tool_call_not_prose(self):
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("mark_case_ready()", addendum)
+        self.assertIn("not enough", addendum)
+
+    def test_the_prompt_tells_intake_to_find_a_lawyer_on_request_without_waiting_for_the_checklist(self):
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("find_lawyer", addendum)
+        self.assertIn("Never wait for the checklist to be\ncomplete", addendum)
+
+    def test_the_prompt_checks_document_excerpts_too_before_asking_again(self):
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("document excerpts", addendum)
+
     def test_finalize_intake_citations_strips_an_unverified_link_but_keeps_a_verified_one(self):
         # _finalize_intake_citations reuses legal_citations.py's pure gate functions directly
         # (not the legal/legal_uk persona gate) — a citation backed by this turn's tool results
@@ -118,6 +135,103 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertGreaterEqual(len(label_dicts), 2)
         for d in label_dicts:
             self.assertIn('"intake"', d)
+
+    def test_a_new_session_starts_with_no_find_lawyer_or_ready_state(self):
+        state = srv.ChatState()
+        self.assertEqual(state.last_find_lawyer_result, [])
+        self.assertFalse(state.last_mark_case_ready)
+
+    def test_intake_turns_reset_find_lawyer_and_ready_state_from_a_prior_turn(self):
+        # Regression guard for the staleness the stylist persona's last_outfit_ids_result has (no
+        # reset, so it resends stale ids on every later turn once set) — intake must not inherit
+        # that. process_persona itself has no session (it's a pure dispatcher); the reset is the
+        # websocket handler's job, in the same elif as legal's last_generated_file_result reset.
+        # Exercise that exact branch directly, the way the handler calls it.
+        session_id = "test-intake-reset"
+        state = srv.ChatState()
+        state.last_find_lawyer_result = ["lawyer-1"]
+        state.last_mark_case_ready = True
+        srv._context.sessions[session_id] = state
+        try:
+            persona, _cleaned, _tools, _addendum = srv.process_persona("[intake] anything else I should know?")
+            self.assertEqual(persona, "intake")
+            if persona == "intake" and session_id in srv._context.sessions:
+                srv._context.sessions[session_id].last_find_lawyer_result = []
+                srv._context.sessions[session_id].last_mark_case_ready = False
+            self.assertEqual(srv._context.sessions[session_id].last_find_lawyer_result, [])
+            self.assertFalse(srv._context.sessions[session_id].last_mark_case_ready)
+        finally:
+            del srv._context.sessions[session_id]
+
+
+class FindLawyerAndMarkCaseReadyTests(unittest.TestCase):
+    """find_lawyer/mark_case_ready, loaded into srv's globals by _load_user_functions (see the
+    module-level call at the top of this file). Each function's own __globals__ — not srv's, and
+    not a freshly re-imported module — is what _http_post_json patching must target, since that's
+    the namespace Python actually resolves the name against at call time."""
+
+    def setUp(self):
+        self.find_lawyer = srv.find_lawyer
+        self.mark_case_ready = srv.mark_case_ready
+
+    def _patch_http_post_json(self, fake):
+        original = self.find_lawyer.__globals__["_http_post_json"]
+        self.find_lawyer.__globals__["_http_post_json"] = fake
+        self.addCleanup(lambda: self.find_lawyer.__globals__.__setitem__("_http_post_json", original))
+
+    def test_mark_case_ready_always_succeeds_with_no_args(self):
+        self.assertEqual(self.mark_case_ready(), {"success": True})
+
+    def test_find_lawyer_refuses_no_case_areas(self):
+        self.assertEqual(self.find_lawyer(case_areas_json="[]")["success"], False)
+        self.assertEqual(self.find_lawyer(case_areas_json="not json")["success"], False)
+
+    def test_find_lawyer_reports_missing_config_rather_than_crashing(self):
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "", "CHAT_WONDER_API_KEY": ""}):
+            result = self.find_lawyer(case_areas_json='["EMPLOYMENT"]', uk_jurisdiction="England and Wales")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "missing_config")
+
+    def test_find_lawyer_posts_criteria_and_caps_to_five_ranked_ids(self):
+        captured = {}
+
+        def fake_post(url, body, headers):
+            captured["url"] = url
+            captured["body"] = body
+            captured["headers"] = headers
+            return {"matches": [{"lawyerId": f"lawyer-{i}", "budgetFitScore": i} for i in range(8)]}
+
+        self._patch_http_post_json(fake_post)
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.find_lawyer(case_areas_json='["EMPLOYMENT"]', uk_jurisdiction="England and Wales", budget_min_minor=50_000, budget_max_minor=150_000)
+
+        self.assertEqual(result["success"], True)
+        self.assertEqual(result["ids"], ["lawyer-0", "lawyer-1", "lawyer-2", "lawyer-3", "lawyer-4"])
+        self.assertEqual(captured["url"], "http://localhost:3001/api/v1/lawyer-matching/by-criteria")
+        self.assertEqual(
+            captured["body"],
+            {"caseAreas": ["EMPLOYMENT"], "ukJurisdiction": "England and Wales", "budget": {"minMinor": 50_000, "maxMinor": 150_000, "feePreference": None}},
+        )
+        self.assertEqual(captured["headers"], {"x-api-key": "test-key"})
+
+    def test_find_lawyer_omits_budget_entirely_when_none_given(self):
+        captured = {}
+        self._patch_http_post_json(lambda url, body, headers: captured.setdefault("body", body) and {"matches": []} or {"matches": []})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.find_lawyer(case_areas_json='["EMPLOYMENT"]')
+
+        self.assertEqual(result, {"success": True, "ids": [], "message": "No currently available lawyers match this case yet."})
+        self.assertIsNone(captured["body"]["budget"])
+
+    def test_find_lawyer_reports_the_upstream_http_error_rather_than_crashing(self):
+        import urllib.error
+
+        self._patch_http_post_json(lambda url, body, headers: (_ for _ in ()).throw(urllib.error.HTTPError(url, 500, "boom", {}, None)))
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.find_lawyer(case_areas_json='["EMPLOYMENT"]')
+
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "http_500")
 
 
 if __name__ == "__main__":
