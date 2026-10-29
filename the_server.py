@@ -2097,6 +2097,16 @@ def execute_function_call(function_call: dict, session_id: str = None):
             state = _context.sessions.get(session_id)
             if state is not None:
                 state.last_find_lawyer_result = result.get("ids", [])
+            # The raw lawyer ids go to the client only via the [LAWYER_MATCHES] frame above
+            # (state.last_find_lawyer_result) — nothing stops the model from reciting them back
+            # to the client otherwise, since whatever is in `result` becomes part of its context.
+            if "ids" in result:
+                _count = len(result["ids"])
+                result = {
+                    "success": result.get("success", True),
+                    "count": _count,
+                    "message": result.get("message") or (f"Found {_count} matching lawyer(s); shown to the client directly." if _count else "No currently available lawyers match this case yet."),
+                }
         if func_name == "mark_case_ready" and session_id and isinstance(result, dict):
             state = _context.sessions.get(session_id)
             if state is not None:
