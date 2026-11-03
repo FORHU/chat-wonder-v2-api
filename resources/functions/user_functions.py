@@ -3422,10 +3422,20 @@ def create_case(
         case_areas = json.loads(case_areas_json) if case_areas_json else None
     except (TypeError, ValueError):
         return {"success": False, "error": "invalid_case_areas", "message": "case_areas_json must be a JSON array of strings, e.g. '[\"EMPLOYMENT\"]'."}
+    if case_areas is not None:
+        if not isinstance(case_areas, list) or not all(isinstance(a, str) for a in case_areas):
+            return {"success": False, "error": "invalid_case_areas", "message": "case_areas_json must be a JSON array of strings, e.g. '[\"EMPLOYMENT\"]'."}
+        if not case_areas:
+            case_areas = None
     try:
         others = json.loads(others_json) if others_json else None
     except (TypeError, ValueError):
-        return {"success": False, "error": "invalid_others", "message": "others_json must be valid JSON."}
+        return {"success": False, "error": "invalid_others", "message": "others_json must be a JSON array of objects with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'."}
+    if others is not None:
+        if not isinstance(others, list) or not all(isinstance(o, dict) for o in others):
+            return {"success": False, "error": "invalid_others", "message": "others_json must be a JSON array of objects with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'."}
+        if not others:
+            others = None
 
     base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
     api_key = os.getenv("CHAT_WONDER_API_KEY", "")

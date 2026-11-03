@@ -2029,7 +2029,7 @@
           },
           "others_json": {
             "type": "string",
-            "description": "JSON describing the other party/parties as the client has described them so far. Omit if not yet known."
+            "description": "JSON array of the other party/parties as the client has described them, each an object with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'. Omit if not yet known."
           },
           "notes": {
             "type": "string",

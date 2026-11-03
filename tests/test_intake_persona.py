@@ -134,6 +134,12 @@ class IntakeWiringTests(unittest.TestCase):
     def test_the_prompt_tells_intake_to_create_the_case_from_what_it_already_knows(self):
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
         self.assertIn("create_case", addendum)
+        create_idx = addendum.find("CREATE THE CASE")
+        find_idx = addendum.find("FIND A LAWYER")
+        self.assertGreater(create_idx, -1)
+        self.assertGreater(find_idx, -1)
+        self.assertLess(create_idx, find_idx)
+        self.assertIn("tell the user plainly what you wrote onto the case", addendum)
 
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
@@ -302,6 +308,31 @@ class CreateCaseTests(unittest.TestCase):
     def test_rejects_malformed_case_areas_json_without_crashing(self):
         result = self.create_case(title="x", case_areas_json="not json", case_id="c1", user_id="u1")
         self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_case_areas")
+
+    def test_rejects_non_list_case_areas_json_without_patching(self):
+        result = self.create_case(title="x", case_areas_json='{"foo": 1}', case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_case_areas")
+
+    def test_rejects_malformed_others_json_without_crashing(self):
+        result = self.create_case(title="x", others_json="not json", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_others")
+
+    def test_rejects_non_list_others_json_without_patching(self):
+        result = self.create_case(title="x", others_json='{"name": "Acme Ltd"}', case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_others")
+
+    def test_omits_empty_json_arrays_from_the_patch_body(self):
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(url=url, body=body) or {"id": "c1"})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(title="x", case_areas_json="[]", others_json="[]", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], True)
+        self.assertNotIn("areas", captured["body"])
+        self.assertNotIn("others", captured["body"])
 
     def test_reports_the_upstream_http_error_rather_than_crashing(self):
         import urllib.error
