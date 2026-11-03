@@ -139,7 +139,22 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertGreater(create_idx, -1)
         self.assertGreater(find_idx, -1)
         self.assertLess(create_idx, find_idx)
-        self.assertIn("tell the user plainly what you wrote onto the case", addendum)
+        self.assertIn("the write must never be silent", addendum)
+
+    def test_the_prompt_forbids_a_bulleted_recap_of_what_the_case_write_did(self):
+        # Regression for a live bug (2026-11-03): the model confirmed a create_case write with a
+        # cold bulleted recap of facts the user had just typed, then immediately piled a statute
+        # citation and another question into the same reply — read as a form confirmation screen,
+        # not a person responding.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("never a bulleted recap", addendum)
+        self.assertIn("one short, natural sentence", addendum)
+
+    def test_the_prompt_asks_for_a_genuine_acknowledgment_before_facts_and_citations(self):
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("something has gone wrong and\nthey need help", addendum)
+        self.assertIn("never a formula you repeat identically every time", addendum)
+        self.assertIn("AND a follow-up question stacked in one message", addendum)
 
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
