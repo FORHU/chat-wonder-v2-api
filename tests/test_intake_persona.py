@@ -156,6 +156,15 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("never a formula you repeat identically every time", addendum)
         self.assertIn("AND a follow-up question stacked in one message", addendum)
 
+    def test_the_prompt_lets_jurisdiction_be_worked_out_from_an_unambiguous_town(self):
+        # Regression for a live bug (2026-11-03): told "I'm in Manchester", the model still asked
+        # "Which UK jurisdiction does this concern?" as a blocking question, even though the
+        # readiness checklist already showed that item as covered — GROUNDING's blanket
+        # "don't infer a jurisdiction" rule was overriding this, for a case with no real ambiguity.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("unambiguously sits in one of the three", addendum)
+        self.assertIn("don't ask\n\"which jurisdiction\" as if the town told you nothing", addendum)
+
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
 
