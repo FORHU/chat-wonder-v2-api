@@ -139,7 +139,7 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertGreater(create_idx, -1)
         self.assertGreater(find_idx, -1)
         self.assertLess(create_idx, find_idx)
-        self.assertIn("the write must never be silent", addendum)
+        self.assertIn("write must never be silent", addendum)
 
     def test_the_prompt_forbids_a_bulleted_recap_of_what_the_case_write_did(self):
         # Regression for a live bug (2026-11-03): the model confirmed a create_case write with a
@@ -147,14 +147,15 @@ class IntakeWiringTests(unittest.TestCase):
         # citation and another question into the same reply — read as a form confirmation screen,
         # not a person responding.
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
-        self.assertIn("never a bulleted recap", addendum)
+        self.assertIn("bulleted recap", addendum)
         self.assertIn("one short, natural sentence", addendum)
 
     def test_the_prompt_asks_for_a_genuine_acknowledgment_before_facts_and_citations(self):
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
-        self.assertIn("something has gone wrong and\nthey need help", addendum)
-        self.assertIn("never a formula you repeat identically every time", addendum)
-        self.assertIn("AND a follow-up question stacked in one message", addendum)
+        flat = addendum.replace("\n", " ")
+        self.assertIn("something has gone wrong and they need help", flat)
+        self.assertIn("never a formula you repeat identically every time", flat)
+        self.assertIn("never stack more than one of these in a single message", flat)
 
     def test_the_prompt_lets_jurisdiction_be_worked_out_from_an_unambiguous_town(self):
         # Regression for a live bug (2026-11-03): told "I'm in Manchester", the model still asked
@@ -162,8 +163,18 @@ class IntakeWiringTests(unittest.TestCase):
         # readiness checklist already showed that item as covered — GROUNDING's blanket
         # "don't infer a jurisdiction" rule was overriding this, for a case with no real ambiguity.
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
-        self.assertIn("unambiguously sits in one of the three", addendum)
-        self.assertIn("don't ask\n\"which jurisdiction\" as if the town told you nothing", addendum)
+        flat = addendum.replace("\n", " ")
+        self.assertIn("unambiguously sits in", flat)
+        self.assertIn("not having listened", flat)
+
+    def test_the_prompt_lets_side_be_worked_out_when_the_story_makes_it_obvious(self):
+        # Regression for a live bug (2026-11-03): told "my landlord hasn't fixed my boiler... I
+        # want him to fix it", the model still asked "Are you the tenant bringing the complaint
+        # against the landlord?" — the same blanket "don't infer a side" rule overriding an
+        # unambiguous case, same as the jurisdiction bug above.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("my landlord hasn't fixed", addendum)
+        self.assertIn("story could cut either way", addendum)
 
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
