@@ -2034,7 +2034,7 @@
           },
           "others_json": {
             "type": "string",
-            "description": "JSON array of the other party/parties as the client has described them, each an object with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'. Omit if not yet known."
+            "description": "JSON array of the other party/parties, each an object with name and role. role MUST be exactly one of \"Opposing party\", \"Witness\", or \"Other\" — never a descriptive term like \"co-heir\" or \"landlord\", the backend rejects anything else. Use \"Opposing party\" for whoever the client's complaint runs against, even if a more specific word fits better in conversation. Example: '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'. Omit if not yet known."
           },
           "notes": {
             "type": "string",

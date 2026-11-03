@@ -3402,6 +3402,8 @@ def mark_case_ready() -> dict:
 
 # Must match ilovelawyer-api's UK_JURISDICTIONS validation exactly (client-case.validation.ts).
 _VALID_UK_JURISDICTIONS = {"England and Wales", "Scotland", "Northern Ireland"}
+# Must match ilovelawyer-api's CLIENT_PARTY_ROLES exactly (client-case.constants.ts).
+_VALID_PARTY_ROLES = {"Opposing party", "Witness", "Other"}
 
 
 def create_case(
@@ -3440,6 +3442,14 @@ def create_case(
             return {"success": False, "error": "invalid_others", "message": "others_json must be a JSON array of objects with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'."}
         if not others:
             others = None
+        else:
+            # Same reasoning as the uk_jurisdiction guard below: a descriptive role the model
+            # invents ("co-heir", "landlord") gets the whole request rejected over one word.
+            # Normalize to the closest valid bucket rather than lose the party entirely.
+            for party in others:
+                if party.get("role") not in _VALID_PARTY_ROLES:
+                    _logger.warning("create_case normalized invalid party role=%r to 'Other'", party.get("role"))
+                    party["role"] = "Other"
 
     # ilovelawyer-api rejects the whole request if this isn't exactly one of these three (or
     # omitted) — the manifest enum should already keep the model on the rails, but a bad value

@@ -176,6 +176,15 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("my landlord hasn't fixed", addendum)
         self.assertIn("story could cut either way", addendum)
 
+    def test_the_prompt_forbids_narrating_a_failed_create_case_calls_error(self):
+        # Regression for a live bug (2026-11-03): an invalid party role 400'd create_case, and the
+        # model narrated the raw tool error ("REASON: ... co-heir role was not accepted") straight
+        # into the chat — confusing and alarming, never something a client should see verbatim.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("never repeat, paraphrase, or allude to", flat)
+        self.assertIn("only ever narrate a successful write, never a failed one", flat)
+
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
 
@@ -350,6 +359,22 @@ class CreateCaseTests(unittest.TestCase):
             result = self.create_case(title="x", uk_jurisdiction="Manchester", case_id="c1", user_id="u1")
         self.assertEqual(result["success"], True)
         self.assertNotIn("ukJurisdiction", captured["body"])
+
+    def test_normalizes_an_invalid_party_role_instead_of_failing_the_whole_write(self):
+        # Regression for a live bug (2026-11-03): the model described the other co-heir with
+        # role="Co-heir" (not one of ilovelawyer-api's three exact party roles), the whole PATCH
+        # 400'd, and the model then narrated the raw error text straight into the chat.
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(body=body) or {"id": "c1"})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(
+                title="x",
+                others_json='[{"name": "Sister", "role": "Co-heir"}]',
+                case_id="c1",
+                user_id="u1",
+            )
+        self.assertEqual(result["success"], True)
+        self.assertEqual(captured["body"]["others"], [{"name": "Sister", "role": "Other"}])
 
     def test_rejects_malformed_case_areas_json_without_crashing(self):
         result = self.create_case(title="x", case_areas_json="not json", case_id="c1", user_id="u1")
