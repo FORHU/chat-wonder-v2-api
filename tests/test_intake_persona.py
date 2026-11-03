@@ -171,6 +171,24 @@ class IntakeWiringTests(unittest.TestCase):
         finally:
             del srv._context.sessions[session_id]
 
+    def test_create_case_is_injected_with_the_sessions_case_id_and_user_id(self):
+        session_id = "test-create-case-injection"
+        state = srv.ChatState()
+        state.case_id = "case-123"
+        state.user_id = "user-456"
+        srv._context.sessions[session_id] = state
+        captured = {}
+        original = srv.create_case.__globals__["_http_patch_json"]
+        srv.create_case.__globals__["_http_patch_json"] = lambda url, body, headers: captured.update(url=url, body=body) or {"id": "case-123"}
+        try:
+            with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+                srv.execute_function_call({"name": "create_case", "arguments": "{}"}, session_id=session_id)
+        finally:
+            srv.create_case.__globals__["_http_patch_json"] = original
+            del srv._context.sessions[session_id]
+        self.assertEqual(captured["url"], "http://localhost:3001/api/v1/intake-cases/case-123")
+        self.assertEqual(captured["body"]["userId"], "user-456")
+
 
 class FindLawyerAndMarkCaseReadyTests(unittest.TestCase):
     """find_lawyer/mark_case_ready, loaded into srv's globals by _load_user_functions (see the
