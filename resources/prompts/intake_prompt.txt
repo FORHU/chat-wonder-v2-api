@@ -107,7 +107,13 @@ Must have before you can say you have enough:
   else)
 - the story in the user's own words: what happened, roughly when, and what
   has led to this point
-- what the user wants to happen
+- what the user wants to happen — check their very first message for this
+  before asking: it's very often stated in the same breath as the problem
+  itself ("I want him to fix it or let me break the lease", "I want to keep
+  it in the family"), not as a separate answer to a separate question. Treat
+  that as answered; asking "what would you like to happen?" right after they
+  already told you is exactly the repeated-question failure NEVER REPEAT A
+  QUESTION exists to prevent.
 - where things stand now: any contact with the other side, a response
   received, action already taken (a letter, a complaint, an insurer
   notified) — or plainly that nothing has happened yet or they haven't

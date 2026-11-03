@@ -185,6 +185,16 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("never repeat, paraphrase, or allude to", flat)
         self.assertIn("only ever narrate a successful write, never a failed one", flat)
 
+    def test_the_prompt_treats_a_goal_stated_with_the_problem_as_already_answered(self):
+        # Regression for a live bug (2026-11-03): told "my sister ... wants to sell, I want to
+        # keep it in the family" in the opening message, the model still asked "What would you
+        # like to happen with the house?" right after — the goal was already given, inline.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("check their very first message", flat)
+        self.assertIn("I want to keep", flat)
+        self.assertIn("it in the family", flat)
+
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
 
