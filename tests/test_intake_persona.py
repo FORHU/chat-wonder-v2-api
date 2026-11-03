@@ -97,7 +97,7 @@ class IntakeWiringTests(unittest.TestCase):
 
     def test_the_prompt_checks_document_excerpts_too_before_asking_again(self):
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
-        self.assertIn("document excerpts", addendum)
+        self.assertIn("document excerpts", addendum.replace("\n", " "))
 
     def test_finalize_intake_citations_strips_an_unverified_link_but_keeps_a_verified_one(self):
         # _finalize_intake_citations reuses legal_citations.py's pure gate functions directly
@@ -200,6 +200,19 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("mandatory, not optional, every", flat)
         self.assertIn("break the lease", flat)
         self.assertIn("nothing's been signed", flat)
+
+    def test_the_prompt_trusts_the_independent_readiness_check_over_its_own_judgment(self):
+        # Regression for a live bug that survived the mandatory-scan fix above (2026-11-03): the
+        # model kept re-asking things already answered even after being told to scan the whole
+        # message every turn — pure self-review wasn't reliable enough. ilovelawyer-api now feeds
+        # chat-wonder Jev's own independent readiness verdict (the same one driving the client's
+        # readiness checklist UI) as an "Already confirmed" block; the model must treat that as
+        # ground truth, not just another thing to weigh against its own reading of the chat.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("Already confirmed by an independent check", flat)
+        self.assertIn("ground truth from a separate, independent check", flat)
+        self.assertIn("Trust it over your own read of the chat history", flat)
         self.assertIn("isn't a placeholder", flat)
 
     def test_the_prompt_forbids_calling_create_case_twice_in_one_reply(self):
