@@ -3400,6 +3400,10 @@ def mark_case_ready() -> dict:
     return {"success": True}
 
 
+# Must match ilovelawyer-api's UK_JURISDICTIONS validation exactly (client-case.validation.ts).
+_VALID_UK_JURISDICTIONS = {"England and Wales", "Scotland", "Northern Ireland"}
+
+
 def create_case(
     title: str = None,
     case_areas_json: str = None,
@@ -3436,6 +3440,13 @@ def create_case(
             return {"success": False, "error": "invalid_others", "message": "others_json must be a JSON array of objects with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'."}
         if not others:
             others = None
+
+    # ilovelawyer-api rejects the whole request if this isn't exactly one of these three (or
+    # omitted) — the manifest enum should already keep the model on the rails, but a bad value
+    # here would otherwise fail the entire write over one field. Drop it rather than risk that.
+    if uk_jurisdiction is not None and uk_jurisdiction not in _VALID_UK_JURISDICTIONS:
+        _logger.warning("create_case dropped invalid uk_jurisdiction=%r (not in %s)", uk_jurisdiction, sorted(_VALID_UK_JURISDICTIONS))
+        uk_jurisdiction = None
 
     base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
     api_key = os.getenv("CHAT_WONDER_API_KEY", "")

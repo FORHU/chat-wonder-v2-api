@@ -305,6 +305,17 @@ class CreateCaseTests(unittest.TestCase):
         self.assertEqual(captured["body"]["areas"], ["EMPLOYMENT"])
         self.assertEqual(captured["headers"], {"x-api-key": "test-key"})
 
+    def test_drops_an_invalid_uk_jurisdiction_instead_of_sending_it(self):
+        # Regression for a live bug (2026-11-03): the model sent "Manchester" (a town, not one of
+        # ilovelawyer-api's three exact jurisdiction strings) and the whole PATCH 400'd, losing
+        # every other field in the same call too.
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(body=body) or {"id": "c1"})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(title="x", uk_jurisdiction="Manchester", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], True)
+        self.assertNotIn("ukJurisdiction", captured["body"])
+
     def test_rejects_malformed_case_areas_json_without_crashing(self):
         result = self.create_case(title="x", case_areas_json="not json", case_id="c1", user_id="u1")
         self.assertEqual(result["success"], False)
