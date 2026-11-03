@@ -3324,6 +3324,75 @@ def _http_get_json(url: str, headers: dict = None) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _http_post_json(url: str, body: dict, headers: dict = None) -> dict:
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={**(headers or {}), "Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+# Capped the same way get_outfits_by_category caps to 4 — a chat answer showing every match
+# rather than a focused shortlist isn't useful, even once ranked.
+_FIND_LAWYER_MAX_RESULTS = 5
+
+
+def find_lawyer(case_areas_json: str, uk_jurisdiction: str = None, budget_min_minor: int = None, budget_max_minor: int = None) -> dict:
+    """Fetch lawyers currently eligible to take this case from ilovelawyer-api, ranked by
+    closeness to the client's budget. No AI selection in this tool — the eligibility rule and
+    the budget ranking both live on the ilovelawyer-api side; this returns that result directly."""
+    try:
+        case_areas = json.loads(case_areas_json) if case_areas_json else []
+    except (TypeError, ValueError):
+        return {"success": False, "error": "invalid_case_areas", "message": "case_areas_json must be a JSON array of strings, e.g. '[\"EMPLOYMENT\"]'."}
+    if not isinstance(case_areas, list) or not case_areas:
+        return {"success": False, "error": "invalid_case_areas", "message": "Provide at least one case area."}
+
+    base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
+    api_key = os.getenv("CHAT_WONDER_API_KEY", "")
+    if not base:
+        _logger.error("find_lawyer missing_config=ILOVELAWYER_API_BASE")
+        return {"success": False, "error": "missing_config", "message": "ILOVELAWYER_API_BASE is not set in user_functions.env"}
+    if not api_key:
+        _logger.error("find_lawyer missing_config=CHAT_WONDER_API_KEY")
+        return {"success": False, "error": "missing_config", "message": "CHAT_WONDER_API_KEY is not set in user_functions.env"}
+
+    budget = None
+    if budget_min_minor is not None or budget_max_minor is not None:
+        budget = {"minMinor": budget_min_minor, "maxMinor": budget_max_minor, "feePreference": None}
+    body = {"caseAreas": case_areas, "ukJurisdiction": uk_jurisdiction, "budget": budget}
+
+    url = f"{base}/api/v1/lawyer-matching/by-criteria"
+    t0 = time.perf_counter()
+    try:
+        data = _http_post_json(url, body, {"x-api-key": api_key})
+    except urllib.error.HTTPError as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        _logger.error("find_lawyer http_%s elapsed=%.0fms error=%s", e.code, elapsed_ms, e)
+        return {"success": False, "error": f"http_{e.code}", "message": f"find_lawyer failed: {e}"}
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        _logger.error("find_lawyer failed elapsed=%.0fms error=%s", elapsed_ms, e)
+        return {"success": False, "error": str(e), "message": f"find_lawyer failed: {e}"}
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    matches = data.get("matches") or []
+    ids = [m["lawyerId"] for m in matches if isinstance(m, dict) and m.get("lawyerId")][:_FIND_LAWYER_MAX_RESULTS]
+    _logger.info("find_lawyer case_areas=%s uk_jurisdiction=%s matched=%d elapsed=%.0fms", case_areas, uk_jurisdiction, len(ids), elapsed_ms)
+
+    if not ids:
+        return {"success": True, "ids": [], "message": "No currently available lawyers match this case yet."}
+    return {"success": True, "ids": ids}
+
+
+def mark_case_ready() -> dict:
+    """Call only once every must-have checklist item has been verified against the actual
+    conversation — never on a guess. No arguments. This is intake's own self-report: the
+    assistant's job is to call it, not to judge whether it will be acted on — ilovelawyer-api
+    independently re-checks readiness (against Jev's own per-criterion assessment, already used
+    for the "suggest a lawyer" offer) before treating the case as actually ready."""
+    return {"success": True}
+
+
 def _fetch_all_garments(search: str = None) -> list:
     api_key = os.getenv("GARMENTS_API_KEY", "")
     if search:

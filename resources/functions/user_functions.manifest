@@ -529,6 +529,51 @@
   },
   {
     "type": "function",
+    "persona": "intake",
+    "function": {
+      "name": "find_lawyer",
+      "description": "Fetch lawyers currently eligible to take this case, ranked by closeness to the client's stated budget. No AI selection inside this tool — ilovelawyer-api applies the actual eligibility rule (verified, accepting requests, qualified for the case's area and UK jurisdiction, under capacity) and the budget ranking; this returns that result directly. Call at any point the client asks to find a lawyer, using whatever case_areas/uk_jurisdiction/budget are known so far — never wait for the full intake checklist to be complete, and never block on budget if the client hasn't given one.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "case_areas_json": {
+            "type": "string",
+            "description": "JSON array of the case's area codes as known so far, e.g. '[\"EMPLOYMENT\"]'. At least one is required."
+          },
+          "uk_jurisdiction": {
+            "type": "string",
+            "description": "The part of the UK the case is in, e.g. 'England and Wales'. Omit if not yet known — matches no one until it's set."
+          },
+          "budget_min_minor": {
+            "type": "integer",
+            "description": "The low end of the client's stated budget, in pence. Omit if the client hasn't given a budget."
+          },
+          "budget_max_minor": {
+            "type": "integer",
+            "description": "The high end of the client's stated budget, in pence. Omit for an open-ended budget (e.g. 'Over £5,000') or if none was given."
+          }
+        },
+        "required": [
+          "case_areas_json"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "intake",
+    "function": {
+      "name": "mark_case_ready",
+      "description": "Call only once every must-have checklist item has been verified against the actual conversation — never on a guess, and never for an item the client hasn't actually answered. No arguments. ilovelawyer-api independently re-checks this against its own readiness assessment before acting on it, so calling this when the case isn't actually ready simply has no effect.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
     "persona": "garment",
     "function": {
       "name": "recommend_garments",
