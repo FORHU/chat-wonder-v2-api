@@ -378,6 +378,21 @@ class ChainRefineTests(unittest.TestCase):
         text = "".join(c for c in after if not c.startswith("[TRACE]"))
         self.assertEqual(text.strip(), GOOD)
 
+    def test_streaming_strips_an_inline_reason_line_not_just_a_leading_one(self):
+        # Regression for a live bug (2026-11-03): the model is supposed to write REASON: as its
+        # own clean line before a tool call, but sometimes runs it straight on from the answer
+        # text with no line break first ("...received?REASON: internal justification"). The old
+        # check only stripped REASON: when it was the very first character of the stream, so a
+        # mid-line REASON: leaked straight through to the client.
+        text = "Here is your answer.REASON: internal tool justification\nMore text after."
+        client = _FakeClient([text], _resp_text_stream)
+        state = _state(client)
+        chunks = _collect(legal_responses_chain.streaming_run_function_chain_responses(state, list(self.MSGS), max_chains=5, tools=[], auto_approval=True))
+        joined = "".join(chunks)
+        self.assertNotIn("REASON:", joined)
+        self.assertIn("Here is your answer.", joined)
+        self.assertIn("More text after.", joined)
+
     def test_streaming_reyields_draft_when_revision_is_empty(self):
         """If the revise round produces nothing, the rejected draft must still ship
         (chat_stream dropped its buffer on DRAFT_DISCARD) so the finalizer gates it."""
