@@ -3463,8 +3463,12 @@ def create_case(
         data = _http_patch_json(url, body, {"x-api-key": api_key})
     except urllib.error.HTTPError as e:
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        _logger.error("create_case http_%s elapsed=%.0fms error=%s", e.code, elapsed_ms, e)
-        return {"success": False, "error": f"http_{e.code}", "message": f"create_case failed: {e}"}
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        _logger.error("create_case http_%s elapsed=%.0fms error=%s body=%s", e.code, elapsed_ms, e, body)
+        return {"success": False, "error": f"http_{e.code}", "message": f"create_case failed: {e} {body}"}
     except Exception as e:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         _logger.error("create_case failed elapsed=%.0fms error=%s", elapsed_ms, e)
