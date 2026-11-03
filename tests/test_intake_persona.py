@@ -185,15 +185,32 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("never repeat, paraphrase, or allude to", flat)
         self.assertIn("only ever narrate a successful write, never a failed one", flat)
 
-    def test_the_prompt_treats_a_goal_stated_with_the_problem_as_already_answered(self):
-        # Regression for a live bug (2026-11-03): told "my sister ... wants to sell, I want to
+    def test_the_prompt_requires_scanning_the_whole_message_against_the_checklist_every_turn(self):
+        # Regression for two live bugs on the same conversation (2026-11-03): (1) told "I want to
         # keep it in the family" in the opening message, the model still asked "What would you
-        # like to happen with the house?" right after — the goal was already given, inline.
+        # like to happen?"; (2) told "nothing's been signed anywhere yet" in that same opening
+        # message, a later reply still asked "has your sister made any formal request... or has
+        # everything remained informal?" — two different must-have items, both already answered
+        # inline, both re-asked. A single "treat this one example as answered" patch isn't enough;
+        # the scan has to be mandatory and comprehensive, every turn.
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
         flat = addendum.replace("\n", " ")
-        self.assertIn("check their very first message", flat)
-        self.assertIn("I want to keep", flat)
-        self.assertIn("it in the family", flat)
+        self.assertIn("re-read the", flat)
+        self.assertIn("user's most recent message, in full, against the entire must-have list", flat)
+        self.assertIn("mandatory, not optional, every", flat)
+        self.assertIn("break the lease", flat)
+        self.assertIn("nothing's been signed", flat)
+        self.assertIn("isn't a placeholder", flat)
+
+    def test_the_prompt_forbids_calling_create_case_twice_in_one_reply(self):
+        # Regression for a live bug (2026-11-03): a reply contained two near-identical
+        # confirmation sentences stitched together with no separator — consistent with
+        # create_case firing twice within the same turn and both narrations surviving.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("never more", flat)
+        self.assertIn("than once within the same reply", flat)
+        self.assertIn("wait for the next turn instead", flat)
 
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
