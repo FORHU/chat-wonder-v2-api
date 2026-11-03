@@ -26,7 +26,7 @@ class IntakeWiringTests(unittest.TestCase):
         tool_names = {t["function"]["name"] for t in tools}
         self.assertEqual(
             tool_names,
-            {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section", "find_lawyer", "mark_case_ready"},
+            {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section", "find_lawyer", "mark_case_ready", "create_case"},
         )
         # Never the legal_uk whitelist's research-chain/drafting tools — intake only informs,
         # it never builds an applied argument or drafts anything.
@@ -130,6 +130,10 @@ class IntakeWiringTests(unittest.TestCase):
         with patch.dict(os.environ, {"LEGAL_USE_RESPONSES_API": "false", "INTAKE_REASONING_EFFORT": ""}):
             _model, effort = srv._intake_model_override("intake")
             self.assertEqual(effort, "none")
+
+    def test_the_prompt_tells_intake_to_create_the_case_from_what_it_already_knows(self):
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("create_case", addendum)
 
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
@@ -236,6 +240,59 @@ class FindLawyerAndMarkCaseReadyTests(unittest.TestCase):
 
         self.assertEqual(result["success"], False)
         self.assertEqual(result["error"], "http_500")
+
+
+class CreateCaseTests(unittest.TestCase):
+    def setUp(self):
+        self.create_case = srv.create_case
+
+    def _patch_http_patch_json(self, fake):
+        original = self.create_case.__globals__["_http_patch_json"]
+        self.create_case.__globals__["_http_patch_json"] = fake
+        self.addCleanup(lambda: self.create_case.__globals__.__setitem__("_http_patch_json", original))
+
+    def test_refuses_without_a_case_id_or_user_id(self):
+        self.assertEqual(self.create_case(title="x")["success"], False)
+        self.assertEqual(self.create_case(title="x", case_id="c1")["success"], False)  # no user_id
+        self.assertEqual(self.create_case(title="x", user_id="u1")["success"], False)  # no case_id
+
+    def test_reports_missing_config_rather_than_crashing(self):
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "", "CHAT_WONDER_API_KEY": ""}):
+            result = self.create_case(title="x", case_id="c1", user_id="u1")
+        self.assertEqual(result, {"success": False, "error": "missing_config", "message": "ILOVELAWYER_API_BASE is not set in user_functions.env"})
+
+    def test_patches_the_case_with_the_drafted_fields(self):
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(url=url, body=body, headers=headers) or {"id": "c1", "caseName": body["title"]})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(
+                title="Dismissed after whistleblowing disclosure",
+                case_areas_json='["EMPLOYMENT"]',
+                uk_jurisdiction="England and Wales",
+                side="CLAIMANT",
+                notes="...",
+                case_id="c1",
+                user_id="u1",
+            )
+        self.assertEqual(result["success"], True)
+        self.assertEqual(captured["url"], "http://localhost:3001/api/v1/intake-cases/c1")
+        self.assertEqual(captured["body"]["userId"], "u1")
+        self.assertEqual(captured["body"]["title"], "Dismissed after whistleblowing disclosure")
+        self.assertEqual(captured["body"]["areas"], ["EMPLOYMENT"])
+        self.assertEqual(captured["headers"], {"x-api-key": "test-key"})
+
+    def test_rejects_malformed_case_areas_json_without_crashing(self):
+        result = self.create_case(title="x", case_areas_json="not json", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+
+    def test_reports_the_upstream_http_error_rather_than_crashing(self):
+        import urllib.error
+
+        self._patch_http_patch_json(lambda url, body, headers: (_ for _ in ()).throw(urllib.error.HTTPError(url, 403, "boom", {}, None)))
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(title="x", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "http_403")
 
 
 if __name__ == "__main__":

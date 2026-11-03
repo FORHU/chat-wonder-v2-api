@@ -1993,5 +1993,50 @@
         ]
       }
     }
+  },
+  {
+    "type": "function",
+    "persona": "intake",
+    "function": {
+      "name": "create_case",
+      "description": "Write the case details you've drafted from the conversation onto the real case record. Call it as soon as you have enough from what the client described to write something real — often on the very first reply, if they opened with a full account of what happened. Don't wait for the whole checklist to be complete. It's fine, and expected, to call it again later once you learn something that corrects or fills in what you first wrote; each call only updates the fields you pass. Never invent a value you weren't told — leave a field out rather than guess it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "A short, factual title for the case, drawn from what the client told you, e.g. 'Dismissed after whistleblowing disclosure'. Omit if you don't yet have enough to title it."
+          },
+          "case_areas_json": {
+            "type": "string",
+            "description": "JSON array of the case's area codes as known so far, e.g. '[\"EMPLOYMENT\"]'. Omit if not yet known."
+          },
+          "uk_jurisdiction": {
+            "type": "string",
+            "description": "The part of the UK the case is in, e.g. 'England and Wales'. Omit if not yet known."
+          },
+          "where": {
+            "type": "string",
+            "description": "Where the matter took place or is based, if the client has given it. Omit if not yet known."
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "CLAIMANT",
+              "RESPONDENT"
+            ],
+            "description": "Which side the client is on. Omit if not yet known."
+          },
+          "others_json": {
+            "type": "string",
+            "description": "JSON describing the other party/parties as the client has described them so far. Omit if not yet known."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Any other facts the client has given that don't fit the fields above, in your own words. Omit if there's nothing yet to add."
+          }
+        }
+      }
+    }
   }
 ]
