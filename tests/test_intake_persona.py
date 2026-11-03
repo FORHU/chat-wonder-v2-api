@@ -215,6 +215,17 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("Trust it over your own read of the chat history", flat)
         self.assertIn("isn't a placeholder", flat)
 
+    def test_the_prompt_forbids_declaring_ready_while_the_independent_check_has_open_items(self):
+        # Regression for a live bug (2026-11-03): the model wrote "The case is ready for a
+        # solicitor to review" in prose, then stopped pursuing a must-have the independent check
+        # still had open — surfacing only the confirmed half gave it nothing telling it to keep
+        # going on the rest.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("Still open per that same independent check", flat)
+        self.assertIn("overrides your own sense of how close the case feels to done", flat)
+        self.assertIn("ready for a solicitor to review", flat)
+
     def test_the_prompt_forbids_calling_create_case_twice_in_one_reply(self):
         # Regression for a live bug (2026-11-03): a reply contained two near-identical
         # confirmation sentences stitched together with no separator — consistent with

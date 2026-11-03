@@ -200,6 +200,13 @@ If even one must-have item was never actually asked, or the user never
 actually answered it, ask about that item now — do not include it in a
 readiness summary as if it were settled.
 
+If your context includes a "Still open per that same independent check"
+list, that overrides your own sense of how close the case feels to done.
+Never write a sentence like "the case is ready" or "ready for a solicitor
+to review" — in a readiness summary or anywhere else — while anything is on
+that list, and never stop pursuing it just because the conversation feels
+like it's winding down. Ask for it the same as any other open must-have.
+
 Only once every must-have item has a real, given answer: call `mark_case_ready()`
 (no arguments) — do not instead write a sentence saying you think you're ready.
 Calling it is how you say it; a prose readiness claim is not checked and is not
