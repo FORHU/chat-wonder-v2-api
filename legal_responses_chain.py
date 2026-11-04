@@ -555,8 +555,18 @@ async def streaming_run_function_chain_responses(
                     newline_pos = _xai_buffer.index("\n")
                     first_line = _xai_buffer[:newline_pos]
                     remainder = _xai_buffer[newline_pos + 1:]
-                    if first_line.strip().startswith("REASON:"):
-                        _xai_reason = first_line.strip()[7:].strip()
+                    # The model is supposed to write REASON: as its own clean line with nothing
+                    # else, but doesn't always honor that — sometimes it runs straight on from
+                    # the answer text with no line break first. Strip it wherever it starts on
+                    # this line, not only when it's the very first character, so visible text
+                    # before it still reaches the client and the REASON clause never does.
+                    reason_pos = first_line.find("REASON:")
+                    if reason_pos != -1:
+                        visible = first_line[:reason_pos]
+                        _xai_reason = first_line[reason_pos + len("REASON:"):].strip()
+                        if visible:
+                            last_response += visible
+                            yield visible
                     else:
                         last_response += first_line + "\n"
                         yield first_line + "\n"
@@ -569,8 +579,13 @@ async def streaming_run_function_chain_responses(
                 yield part
 
         if _xai_buffer and not _xai_first_line_done:
-            if _xai_buffer.strip().startswith("REASON:"):
-                _xai_reason = _xai_buffer.strip()[7:].strip()
+            reason_pos = _xai_buffer.find("REASON:")
+            if reason_pos != -1:
+                visible = _xai_buffer[:reason_pos]
+                _xai_reason = _xai_buffer[reason_pos + len("REASON:"):].strip()
+                if visible:
+                    last_response += visible
+                    yield visible
             else:
                 last_response += _xai_buffer
                 yield _xai_buffer

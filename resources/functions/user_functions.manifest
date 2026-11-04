@@ -1993,5 +1993,55 @@
         ]
       }
     }
+  },
+  {
+    "type": "function",
+    "persona": "intake",
+    "function": {
+      "name": "create_case",
+      "description": "Write the case details you've drafted from the conversation onto the real case record. Call it as soon as you have enough from what the client described to write something real — often on the very first reply, if they opened with a full account of what happened. Don't wait for the whole checklist to be complete. It's fine, and expected, to call it again later once you learn something that corrects or fills in what you first wrote; each call only updates the fields you pass. Never invent a value you weren't told — leave a field out rather than guess it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "A short, factual title for the case, drawn from what the client told you, e.g. 'Dismissed after whistleblowing disclosure'. Omit if you don't yet have enough to title it."
+          },
+          "case_areas_json": {
+            "type": "string",
+            "description": "JSON array of the case's area codes as known so far, e.g. '[\"EMPLOYMENT\"]'. Omit if not yet known."
+          },
+          "uk_jurisdiction": {
+            "type": "string",
+            "enum": [
+              "England and Wales",
+              "Scotland",
+              "Northern Ireland"
+            ],
+            "description": "Which of these three the case falls under — not the town or city (that's `where`). Work it out from wherever the client is/the matter happened: England or Wales both map to \"England and Wales\". Omit entirely if the client said it happened outside the UK or you don't yet know — never send any other string, the backend rejects anything not in this exact list."
+          },
+          "where": {
+            "type": "string",
+            "description": "The town or city, if the client has given one, e.g. 'Manchester'. Not the UK jurisdiction — that's the separate uk_jurisdiction field. Omit if not yet known."
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "CLAIMANT",
+              "RESPONDENT"
+            ],
+            "description": "Which side the client is on. Omit if not yet known."
+          },
+          "others_json": {
+            "type": "string",
+            "description": "JSON array of the other party/parties, each an object with name and role. role MUST be exactly one of \"Opposing party\", \"Witness\", or \"Other\" — never a descriptive term like \"co-heir\" or \"landlord\", the backend rejects anything else. Use \"Opposing party\" for whoever the client's complaint runs against, even if a more specific word fits better in conversation. Example: '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'. Omit if not yet known."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Any other facts the client has given that don't fit the fields above, in your own words. Omit if there's nothing yet to add."
+          }
+        }
+      }
+    }
   }
 ]

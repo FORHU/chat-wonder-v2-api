@@ -3331,6 +3331,13 @@ def _http_post_json(url: str, body: dict, headers: dict = None) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _http_patch_json(url: str, body: dict, headers: dict = None) -> dict:
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={**(headers or {}), "Content-Type": "application/json"}, method="PATCH")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 # Capped the same way get_outfits_by_category caps to 4 — a chat answer showing every match
 # rather than a focused shortlist isn't useful, even once ranked.
 _FIND_LAWYER_MAX_RESULTS = 5
@@ -3391,6 +3398,106 @@ def mark_case_ready() -> dict:
     independently re-checks readiness (against Jev's own per-criterion assessment, already used
     for the "suggest a lawyer" offer) before treating the case as actually ready."""
     return {"success": True}
+
+
+# Must match ilovelawyer-api's UK_JURISDICTIONS validation exactly (client-case.validation.ts).
+_VALID_UK_JURISDICTIONS = {"England and Wales", "Scotland", "Northern Ireland"}
+# Must match ilovelawyer-api's CLIENT_PARTY_ROLES exactly (client-case.constants.ts).
+_VALID_PARTY_ROLES = {"Opposing party", "Witness", "Other"}
+
+
+def create_case(
+    title: str = None,
+    case_areas_json: str = None,
+    uk_jurisdiction: str = None,
+    where: str = None,
+    side: str = None,
+    others_json: str = None,
+    notes: str = None,
+    case_id: str = None,
+    user_id: str = None,
+) -> dict:
+    """Write the case details drafted so far from the conversation onto the real case record in
+    ilovelawyer-api. `case_id`/`user_id` are injected from the session, never supplied by the
+    model — a missing one here means the injection didn't happen, not that the client left
+    something out, so it's reported as a defensive guard rather than a user-facing failure."""
+    if not case_id or not user_id:
+        return {"success": False, "error": "missing_session_context", "message": "create_case requires case_id and user_id from the session; neither is a model-supplied parameter."}
+
+    try:
+        case_areas = json.loads(case_areas_json) if case_areas_json else None
+    except (TypeError, ValueError):
+        return {"success": False, "error": "invalid_case_areas", "message": "case_areas_json must be a JSON array of strings, e.g. '[\"EMPLOYMENT\"]'."}
+    if case_areas is not None:
+        if not isinstance(case_areas, list) or not all(isinstance(a, str) for a in case_areas):
+            return {"success": False, "error": "invalid_case_areas", "message": "case_areas_json must be a JSON array of strings, e.g. '[\"EMPLOYMENT\"]'."}
+        if not case_areas:
+            case_areas = None
+    try:
+        others = json.loads(others_json) if others_json else None
+    except (TypeError, ValueError):
+        return {"success": False, "error": "invalid_others", "message": "others_json must be a JSON array of objects with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'."}
+    if others is not None:
+        if not isinstance(others, list) or not all(isinstance(o, dict) for o in others):
+            return {"success": False, "error": "invalid_others", "message": "others_json must be a JSON array of objects with name and role, e.g. '[{\"name\": \"Acme Ltd\", \"role\": \"Opposing party\"}]'."}
+        if not others:
+            others = None
+        else:
+            # Same reasoning as the uk_jurisdiction guard below: a descriptive role the model
+            # invents ("co-heir", "landlord") gets the whole request rejected over one word.
+            # Normalize to the closest valid bucket rather than lose the party entirely.
+            for party in others:
+                if party.get("role") not in _VALID_PARTY_ROLES:
+                    _logger.warning("create_case normalized invalid party role=%r to 'Other'", party.get("role"))
+                    party["role"] = "Other"
+
+    # ilovelawyer-api rejects the whole request if this isn't exactly one of these three (or
+    # omitted) — the manifest enum should already keep the model on the rails, but a bad value
+    # here would otherwise fail the entire write over one field. Drop it rather than risk that.
+    if uk_jurisdiction is not None and uk_jurisdiction not in _VALID_UK_JURISDICTIONS:
+        _logger.warning("create_case dropped invalid uk_jurisdiction=%r (not in %s)", uk_jurisdiction, sorted(_VALID_UK_JURISDICTIONS))
+        uk_jurisdiction = None
+
+    base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
+    api_key = os.getenv("CHAT_WONDER_API_KEY", "")
+    if not base:
+        _logger.error("create_case missing_config=ILOVELAWYER_API_BASE")
+        return {"success": False, "error": "missing_config", "message": "ILOVELAWYER_API_BASE is not set in user_functions.env"}
+    if not api_key:
+        _logger.error("create_case missing_config=CHAT_WONDER_API_KEY")
+        return {"success": False, "error": "missing_config", "message": "CHAT_WONDER_API_KEY is not set in user_functions.env"}
+
+    fields = {
+        "title": title,
+        "areas": case_areas,
+        "ukJurisdiction": uk_jurisdiction,
+        "where": where,
+        "side": side,
+        "others": others,
+        "notes": notes,
+    }
+    body = {"userId": user_id, **{k: v for k, v in fields.items() if v is not None}}
+
+    url = f"{base}/api/v1/intake-cases/{case_id}"
+    t0 = time.perf_counter()
+    try:
+        data = _http_patch_json(url, body, {"x-api-key": api_key})
+    except urllib.error.HTTPError as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        _logger.error("create_case http_%s elapsed=%.0fms error=%s body=%s", e.code, elapsed_ms, e, body)
+        return {"success": False, "error": f"http_{e.code}", "message": f"create_case failed: {e} {body}"}
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        _logger.error("create_case failed elapsed=%.0fms error=%s", elapsed_ms, e)
+        return {"success": False, "error": str(e), "message": f"create_case failed: {e}"}
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    _logger.info("create_case case_id=%s user_id=%s elapsed=%.0fms", case_id, user_id, elapsed_ms)
+    return {"success": True, "case": data}
 
 
 def _fetch_all_garments(search: str = None) -> list:

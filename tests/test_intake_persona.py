@@ -26,7 +26,7 @@ class IntakeWiringTests(unittest.TestCase):
         tool_names = {t["function"]["name"] for t in tools}
         self.assertEqual(
             tool_names,
-            {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section", "find_lawyer", "mark_case_ready"},
+            {"case_law_search", "judgment_get_header", "legislation_search", "legislation_get_section", "find_lawyer", "mark_case_ready", "create_case"},
         )
         # Never the legal_uk whitelist's research-chain/drafting tools — intake only informs,
         # it never builds an applied argument or drafts anything.
@@ -97,7 +97,7 @@ class IntakeWiringTests(unittest.TestCase):
 
     def test_the_prompt_checks_document_excerpts_too_before_asking_again(self):
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
-        self.assertIn("document excerpts", addendum)
+        self.assertIn("document excerpts", addendum.replace("\n", " "))
 
     def test_finalize_intake_citations_strips_an_unverified_link_but_keeps_a_verified_one(self):
         # _finalize_intake_citations reuses legal_citations.py's pure gate functions directly
@@ -130,6 +130,111 @@ class IntakeWiringTests(unittest.TestCase):
         with patch.dict(os.environ, {"LEGAL_USE_RESPONSES_API": "false", "INTAKE_REASONING_EFFORT": ""}):
             _model, effort = srv._intake_model_override("intake")
             self.assertEqual(effort, "none")
+
+    def test_the_prompt_tells_intake_to_create_the_case_from_what_it_already_knows(self):
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("create_case", addendum)
+        create_idx = addendum.find("CREATE THE CASE")
+        find_idx = addendum.find("FIND A LAWYER")
+        self.assertGreater(create_idx, -1)
+        self.assertGreater(find_idx, -1)
+        self.assertLess(create_idx, find_idx)
+        self.assertIn("write must never be silent", addendum)
+
+    def test_the_prompt_forbids_a_bulleted_recap_of_what_the_case_write_did(self):
+        # Regression for a live bug (2026-11-03): the model confirmed a create_case write with a
+        # cold bulleted recap of facts the user had just typed, then immediately piled a statute
+        # citation and another question into the same reply — read as a form confirmation screen,
+        # not a person responding.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("bulleted recap", addendum)
+        self.assertIn("one short, natural sentence", addendum)
+
+    def test_the_prompt_asks_for_a_genuine_acknowledgment_before_facts_and_citations(self):
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("something has gone wrong and they need help", flat)
+        self.assertIn("never a formula you repeat identically every time", flat)
+        self.assertIn("never stack more than one of these in a single message", flat)
+
+    def test_the_prompt_lets_jurisdiction_be_worked_out_from_an_unambiguous_town(self):
+        # Regression for a live bug (2026-11-03): told "I'm in Manchester", the model still asked
+        # "Which UK jurisdiction does this concern?" as a blocking question, even though the
+        # readiness checklist already showed that item as covered — GROUNDING's blanket
+        # "don't infer a jurisdiction" rule was overriding this, for a case with no real ambiguity.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("unambiguously sits in", flat)
+        self.assertIn("not having listened", flat)
+
+    def test_the_prompt_lets_side_be_worked_out_when_the_story_makes_it_obvious(self):
+        # Regression for a live bug (2026-11-03): told "my landlord hasn't fixed my boiler... I
+        # want him to fix it", the model still asked "Are you the tenant bringing the complaint
+        # against the landlord?" — the same blanket "don't infer a side" rule overriding an
+        # unambiguous case, same as the jurisdiction bug above.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        self.assertIn("my landlord hasn't fixed", addendum)
+        self.assertIn("story could cut either way", addendum)
+
+    def test_the_prompt_forbids_narrating_a_failed_create_case_calls_error(self):
+        # Regression for a live bug (2026-11-03): an invalid party role 400'd create_case, and the
+        # model narrated the raw tool error ("REASON: ... co-heir role was not accepted") straight
+        # into the chat — confusing and alarming, never something a client should see verbatim.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("never repeat, paraphrase, or allude to", flat)
+        self.assertIn("only ever narrate a successful write, never a failed one", flat)
+
+    def test_the_prompt_requires_scanning_the_whole_message_against_the_checklist_every_turn(self):
+        # Regression for two live bugs on the same conversation (2026-11-03): (1) told "I want to
+        # keep it in the family" in the opening message, the model still asked "What would you
+        # like to happen?"; (2) told "nothing's been signed anywhere yet" in that same opening
+        # message, a later reply still asked "has your sister made any formal request... or has
+        # everything remained informal?" — two different must-have items, both already answered
+        # inline, both re-asked. A single "treat this one example as answered" patch isn't enough;
+        # the scan has to be mandatory and comprehensive, every turn.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("re-read the", flat)
+        self.assertIn("user's most recent message, in full, against the entire must-have list", flat)
+        self.assertIn("mandatory, not optional, every", flat)
+        self.assertIn("break the lease", flat)
+        self.assertIn("nothing's been signed", flat)
+
+    def test_the_prompt_trusts_the_independent_readiness_check_over_its_own_judgment(self):
+        # Regression for a live bug that survived the mandatory-scan fix above (2026-11-03): the
+        # model kept re-asking things already answered even after being told to scan the whole
+        # message every turn — pure self-review wasn't reliable enough. ilovelawyer-api now feeds
+        # chat-wonder Jev's own independent readiness verdict (the same one driving the client's
+        # readiness checklist UI) as an "Already confirmed" block; the model must treat that as
+        # ground truth, not just another thing to weigh against its own reading of the chat.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("Already confirmed by an independent check", flat)
+        self.assertIn("ground truth from a separate, independent check", flat)
+        self.assertIn("Trust it over your own read of the chat history", flat)
+        self.assertIn("isn't a placeholder", flat)
+
+    def test_the_prompt_forbids_declaring_ready_while_the_independent_check_has_open_items(self):
+        # Regression for a live bug (2026-11-03): the model wrote "The case is ready for a
+        # solicitor to review" in prose, then stopped pursuing a must-have the independent check
+        # still had open — surfacing only the confirmed half gave it nothing telling it to keep
+        # going on the rest.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("Still open per that same independent check", flat)
+        self.assertIn("overrides your own sense of how close the case feels to done", flat)
+        self.assertIn("ready for a solicitor to review", flat)
+
+    def test_the_prompt_forbids_calling_create_case_twice_in_one_reply(self):
+        # Regression for a live bug (2026-11-03): a reply contained two near-identical
+        # confirmation sentences stitched together with no separator — consistent with
+        # create_case firing twice within the same turn and both narrations surviving.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("never more", flat)
+        self.assertIn("than once within the same reply", flat)
+        self.assertIn("wait for the next turn instead", flat)
 
     def test_both_persona_label_dicts_know_about_intake(self):
         import re
@@ -166,6 +271,24 @@ class IntakeWiringTests(unittest.TestCase):
             self.assertFalse(srv._context.sessions[session_id].last_mark_case_ready)
         finally:
             del srv._context.sessions[session_id]
+
+    def test_create_case_is_injected_with_the_sessions_case_id_and_user_id(self):
+        session_id = "test-create-case-injection"
+        state = srv.ChatState()
+        state.case_id = "case-123"
+        state.user_id = "user-456"
+        srv._context.sessions[session_id] = state
+        captured = {}
+        original = srv.create_case.__globals__["_http_patch_json"]
+        srv.create_case.__globals__["_http_patch_json"] = lambda url, body, headers: captured.update(url=url, body=body) or {"id": "case-123"}
+        try:
+            with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+                srv.execute_function_call({"name": "create_case", "arguments": "{}"}, session_id=session_id)
+        finally:
+            srv.create_case.__globals__["_http_patch_json"] = original
+            del srv._context.sessions[session_id]
+        self.assertEqual(captured["url"], "http://localhost:3001/api/v1/intake-cases/case-123")
+        self.assertEqual(captured["body"]["userId"], "user-456")
 
 
 class FindLawyerAndMarkCaseReadyTests(unittest.TestCase):
@@ -236,6 +359,111 @@ class FindLawyerAndMarkCaseReadyTests(unittest.TestCase):
 
         self.assertEqual(result["success"], False)
         self.assertEqual(result["error"], "http_500")
+
+
+class CreateCaseTests(unittest.TestCase):
+    def setUp(self):
+        self.create_case = srv.create_case
+
+    def _patch_http_patch_json(self, fake):
+        original = self.create_case.__globals__["_http_patch_json"]
+        self.create_case.__globals__["_http_patch_json"] = fake
+        self.addCleanup(lambda: self.create_case.__globals__.__setitem__("_http_patch_json", original))
+
+    def test_refuses_without_a_case_id_or_user_id(self):
+        self.assertEqual(self.create_case(title="x")["success"], False)
+        self.assertEqual(self.create_case(title="x", case_id="c1")["success"], False)  # no user_id
+        self.assertEqual(self.create_case(title="x", user_id="u1")["success"], False)  # no case_id
+
+    def test_reports_missing_config_rather_than_crashing(self):
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "", "CHAT_WONDER_API_KEY": ""}):
+            result = self.create_case(title="x", case_id="c1", user_id="u1")
+        self.assertEqual(result, {"success": False, "error": "missing_config", "message": "ILOVELAWYER_API_BASE is not set in user_functions.env"})
+
+    def test_patches_the_case_with_the_drafted_fields(self):
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(url=url, body=body, headers=headers) or {"id": "c1", "caseName": body["title"]})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(
+                title="Dismissed after whistleblowing disclosure",
+                case_areas_json='["EMPLOYMENT"]',
+                uk_jurisdiction="England and Wales",
+                side="CLAIMANT",
+                notes="...",
+                case_id="c1",
+                user_id="u1",
+            )
+        self.assertEqual(result["success"], True)
+        self.assertEqual(captured["url"], "http://localhost:3001/api/v1/intake-cases/c1")
+        self.assertEqual(captured["body"]["userId"], "u1")
+        self.assertEqual(captured["body"]["title"], "Dismissed after whistleblowing disclosure")
+        self.assertEqual(captured["body"]["areas"], ["EMPLOYMENT"])
+        self.assertEqual(captured["headers"], {"x-api-key": "test-key"})
+
+    def test_drops_an_invalid_uk_jurisdiction_instead_of_sending_it(self):
+        # Regression for a live bug (2026-11-03): the model sent "Manchester" (a town, not one of
+        # ilovelawyer-api's three exact jurisdiction strings) and the whole PATCH 400'd, losing
+        # every other field in the same call too.
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(body=body) or {"id": "c1"})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(title="x", uk_jurisdiction="Manchester", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], True)
+        self.assertNotIn("ukJurisdiction", captured["body"])
+
+    def test_normalizes_an_invalid_party_role_instead_of_failing_the_whole_write(self):
+        # Regression for a live bug (2026-11-03): the model described the other co-heir with
+        # role="Co-heir" (not one of ilovelawyer-api's three exact party roles), the whole PATCH
+        # 400'd, and the model then narrated the raw error text straight into the chat.
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(body=body) or {"id": "c1"})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(
+                title="x",
+                others_json='[{"name": "Sister", "role": "Co-heir"}]',
+                case_id="c1",
+                user_id="u1",
+            )
+        self.assertEqual(result["success"], True)
+        self.assertEqual(captured["body"]["others"], [{"name": "Sister", "role": "Other"}])
+
+    def test_rejects_malformed_case_areas_json_without_crashing(self):
+        result = self.create_case(title="x", case_areas_json="not json", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_case_areas")
+
+    def test_rejects_non_list_case_areas_json_without_patching(self):
+        result = self.create_case(title="x", case_areas_json='{"foo": 1}', case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_case_areas")
+
+    def test_rejects_malformed_others_json_without_crashing(self):
+        result = self.create_case(title="x", others_json="not json", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_others")
+
+    def test_rejects_non_list_others_json_without_patching(self):
+        result = self.create_case(title="x", others_json='{"name": "Acme Ltd"}', case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "invalid_others")
+
+    def test_omits_empty_json_arrays_from_the_patch_body(self):
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(url=url, body=body) or {"id": "c1"})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(title="x", case_areas_json="[]", others_json="[]", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], True)
+        self.assertNotIn("areas", captured["body"])
+        self.assertNotIn("others", captured["body"])
+
+    def test_reports_the_upstream_http_error_rather_than_crashing(self):
+        import urllib.error
+
+        self._patch_http_patch_json(lambda url, body, headers: (_ for _ in ()).throw(urllib.error.HTTPError(url, 403, "boom", {}, None)))
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(title="x", case_id="c1", user_id="u1")
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], "http_403")
 
 
 if __name__ == "__main__":

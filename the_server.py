@@ -164,6 +164,9 @@ class ChatState:
         self.openai_client = None
         self.last_used: float = time.time()
         self.user_id: Optional[str] = None
+        # Set from ilovelawyer-api's intake WS payload, mirrors user_id — used by create_case's
+        # session-scoped arg injection in execute_function_call.
+        self.case_id: Optional[str] = None
         # Set at the start of every turn from ChatRequest.trace_turn_id (see broadcast_trace).
         # Read via getattr elsewhere: sessions restored from sessions.pkl predate this field.
         self.trace_turn_id: Optional[str] = None
@@ -882,6 +885,7 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "legislation_get_section",
             "find_lawyer",
             "mark_case_ready",
+            "create_case",
         ]
         filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in intake_whitelist]
         try:
@@ -1932,6 +1936,10 @@ def execute_function_call(function_call: dict, session_id: str = None):
     try:
         if func_name == "navigate_app" and session_id:
             func_args["session_id"] = session_id
+        if func_name == "create_case" and session_id:
+            _cc_state = _context.sessions.get(session_id)
+            func_args["case_id"] = getattr(_cc_state, "case_id", None)
+            func_args["user_id"] = getattr(_cc_state, "user_id", None)
         if func_name == "get_case_document" and session_id:
             _cd_state = _context.sessions.get(session_id)
             # The model is only ever shown a handle (F1, ...), never the real id — see
@@ -4223,6 +4231,8 @@ async def chat_stream(websocket: WebSocket):
             state.trace_turn_id = request.trace_turn_id
             if data.get("user_id"):
                 state.user_id = data["user_id"]
+            if data.get("case_id"):
+                state.case_id = data["case_id"]
             init_openai_client(state, _context.openai_api_key)
 
             user_input = request.user_input or getattr(request, "user_history_select", "") or ""
