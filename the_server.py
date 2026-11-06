@@ -1572,10 +1572,11 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
     else:
         language, _ = langid.classify(query)
         # langid is unreliable on short queries: e.g. "uk law" classifies as 'id' (Indonesian),
-        # producing an Indonesian answer for an English UK-law question. legal_uk serves
-        # English-language UK jurisdictions, so don't let a short/noisy guess override that
-        # unless there's enough text for the detector to have a real signal.
-        if persona == "legal_uk" and len(query.split()) < 5:
+        # and "assaulted me" classifies as 'fr', producing a wrong-language answer from a guess
+        # with no real signal behind it. Default short/noisy queries to English across all
+        # personas rather than just legal_uk — every persona's own prompt already states its
+        # language default, and a 2-4 word guess should never override that.
+        if len(query.split()) < 5:
             language = "en"
 
     system_content = ""
