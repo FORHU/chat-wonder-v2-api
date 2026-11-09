@@ -29,6 +29,7 @@ from openai import OpenAI
 import contextvars
 import llm_usage
 from llm_usage import make_openai_client
+import model_registry
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query, Header
 from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
@@ -2234,8 +2235,9 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
     refine_round = 0
 
     def perform_chat(msgs):
+        _model = model or _context.model
         args = {
-            "model": model or _context.model,
+            "model": _model,
             "messages": msgs,
             "n": 1,
             "stream": True,
@@ -2257,8 +2259,10 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             # argument fragments interleaved into one invalid JSON blob,
             # which fails to parse and makes the model retry forever.
             args["parallel_tool_calls"] = False
+        args = model_registry.shape_chat_args(_model, args)
         llm_usage.current().add_pass()
-        return state.openai_client.chat.completions.create(**args)
+        client = model_registry.get_client(_model, state.openai_client)
+        return client.chat.completions.create(**args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
     # on the last research iteration can still be audited and revised, while the
@@ -3098,8 +3102,9 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
     _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
 
     def perform_chat(msgs):
+        _model = model or _context.model
         args = {
-            "model": model or _context.model,
+            "model": _model,
             "messages": msgs,
             "n": 1,
             "stream": True,
@@ -3118,8 +3123,10 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             # See matching comment in run_function_chain's perform_chat: the
             # streaming tool-call accumulator only tracks one in-flight call.
             args["parallel_tool_calls"] = False
+        args = model_registry.shape_chat_args(_model, args)
         llm_usage.current().add_pass()
-        return state.openai_client.chat.completions.create(**args)
+        client = model_registry.get_client(_model, state.openai_client)
+        return client.chat.completions.create(**args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
     # on the last research iteration can still be audited and revised, while the
