@@ -204,12 +204,19 @@ _STOPWORDS = frozenset(
 )
 
 
+#: Markdown link whose label may contain ONE level of nested brackets -- UK neutral citations
+#: put "[2010]" inside the label ("[Gold Group v BDW [2010] EWHC 323 Jurisprudence](url)"),
+#: which a plain [^\]]+ label pattern stops at, leaving raw markdown in the quote (found live).
+_MD_LINK_RE = re.compile(r"\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\(([^)\s]+)\)")
+_MD_HTTP_LINK_RE = re.compile(r"\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\((https?://[^)\s]+)\)")
+
+
 def _plain_for_match(s: str) -> str:
     """Cleans one line/sentence down to what marked.parse() will actually render as visible
     text, so a span's quote matches a real text node instead of silently never matching
     markdown-syntax characters that never reach the DOM."""
     s = re.sub(r"<[^>]+>", "", s)
-    s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
+    s = _MD_LINK_RE.sub(r"\1", s)
     s = re.sub(r"^#{1,6}\s*", "", s)
     s = re.sub(r"^[-*+]\s+", "", s)
     # Ordered-list markers too: marked renders "1. " as <ol> numbering, never as text, so a
@@ -249,6 +256,14 @@ def _candidate_sentences(text: str, limit: int = MAX_CANDIDATE_SENTENCES) -> Lis
     for line in (text or "").splitlines():
         stripped = line.lstrip()
         if not stripped or "<a href=" in stripped:
+            continue
+        # Markdown http(s) links get the same treatment as embedded <a href> anchors: the link
+        # is left to quoted_citation_spans (href-matched, styled in place), so it's removed
+        # here rather than also wrapped in a <mark> inside its own <a>. Unlike the HTML case,
+        # the surrounding prose on the line stays a candidate -- marked renders the link as a
+        # separate inline element, so the prose before/after it is still matchable.
+        stripped = _MD_HTTP_LINK_RE.sub("", stripped).strip()
+        if not stripped:
             continue
         table_row = _TABLE_ROW.match(stripped)
         if table_row:
@@ -314,15 +329,29 @@ def _is_verbatim_match(sentence: str, sources: List[str], *, normalized: bool = 
     norm_s = _normalize(sentence)
     if len(norm_s) < QUOTE_MIN_CHARS:
         return False
+    # An elided quotation ("…frustration occurs … radically different …") is QUOTED when every
+    # substantive fragment appears in ONE source -- never stitched across different sources.
+    # Fragments shorter than QUOTE_MIN_CHARS are connective ("and", "a thing") and are ignored,
+    # but at least one fragment must clear that bar.
+    fragments = [f.strip(" ,;:.") for f in _ELLIPSIS_RE.split(norm_s)]
+    fragments = [f for f in fragments if len(f) >= QUOTE_MIN_CHARS]
+    if not fragments:
+        return False
+    elided = len(fragments) > 1 or _ELLIPSIS_RE.search(norm_s) is not None
     for src in sources:
         norm_src = src if normalized else _normalize(src)
         if not norm_src:
             continue
         if norm_s in norm_src:
             return True
+        if elided and all(f in norm_src for f in fragments):
+            return True
         if len(norm_src) >= QUOTE_MIN_CHARS and norm_src in norm_s:
             return True
     return False
+
+
+_ELLIPSIS_RE = re.compile(r"\s*(?:…|\.\.\.|\[\.\.\.\]|\[…\])\s*")
 
 
 def _coverage_score(sentence_toks: Set[str], idf: Dict[str, float]) -> float:
@@ -442,10 +471,16 @@ def quoted_citation_spans(text: str, search_results) -> List[Span]:
     try:
         from legal_citations import allowed_url_set, classify_href
         allowed = allowed_url_set(search_results)
-        for href, _kind, raw_label in _LEGAL_REF_ANCHOR_RE.findall(text):
-            label = re.sub(r"<[^>]+>", "", raw_label).strip()
-            if not label:
+        links = [(href, re.sub(r"<[^>]+>", "", raw_label).strip())
+                 for href, _kind, raw_label in _LEGAL_REF_ANCHOR_RE.findall(text)]
+        # Markdown-form citations too: UK answers can carry "[label Jurisprudence](url)" instead
+        # of legal-ref <a> HTML (found live; the UK regression suite accepts both forms).
+        links += [(href, _plain_for_match(raw_label).strip("*_ ")) for raw_label, href in _MD_HTTP_LINK_RE.findall(text)]
+        seen = set()
+        for href, label in links:
+            if not label or (href, label) in seen:
                 continue
+            seen.add((href, label))
             if classify_href(href, allowed) == "ok":
                 spans.append(Span(quote=label, tier="QUOTED", source="citation",
                                    why="citation link resolves to a retrieved source", ref=href))

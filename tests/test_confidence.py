@@ -192,6 +192,21 @@ class ProvenanceSpansTests(unittest.TestCase):
         text = 'See <a href="https://x.gov.uk/s1">Some Act Law</a> for the rule, which applies broadly.'
         self.assertEqual(confidence._candidate_sentences(text), [])
 
+    def test_markdown_link_with_bracketed_neutral_citation_is_unwrapped(self):
+        # Found live (frustration answer): "[2010]" inside the link label stopped the old
+        # [^\]]+ pattern, leaving raw markdown in the quote so it never matched the DOM.
+        text = ("The High Court described it as the “construction test”. "
+                "[*Gold Group Properties Ltd v BDW Trading Ltd* [2010] EWHC (Tcc) 323 Jurisprudence]"
+                "(https://caselaw.nationalarchives.gov.uk/ewhc/tcc/2010/323)")
+        sentences = confidence._candidate_sentences(text)
+        # The prose sentence is clean and matchable; the link itself is left to
+        # quoted_citation_spans (href-matched), same policy as embedded <a href> anchors.
+        self.assertIn("The High Court described it as the “construction test”.", sentences)
+        self.assertFalse(any("](" in s or "https://" in s or "Gold Group" in s for s in sentences))
+        # Non-link bracketed text inside a normal line still unwraps cleanly.
+        self.assertEqual(confidence._plain_for_match("[Smith [2010] UKSC 1](https://x.uk/a) applies"),
+                         "Smith [2010] UKSC 1 applies")
+
     def test_ordered_list_marker_is_stripped(self):
         # marked renders "1. " as <ol> numbering, not text -- keeping it made the quote unmatchable.
         sentences = confidence._candidate_sentences("1. The employee must have two years' service.\n2) Then claim.")
@@ -221,6 +236,23 @@ class ProvenanceSpansTests(unittest.TestCase):
         spans = confidence.provenance_spans(text, [text])
         self.assertEqual(spans[0].tier, "QUOTED")
 
+    def test_elided_quotation_is_quoted_when_every_part_is_in_one_source(self):
+        # Found live: a blockquote of Lord Radcliffe's dictum opened with "“…" and so never
+        # verbatim-matched the judgment text it was copied from.
+        src = ("Frustration occurs whenever the law recognises that without default of either party a "
+               "contractual obligation has become incapable of being performed because the circumstances "
+               "would render it a thing radically different from that which was undertaken by the contract.")
+        quote = ("“…frustration occurs whenever the law recognises that without default of either party a "
+                 "contractual obligation has become incapable of being performed … a thing radically "
+                 "different from that which was undertaken by the contract.”")
+        self.assertEqual(confidence.provenance_spans(quote, [src])[0].tier, "QUOTED")
+
+    def test_elided_quotation_split_across_sources_is_not_quoted(self):
+        a = "The contract was signed by both parties in London on the first day of March."
+        b = "Payment was due within thirty days of delivery of the goods to the warehouse."
+        quote = "the contract was signed by both parties in London … payment was due within thirty days of delivery"
+        self.assertNotEqual(confidence.provenance_spans(quote, [a, b])[0].tier, "QUOTED")
+
     def test_short_sentence_is_never_quoted_even_if_substring_coincidence(self):
         # QUOTE_MIN_CHARS guards against a short, generic phrase registering as a "quotation"
         # purely by coincidental overlap.
@@ -244,6 +276,24 @@ class QuotedCitationSpansTests(unittest.TestCase):
         # simply gets nothing here (its surrounding sentence, if any, falls to provenance_spans).
         spans = confidence.quoted_citation_spans(f"See {self.ANCHOR_BAD}.", self.POOL)
         self.assertEqual(spans, [])
+
+    def test_resolved_markdown_citation_link_is_quoted(self):
+        # Found live: UK answers can carry citations as markdown links (the form the UK
+        # regression suite's _CITATION_LINK also accepts), never as legal-ref <a> HTML.
+        md = "See [*Manalo v. Republic* [2010] 1 Jurisprudence](https://juris.ph/case/abc)."
+        spans = confidence.quoted_citation_spans(md, self.POOL)
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(spans[0].ref, "https://juris.ph/case/abc")
+        self.assertEqual(spans[0].quote, "Manalo v. Republic [2010] 1 Jurisprudence")
+
+    def test_markdown_citation_label_with_unbalanced_emphasis_is_clean(self):
+        md = "See [*Manalo v. Republic [2010] 1 Jurisprudence](https://juris.ph/case/abc)."
+        spans = confidence.quoted_citation_spans(md, self.POOL)
+        self.assertEqual(spans[0].quote, "Manalo v. Republic [2010] 1 Jurisprudence")
+
+    def test_unresolved_markdown_citation_link_produces_no_span(self):
+        md = "See [Fake Jurisprudence](https://juris.ph/case/zzz-made-up)."
+        self.assertEqual(confidence.quoted_citation_spans(md, self.POOL), [])
 
     def test_empty_text_returns_nothing(self):
         self.assertEqual(confidence.quoted_citation_spans("", self.POOL), [])

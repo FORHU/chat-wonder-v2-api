@@ -98,14 +98,18 @@
   /** Converts a flat character offset within blockEl's rendered text into a (node, offset)
    * position usable by Range.setStart/setEnd, by walking the block's text nodes and
    * accumulating length. */
-  function _offsetToNodePos(blockEl, offset) {
+  function _offsetToNodePos(blockEl, offset, isStart) {
     var walker = document.createTreeWalker(blockEl, NodeFilter.SHOW_TEXT, null, false);
     var node;
     var acc = 0;
     var last = null;
     while ((node = walker.nextNode())) {
       var len = node.nodeValue.length;
-      if (offset <= acc + len) return { node: node, offset: offset - acc };
+      // A START offset on a node boundary belongs to the NEXT node (its offset 0), not the
+      // end of the previous one -- otherwise a range starting right after a whitespace node
+      // (e.g. the "\n" between <blockquote> and its <p>) begins outside the <p>, and
+      // extractContents() lifts the whole paragraph into an inline <mark> (found live).
+      if (isStart ? offset < acc + len : offset <= acc + len) return { node: node, offset: offset - acc };
       acc += len;
       last = node;
     }
@@ -130,8 +134,8 @@
     var text = blockEl.textContent;
     var idx = text.indexOf(quote);
     if (idx === -1) return false;
-    var startPos = _offsetToNodePos(blockEl, idx);
-    var endPos = _offsetToNodePos(blockEl, idx + quote.length);
+    var startPos = _offsetToNodePos(blockEl, idx, true);
+    var endPos = _offsetToNodePos(blockEl, idx + quote.length, false);
     if (!startPos || !endPos) return false;
     if (_hasAncestorTag(startPos.node, "MARK") || _hasAncestorTag(endPos.node, "MARK")) {
       return false; // already covered by an earlier (longer, higher-priority) span
@@ -149,14 +153,28 @@
   /** Tries every block-level element in document order until `quote` is found in one — a span
    * almost always falls entirely within a single <p>/<li>/<h2>, since confidence.py's
    * sentence extraction splits on the same line/sentence boundaries markdown blocks do. */
+  /** Block elements with LEAF blocks first (a <p> inside a <blockquote>/<li> before its
+   * container), each in document order. Trying the container first wrapped the inner <p>
+   * whole inside an inline <mark> (found live on a quoted judgment); the container is now
+   * only a fallback for a quote that genuinely spans several leaf blocks. */
+  function _blocksLeafFirst(containerEl, withText) {
+    var all = Array.prototype.slice.call(containerEl.querySelectorAll(BLOCK_SELECTOR));
+    var leaves = [], parents = [];
+    for (var i = 0; i < all.length; i++) {
+      (all[i].querySelector(BLOCK_SELECTOR) ? parents : leaves).push(all[i]);
+    }
+    return leaves.concat(parents).map(function (el) {
+      return { el: el, text: withText ? el.textContent : null };
+    });
+  }
+
   function _findAndWrapInAnyBlock(containerEl, quote, wrapFn, blockCache) {
     if (!quote) return false;
     // blockCache (optional): [{el, text}] built once per render. Wrapping a range in <mark>
     // never changes a block's textContent, so the cached text stays valid across spans --
     // and skipping blocks that can't contain the quote avoids re-reading textContent
     // spans x blocks times (~160K reads on a long answer once every sentence is scored).
-    var blocks = blockCache || Array.prototype.map.call(
-      containerEl.querySelectorAll(BLOCK_SELECTOR), function (el) { return { el: el, text: null }; });
+    var blocks = blockCache || _blocksLeafFirst(containerEl, false);
     for (var i = 0; i < blocks.length; i++) {
       if (blocks[i].text !== null && blocks[i].text.indexOf(quote) === -1) continue;
       if (_wrapQuoteInBlock(blocks[i].el, quote, wrapFn)) return true;
@@ -282,8 +300,7 @@
       remaining.sort(function (x, y) {
         return (y.quote || "").length - (x.quote || "").length;
       });
-      var blockCache = Array.prototype.map.call(
-        bubbleEl.querySelectorAll(BLOCK_SELECTOR), function (el) { return { el: el, text: el.textContent }; });
+      var blockCache = _blocksLeafFirst(bubbleEl, true);
       for (var j = 0; j < remaining.length; j++) {
         (function (span) {
           _findAndWrapInAnyBlock(bubbleEl, span.quote, function () {
