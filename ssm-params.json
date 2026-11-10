@@ -1,0 +1,1 @@
+{"commands": ["docker logs ilovelawyer-api --since 72h 2>&1 | grep -i -E 'dictation|transcribe' | tail -n 200"]}

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Legal AI Chat — PH vs UK MCP routing check</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="confidence-render.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -38,6 +39,19 @@
     .badge-ph { background: #2d1a40; color: #c084fc; }
     .badge-uk { background: #1e3a5f; color: #60a5fa; }
     .badge-mcp { background: #1a2e1a; color: #86efac; }
+    .confidence-toggle {
+      font-size: 11px; padding: 3px 10px; border-radius: 99px; font-weight: 600;
+      background: #1e2430; color: #94a3b8; border: 1px solid #334155; cursor: pointer;
+    }
+    .confidence-toggle.active { background: #2d1a40; color: #c084fc; border-color: #c084fc; }
+    .confidence-legend {
+      font-size: 11px; color: #94a3b8; padding: 6px 10px; border-bottom: 1px solid #1e293b;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    }
+    .confidence-legend.confidence-unavailable { color: #64748b; font-style: italic; }
+    .legend-chip { font-size: 10px; padding: 1px 7px; border-radius: 99px; font-weight: 600; }
+    .conf-span, .conf-word { border-radius: 3px; padding: 0 1px; }
+    .confidence-clean-note { font-style: italic; color: #64748b; }
 
     #status {
       margin-left: auto;
@@ -332,11 +346,13 @@
   <h1>Legal AI Chat</h1>
   <span class="badge badge-uk" id="persona-badge">UK Legal Mode</span>
   <span class="badge badge-mcp" id="mcp-badge">MCP: …</span>
+  <span id="confidence-toggle-container"></span>
   <div id="status">
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
   </div>
 </header>
+<div id="confidence-legend-container"></div>
 
 <div class="config-bar">
   <label>
@@ -401,8 +417,15 @@
   let ws = null;
   let currentBubble = null;
   let currentRaw = "";
+  let lastBubble = null; // the most recently finished turn's bubble — see finishAssistantTurn
+  let lastRaw = "";
   let isStreaming = false;
   let jurisMcpUrl = "";
+  ConfidenceRender.renderToggle($("confidence-toggle-container"), function () {
+    const bubble = currentBubble || lastBubble;
+    const raw = currentBubble ? currentRaw : lastRaw;
+    if (bubble) ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+  });
   let ukLegalMcpUrl = "";
   let lastRawSources = null;
 
@@ -548,6 +571,23 @@
 
     if (chunk.startsWith("[RELATED_CASES]")) return;
 
+    // [STRUCTURED_DATA] and [DONE] fire in the post-__END__ extras phase, same phase the
+    // confidence envelope now arrives in — this tester had no branch for either, so they fell
+    // into the bubble's text accumulation below and rendered as a second, garbled "message"
+    // after the real answer. Pre-existing gap, unrelated to confidence spans; fixed here
+    // because it was directly confusing testing of the new feature.
+    if (chunk.startsWith("[STRUCTURED_DATA]")) return;
+    if (chunk === "[DONE]") return;
+
+    // Glass-box research steps bypass this persona's buffering, same as the production
+    // websocket handler — this tester previously had NO branch for [TRACE] at all, so a
+    // trace frame fell straight into the bubble's text accumulation below and corrupted it.
+    if (chunk.startsWith("[TRACE]")) return;
+
+    // Live per-token confidence telemetry — guard kept for parity with model_tester_demo.html
+    // even though this persona only ever gets the post-__END__ envelope in production.
+    if (ConfidenceRender.handleLiveFrame(chunk)) return;
+
     if (chunk.startsWith("{") && chunk.includes("pending_approval")) {
       try {
         const ev = JSON.parse(chunk);
@@ -556,6 +596,25 @@
           return;
         }
       } catch {}
+    }
+
+    // The post-__END__ { "type": "confidence", ... } envelope, plus a defensive catch-all for
+    // any other JSON-shaped frame — without this, an unrecognized envelope falls into the
+    // bubble's text accumulation below and corrupts it.
+    if (chunk.startsWith("{")) {
+      try {
+        const obj = JSON.parse(chunk);
+        if (obj && obj.type) {
+          const bubble = currentBubble || lastBubble;
+          const raw = currentBubble ? currentRaw : lastRaw;
+          if (ConfidenceRender.handleEnvelope(obj) && bubble) {
+            ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+          }
+          return;
+        }
+      } catch (e) {
+        // Not JSON after all — fall through to plain-text handling below.
+      }
     }
 
     if (chunk.startsWith("[Tool]")) {
@@ -581,11 +640,19 @@
   }
 
   function finishAssistantTurn() {
+    // The confidence envelope arrives after __END__ (post-__END__ extras phase), so keep a
+    // reference to the just-finished bubble/text for handleChunk's envelope branch above.
+    lastBubble = currentBubble;
+    lastRaw = currentRaw;
     if (currentBubble && currentRaw) {
-      try {
-        currentBubble.innerHTML = marked.parse(currentRaw);
-      } catch (e) {
-        currentBubble.textContent = currentRaw;
+      if (ConfidenceRender.on) {
+        ConfidenceRender.render(currentBubble, currentRaw, $("confidence-legend-container"), marked.parse);
+      } else {
+        try {
+          currentBubble.innerHTML = marked.parse(currentRaw);
+        } catch (e) {
+          currentBubble.textContent = currentRaw;
+        }
       }
     }
     currentBubble = null;
@@ -604,6 +671,7 @@
 
     appendUserMsg(text, mode);
     clearSources();
+    ConfidenceRender.resetTurn();
     $("input").value = "";
     $("input").style.height = "auto";
     $("send-btn").disabled = true;
