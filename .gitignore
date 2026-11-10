@@ -795,3 +795,7 @@ venv/Scripts/pythonw.exe
 .claude/settings.local.json
 venv
 /__pycache__
+
+# Local virtualenv and stray SSM command payloads (accidentally committed in de97e55)
+.venv/
+ssm-params.json
