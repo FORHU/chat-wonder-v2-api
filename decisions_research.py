@@ -20,6 +20,10 @@ Flow, after a legislation search result (get_legal_recommendation_uk / legislati
      section with legislation_get_section before stating what it says; in the first test (sections
      attached to the search result) it re-fetched them anyway and linked to them less.
 
+Tables of contents are cached per Act in memory (LEGAL_TOC_CACHE_TTL_S, default 24 h; at most
+LEGAL_TOC_CACHE_MAX Acts, default 256): an Act's contents rarely change, and paging them was the
+slowest part of the prefetch. Only complete, non-empty contents are cached.
+
 Off unless LEGAL_DECISIONS_PREFETCH=true. Fails open everywhere: any error, timeout or empty answer
 means "no prefetch" and the turn runs exactly as before. Case law is not prefetched yet (the UK
 Legal MCP's case-law endpoint was timing out when this was written).
@@ -30,7 +34,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -107,16 +113,78 @@ def _rank_acts(client, query: str, acts: List[dict]) -> List[dict]:
     return [a for _, a in scored[:MAX_ACTS_OPENED]]
 
 
-def _toc_sections(act: dict, run_tool: RunTool) -> List[dict]:
-    """Every section of one Act with the heading it sits under, paging the table of contents."""
+_TOC_CACHE: "OrderedDict[Tuple[str, str, str], Tuple[float, List[dict]]]" = OrderedDict()
+_TOC_LOCK = threading.Lock()
+
+
+def _toc_ttl_s() -> float:
+    try:
+        return float(os.getenv("LEGAL_TOC_CACHE_TTL_S", "86400"))
+    except ValueError:
+        return 86400.0
+
+
+def _toc_max() -> int:
+    try:
+        return max(0, int(os.getenv("LEGAL_TOC_CACHE_MAX", "256")))
+    except ValueError:
+        return 256
+
+
+def _act_key(act: dict) -> Tuple[str, str, str]:
+    return tuple(str(act.get(k) or "").strip().lower() for k in ("type", "year", "number"))  # type: ignore[return-value]
+
+
+def clear_toc_cache() -> None:
+    with _TOC_LOCK:
+        _TOC_CACHE.clear()
+
+
+def _cached_toc(act: dict) -> Optional[List[dict]]:
+    key, ttl = _act_key(act), _toc_ttl_s()
+    with _TOC_LOCK:
+        hit = _TOC_CACHE.get(key)
+        if hit is None:
+            return None
+        stored_at, sections = hit
+        if ttl <= 0 or time.monotonic() - stored_at > ttl:
+            del _TOC_CACHE[key]
+            return None
+        _TOC_CACHE.move_to_end(key)
+    # The search's own title for this Act wins (searches can word it differently).
+    return [{**sec, "title": act["title"]} for sec in sections]
+
+
+def _store_toc(act: dict, sections: List[dict]) -> None:
+    limit = _toc_max()
+    if not sections or limit == 0 or _toc_ttl_s() <= 0:
+        return
+    with _TOC_LOCK:
+        _TOC_CACHE[_act_key(act)] = (time.monotonic(), sections)
+        _TOC_CACHE.move_to_end(_act_key(act))
+        while len(_TOC_CACHE) > limit:
+            _TOC_CACHE.popitem(last=False)
+
+
+def _toc_sections(act: dict, run_tool: RunTool) -> Tuple[List[dict], bool]:
+    """Every section of one Act with the heading it sits under, paging the table of contents.
+    Returns (sections, served_from_cache)."""
+    cached = _cached_toc(act)
+    if cached is not None:
+        return cached, True
     base = {"type": act["type"], "year": act["year"], "number": act["number"]}
     first = run_tool("legislation_get_toc", {**base, "offset": 0, "limit": TOC_PAGE}) or {}
+    if not first.get("items"):
+        return [], False  # failed or empty: never cached
     pages = [first]
     total = int(first.get("total_items") or 0)
     offsets = [o for o in range(TOC_PAGE, min(total, TOC_PAGE * TOC_MAX_PAGES), TOC_PAGE)]
+    complete = True
     if offsets:
         with ThreadPoolExecutor(max_workers=len(offsets)) as pool:
-            pages += list(pool.map(lambda o: run_tool("legislation_get_toc", {**base, "offset": o, "limit": TOC_PAGE}) or {}, offsets))
+            rest = list(pool.map(lambda o: run_tool("legislation_get_toc", {**base, "offset": o, "limit": TOC_PAGE}) or {}, offsets))
+        complete = all(p.get("items") for p in rest)
+        pages += rest
     sections, heading = [], ""
     for page in pages:
         for item in page.get("items") or []:
@@ -128,7 +196,9 @@ def _toc_sections(act: dict, run_tool: RunTool) -> List[dict]:
             h = _HEADING_ITEM.match(item)
             if h:
                 heading = h.group(2).strip()
-    return sections
+    if complete:
+        _store_toc(act, sections)
+    return sections, False
 
 
 def _pick_sections(client, query: str, sections: List[dict]) -> List[dict]:
@@ -175,7 +245,9 @@ def prefetch_sections(tool_name: str, result: Any, query: str, client, run_tool:
             return {"metrics": {"acts": len(acts), "opened": 0, "fetched": 0,
                                 "ms": int((time.perf_counter() - t0) * 1000)}, "fetched": []}
         with ThreadPoolExecutor(max_workers=len(top_acts)) as pool:
-            sections = [s for secs in pool.map(lambda a: _toc_sections(a, run_tool), top_acts) for s in secs]
+            tocs = list(pool.map(lambda a: _toc_sections(a, run_tool), top_acts))
+        sections = [s for secs, _ in tocs for s in secs]
+        toc_cached = sum(1 for _, from_cache in tocs if from_cache)
         chosen = _pick_sections(client, query, sections) if sections else []
         fetched: List[dict] = []
         if chosen:
@@ -188,7 +260,8 @@ def prefetch_sections(tool_name: str, result: Any, query: str, client, run_tool:
                 return {"args": args, "result": res, "label": f'{s["title"]} s{s["section"]}'}
             with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
                 fetched = [f for f in pool.map(fetch, chosen) if f]
-        metrics = {"acts": len(acts), "opened": len(top_acts), "judged": min(len(sections), MAX_SECTIONS_JUDGED),
+        metrics = {"acts": len(acts), "opened": len(top_acts), "toc_cached": toc_cached,
+                   "judged": min(len(sections), MAX_SECTIONS_JUDGED),
                    "fetched": len(fetched), "sections": [f["label"] for f in fetched],
                    "ms": int((time.perf_counter() - t0) * 1000)}
         logging.info("decisions prefetch: %s", json.dumps(metrics, ensure_ascii=False))
