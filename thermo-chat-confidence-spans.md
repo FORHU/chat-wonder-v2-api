@@ -1,192 +1,127 @@
-# Confidence Spans — Implementation Status (Session 3)
+# Handoff: Thermo Chat Confidence Spans — chat-wonder-v2-api
 
-**Date:** 2026-11-10
-**Branch:** `feat/thermo-chat`
-**Mode:** Autonomous ("auto mode"), Sonnet 5, unsupervised. **Review this before testing.**
+**Last updated:** 2026-11-10 (verification session on a second machine)
+**Branch:** `feat/thermo-chat`, pushed. No PR yet. **Squash-merge it**, because `de97e55` accidentally committed the whole `.venv` (about 3M lines). `40aa3d1` untracks it, but it stays in branch history.
+**Status:** Core mechanism built, tested, and live-verified on two machines. One real coverage bug and one calibration gap are open; see "Open issues" first.
 
-This supersedes `thermo-chat-handoff.md` (the session-1/session-2 handoff, which documented a
-failed attempt and false "COMPLETED" claims — see its own "Mistakes made" section). That document
-can be deleted once this one is reviewed; nothing in it reflects the current code.
+The old repo-root `thermo-chat-handoff.md` from earlier sessions is gone. This file and the architecture doc supersede it.
 
-Full architecture, rationale, and diagrams: the published artifact from the planning session —
-ask the user for the link, or see `C:\Users\bulan\.claude\plans\c-users-bulan-onedrive-desktop-thermocha-cozy-plum.md`
-for the text plan it was built from.
+**Architecture doc (read this first):** https://claude.ai/artifact/UW9q2bRG4ybGktBQfevcrJ. It has the exact formula, the design history (citation/attribution reuse and then K-sample self-consistency were both discarded), the transport/safety diagrams, and the quote-anchoring mechanism.
 
 ---
 
-## What's actually true right now (verify before trusting this doc)
+## The one-paragraph version
+
+Every sentence of a `legal`/`legal_uk`/`intake` answer gets one of three categories:
+
+- **QUOTED**: near-verbatim from a source.
+- **SOURCED**: the model's own conclusion, drawing on a source.
+- **UNSOURCED**: no source at all.
+
+A deterministic formula (IDF-weighted lexical overlap) assigns the category, not an LLM judge. It's wired into `the_server.py` and rendered client-side in all four dev testers. The renderer is a DOM overlay applied on top of `marked.parse()` output. The feature is gated behind `CONFIDENCE_SPANS` (default on). Don't put that flag in the committed `.env`: it's a behaviour flag, not a secret.
+
+## Files on the branch
+
+| File | What |
+|---|---|
+| `confidence.py` | `provenance_spans()` (the formula), `quoted_citation_spans()` (free href check), `token_entropy`/`group_words`/`entropy_payload` (per-token entropy, testers only), `build_payload`/`to_frame`. |
+| `the_server.py` | `_confidence_sources()`, confidence assembly in the post-`__END__` extras phase, `[CONF]` live-frame guards in both websocket loops, `ChatRequest.confidence_live`, `ChatState.confidence_live`/`confidence_tokens` (stripped from pickle), `/version` `confidence` block. |
+| `model_registry.py` | Came in with `2079417` (DeepSeek non-thinking routing: `get_client`, `shape_chat_args`). This work added `supports_logprobs()` (gpt-4o*, gpt-4.1*, deepseek-chat; not luna/terra/deepseek-reasoner). |
+| `testers/confidence-render.js` | Shared renderer: `marked.parse()` first, unconditionally; spans overlaid per block element via `Range.extractContents()`; citation `<a>`s styled in place by href. |
+| 4 testers (`model_tester_demo`, `legal_chat_demo`, `legal_uk_chat_demo`, `intake_chat_demo`) | "Thermo view" toggle (off by default), `[CONF]`/envelope guards, plus `[STRUCTURED_DATA]`/`[DONE]` guards where they were missing. |
+| `tests/test_confidence.py` | 42 tests, including the regression test proving `[CONF]` frames can never leak into `full_response`. |
+
+`_finalize_legal_response`, the citation pipeline and the doctrine guards are untouched.
+
+## The formula
+
+For each candidate sentence `S`, against this turn's retrieved sources `D`:
 
 ```
-git log --oneline -1          # should NOT be committed yet — nothing here has been committed
-git status                    # see the file list below
-python -m pytest tests/test_confidence.py -v   # 39 tests, all passing at time of writing
-python -m pytest tests/ test_responses_store.py -q   # 614 passed, 1 pre-existing failure (see below)
+Q(S) = 1 if normalize(S) is a substring of some d ∈ D (or vice-versa, d ≥ 20 chars), else 0
+idf(w) = ln(1 + N/df(w))
+C(S) = Σ idf(w) for w ∈ T(S)∩vocab(D)  /  Σ idf(w) for w ∈ T(S)      (T = non-stopword words)
+
+tier = QUOTED if Q=1;  SOURCED if C ≥ 0.45;  else UNSOURCED
 ```
 
-**Nothing has been committed.** All changes are in the working tree, unstaged/staged exactly as
-`git status` shows. This is deliberate — the user asked for this to be reviewable before testing,
-and a commit should be the user's own decision after that review.
+A citation `<a href>` is QUOTED the moment its href resolves to a retrieved source. `SOURCED_COVERAGE_THRESHOLD = 0.45` and `QUOTE_MIN_CHARS = 20` are uncalibrated starting values.
 
-**One pre-existing test failure, unrelated to this work:**
-`test_responses_store.py::test_everything_else_is_passed_through_and_the_result_returned` fails on
-a clean `feat/thermo-chat` checkout too (verified by `git stash` and re-running it in isolation).
-Do not spend time on it as part of reviewing this feature.
+## How the rendering works (read before touching confidence-render.js)
 
----
-
-## What was implemented (Phases 0–2, chat-wonder-v2-api only)
-
-### New files
-- **`confidence.py`** — the signal-agnostic span layer. Entropy math (renormalized top-5 Shannon
-  entropy, `token_entropy`/`group_words`/`entropy_payload`), live-frame encoding (`to_live_frame`),
-  verification spans (`attribution_spans`, `citation_spans`), and payload assembly
-  (`build_payload`, `to_frame`). Read its module docstring first — it explains the two
-  divergences from the Thermo Chat reference (renormalization; no fabricated "temperature") and
-  why GROUNDED requires a verified quote rather than trusting the judge's `supported` verdict.
-- **`testers/confidence-render.js`** — shared client-side renderer for all four testers. One file,
-  not four copies, specifically because duplicated threshold constants are how the Thermo Chat
-  reference's own slider desynced from itself.
-- **`tests/test_confidence.py`** — 39 tests. The one that matters most is
-  `ChatWonderStreamingTests.test_conf_frames_never_reach_full_response`: it drives the real
-  `streaming_run_function_chain` (not a mock of it) with fake logprobs and asserts the exact prior
-  failure mode (interleaved metric frames swallowing the whole buffered answer) cannot recur.
-
-### Modified files
-- **`model_registry.py`** — `supports_logprobs()` (allowlist: `gpt-4o*`, `gpt-4.1*`,
-  `deepseek-chat`; explicitly NOT `gpt-5.6-luna`/`terra`/`deepseek-reasoner`) and
-  `logprob_capable_prefixes()`. `shape_chat_args()` now strips `logprobs`/`top_logprobs` for any
-  model outside that allowlist, defensively, even though `perform_chat` already gates the request.
-- **`the_server.py`**:
-  - `ChatRequest.confidence_live: Optional[bool] = False` — the dev-tester opt-in for live
-    `[CONF]` frames. The relay never sends this field; production cannot receive live frames even
-    if a server-side flag is flipped by mistake.
-  - `ChatState.confidence_live` / `ChatState.confidence_tokens` — both stripped from the pickle in
-    `__getstate__` (per-turn telemetry, no reason to survive a restart).
-  - `streaming_run_function_chain`: computes `_telemetry_on` / `_confidence_live` once per turn,
-    requests `logprobs`/`top_logprobs=5` in `perform_chat` when eligible, captures entropy from
-    `chunk.choices[0].logprobs.content[]` (never from the already-transformed `part` text) into
-    `state.confidence_tokens`, and yields `[CONF]{...}[/CONF]` live frames when `confidence_live`
-    is set.
-  - Both websocket loops: a `[CONF]` guard placed immediately beside the existing `[TRACE]` guard
-    (`send_text` then `continue`) — this `continue` is the entire safety property; see the
-    regression test above for what happens without it.
-  - Post-`__END__` extras phase: builds and sends the `{"type":"confidence",...}` envelope for
-    `legal`/`legal_uk`/`intake` when `full_response` was non-empty, wrapped in its own
-    try/except so a telemetry failure can never look like a failed turn to ilovelawyer-api (same
-    reasoning the existing extras code already uses for reasoning/decisions/mind-map).
-  - `/version` now advertises a `confidence` capability block.
-- **`testers/model_tester_demo.html`, `legal_chat_demo.html`, `legal_uk_chat_demo.html`,
-  `intake_chat_demo.html`** — each gets: the shared renderer script tag, a "Thermo view" toggle in
-  the header (off by default — toggle off renders byte-identically to before this change), a
-  legend container, `[CONF]`-frame and `{"type":"confidence"}`-envelope guards placed before the
-  text-accumulation fallthrough, and a `lastBubble`/`lastRaw` pair so the envelope (which arrives
-  **after** `__END__`, once `finishAssistantTurn()` has already cleared the streaming variables)
-  can still annotate the just-finished bubble.
-
-### Incidental fixes made while wiring the above (not the point of this session, but low-risk and directly adjacent to what was being edited)
-- **`legal_chat_demo.html` and `legal_uk_chat_demo.html` had no `[TRACE]` branch at all** — a
-  trace frame fell straight into the answer bubble and corrupted it. This was a live bug
-  independent of confidence spans; fixed as part of adding the guards in the same spot.
-  `intake_chat_demo.html` had the same gap (no `[TRACE]` branch), also fixed.
-- **`legal_chat_demo.html` never dropped `[RELATED_CASES]`** (every other tester does). Fixed in
-  the same edit as the `[Sources]` handling.
+1. Markdown is always rendered first with `marked.parse()`, in every toggle state.
+2. Spans are matched against block elements (`<p>`, `<li>`, `<h2>`, `<td>`…) using `Range.extractContents()`, not single-text-node search. That's because sentences cross `<strong>`/`<em>` boundaries.
+3. Citation `<a>`s are matched by href (`span.ref`) and styled in place. They don't get a `.conf-span` wrapper, so DOM counts of `.conf-span` exclude them.
+4. `confidence.py` extracts *cleaned* text that matches what `marked.parse()` renders, not raw markdown.
 
 ---
 
-## What was deliberately NOT done, and why
+## Open issues
 
-### Phase 0.1 (relay: ignore unknown envelopes in ilovelawyer-api) — NOT applied
-The plan calls for a one-line safety fix in `ilovelawyer-api/src/utils/chatWonder.ts` (and
-`intakeChatWonder.ts`): add a final `else { return; }` to the envelope-type branch so an
-unrecognized `{"type":...}` frame is dropped instead of falling through into answer prose.
+### 1. Coverage bug: only the first 80 sentences are ever scored
+`confidence._candidate_sentences(text, limit=80)` stops at 80 sentences. Its own docstring says nothing should be left uncoloured, because an unshaded sentence reads as "never checked."
 
-**This was not applied.** `ilovelawyer-api`'s current checkout is on `test/deepseek-local-override`
-with the user's own uncommitted changes already in its working tree (`src/config.ts`, `yarn.lock`).
-Editing there would have mixed an unrelated change into someone else's in-progress branch state.
-The exact diff to apply, once the user is on the right branch for it:
+**Live evidence (2026-11-10):** a 31K-char UK unfair-dismissal answer had 407 text blocks, and only 54 got any shading. Everything after the first screenful is unshaded. The likely fix is to remove or raise the cap. The formula is cheap, and a cap should be about payload size rather than sentence count. After the fix, re-check payload size and render time on a long answer.
 
-```ts
-// In chatWonder.ts and intakeChatWonder.ts, wherever the envelope-type switch/if-chain lives
-// (reasoning / decisions / usage cases): add a final default that drops anything unrecognized.
-} else {
-  return; // unknown envelope type — never let it fall through to answer text
-}
+### 2. Most prose comes out UNSOURCED, because the source corpus is too thin
+In that same answer, 67 of 71 spans were UNSOURCED and 4 were SOURCED. The 5 citation links were correctly QUOTED.
+
+The cause is `_confidence_sources()`, which builds the corpus from search-result `title + snippet` only. The sources panel shows titles like "The right." and "General." The model actually read full statute text via `legislation_get_section`, and that text never reaches the formula. Fix the corpus before calibrating the threshold: include tool-returned section/judgment text. Tuning 0.45 against a corpus this thin would calibrate the wrong thing.
+
+### 3. Formula constants are still starting guesses
+Calibrate them after #1 and #2.
+
+### 4. Legal Terminal surface: discovered, not integrated
+`ilovelawyer-app/components/terminal/` (`law-panel.tsx` etc.) uses `/api/my-cases/:caseId/...` REST plus polled `AiJobStatus`, not `/chat-stream`. Start from `ilovelawyer-api/src/controllers/case-terminal.controller.ts` and `services/case-change-run.service.ts`.
+
+### 5. Everything past chat-wonder-v2-api
+Not started: relay event emission in `ilovelawyer-api`, Prisma `MessageConfidence` side table, app/client renderers. `ilovelawyer-api` was last seen on an unrelated branch (`test/deepseek-local-override`) with uncommitted work. Switch branches before touching it.
+
+---
+
+## Resolved this session
+
+### UK test failure: pre-existing, not caused by this branch
+`test_extent_not_assumed_uk_wide` failed 5/5 on the branch and 5/5 on `staging`. Two separate causes stacked:
+
+1. **Stale local config (environment).** A gitignored `resources/functions/user_functions.env` held a "local cheap legal profile" with `LEGAL_USE_RESPONSES_API=false`, `LEGAL_CHAT_MODEL=gpt-4o-mini` and `LEGAL_REASONING_EFFORT=none`. It's loaded with `override=True`, so it beats `.env`.
+   - The code now reads only `LEGAL_CHAT_MODEL_UK`/`_PH`, so the gpt-4o-mini override was silently ignored and the turn fell back to `gpt-5.6-luna` on Chat Completions.
+   - OpenAI rejects that with a 400 ("Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions").
+   - This broke **all 6** live legal regression tests and live legal chat on the dev server. Commenting out the 3 lines fixed it.
+   - **Code smell worth a follow-up:** the documented `LEGAL_USE_RESPONSES_API=false` rollback path can no longer work with the default luna model.
+2. **Brittle assertion (test).** On the real Responses path, the test went 1/3 on the branch and 1/3 on `staging`. All 6 answers were legally correct and flagged that NI has its own legislation. The fixed phrase list misses natural wording such as "Employment Rights **(Northern Ireland) Order** 1996", "own **employment** legislation" and "separate employment-law **framework**". Fix this in its own small PR by loosening the phrases into regexes.
+
+The other known failures are unrelated to this feature:
+- `test_responses_store.py::test_everything_else_is_passed_through_and_the_result_returned`: pre-existing on HEAD.
+- `test_no_other_code_calls_the_responses_api_directly`: fails only on machines with an `.agent-office/worktrees/` copy inside the repo, which the scan picks up. Environmental.
+
+### Dev server hang: did not reproduce
+The hang (port 8000 accepting TCP but never responding) was on the original machine's long-running `--reload` process. On a fresh `uvicorn the_server:app --port 8000` without `--reload`, startup is clean and `/version` answers in about 3ms with the `confidence` block. A live UK turn completed in 84s. If it recurs, look at that process's console first.
+
+### Branch hygiene
+`de97e55` committed `.venv/` (11,852 files, pointing at another machine's Python 3.10, unusable elsewhere) and a stray `ssm-params.json`. Both are untracked and gitignored as of `40aa3d1`. Recreate the venv locally: `py -3.12 -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt pytest`.
+
+---
+
+## Verification commands
+
+```bash
+cd chat-wonder-v2-api
+python -m pytest tests/test_confidence.py -q          # 42 pass
+python -m pytest tests/ test_responses_store.py -q    # live legal tests need a working legal env (see above)
+curl -s localhost:8000/version                         # check the `confidence` block
 ```
 
-**Practical effect of not having this yet:** chat-wonder-v2-api now emits a
-`{"type":"confidence",...}` envelope for legal/legal_uk/intake turns (whenever `CONFIDENCE_SPANS`
-is enabled, which defaults to true). ilovelawyer-api's relay does not yet know what to do with an
-envelope of type `"confidence"` and — per the architecture doc's finding — **currently has no
-default-ignore case**, so this frame could fall through into answer prose on the relay side.
+To see it work:
+1. Start the server fresh.
+2. Serve `testers/` over HTTP (`python -m http.server`), since Playwright blocks `file://`.
+3. Open `legal_uk_chat_demo.html` and ask a UK question.
+4. Click "Thermo view".
 
-**This means: do not point a running ilovelawyer-api instance at a chat-wonder-v2-api deployment
-of this branch until either (a) Phase 0.1 is applied to the relay, or (b) `CONFIDENCE_SPANS=false`
-is set in chat-wonder-v2-api's environment.** The dev testers are safe to use as-is (they talk to
-chat-wonder-v2-api directly, with their own guards now in place) — only the relay path is at risk.
+Expect green citation links and shaded sentences with markdown intact. Until open issue #1 is fixed, shading covers only the first ~80 sentences.
 
-### Phases 3–7 — not started
-Relay event emission (`chat:confidence`), the Prisma `MessageConfidence` migration, the app
-renderer/toggle, the client app wiring, and the intake verifier are all specified in detail in the
-architecture plan but require work in `ilovelawyer-api`, `ilovelawyer-app`, and
-`ilovelawyer-client` — three repos this session did not touch, partly for the branch-state reason
-above and partly because schema migrations and production frontend changes deserve a human in the
-loop before they're written, not after.
+## Things worth remembering
 
-### Risk controls (quote verification, pass-consensus) — implemented, not yet calibrated
-`attribution_spans` in `confidence.py` already implements both risk controls from the plan:
-- `GROUNDED` requires the judge's quote to verify (normalized substring match) against the
-  exhibit text; a `supported` verdict with no verifying quote becomes `INFERENCE`, never `GROUNDED`.
-- `UNSUPPORTED` requires **every** judge pass to agree; a claim the passes disagreed about is
-  omitted entirely rather than shown.
-
-**What's NOT done: the calibration gate itself.** The plan's pre-registered numbers (≥90%
-precision on human review, marks on ≤10% of in-scope sentences) have not been measured against
-real traffic, because nothing has run against real traffic yet. **Do not expose this to clients
-(Phase 5/6) before that measurement happens.** The entropy display thresholds in
-`confidence-render.js` are explicitly marked as starting guesses for the same reason — see the
-`ENTROPY_BANDS` comment in that file.
-
----
-
-## How to verify this yourself before testing
-
-1. **Read `confidence.py`'s module docstring and `attribution_spans`' docstring first.** They
-   explain the two most consequential design choices (quote verification, pass-consensus) and
-   why each exists.
-2. **Run the regression test by itself** and read what it asserts:
-   ```
-   python -m pytest tests/test_confidence.py::ChatWonderStreamingTests -v
-   ```
-3. **Diff `the_server.py`** (`git diff the_server.py`) and confirm every `[CONF]` guard is
-   immediately followed by `continue`, exactly like the adjacent `[TRACE]` guard. This is the one
-   property that, if missing, reproduces the documented prior failure.
-4. **Start the server locally and open `testers/model_tester_demo.html`.** Select `gpt-4o-mini` or
-   `deepseek-chat` as the model override (the only two with real entropy support), send a message
-   with persona "General", and toggle "Thermo view" on — live per-word coloring should appear
-   during streaming. With `gpt-5.6-luna` selected, the toggle should show "confidence shading
-   unavailable" rather than coloring anything (no logprobs on that model).
-5. **Open `legal_chat_demo.html` or `legal_uk_chat_demo.html`, ask a legal question that triggers
-   search**, and after the answer finishes, toggle "Thermo view" on. You should see sentence-level
-   shading appear, sourced from the citation/attribution guards. If a sentence you know is fine
-   shows as UNSUPPORTED, that is exactly the false-positive risk the calibration gate exists to
-   catch — note it, don't ship past it.
-6. **Confirm `CONFIDENCE_SPANS=false` disables everything**: no logprobs requested (check the
-   outbound args in a debugger or log), no envelope sent, all four testers render exactly as they
-   did before this branch.
-7. **Do not set `CONFIDENCE_SPANS` or any other behavior flag in the committed `.env`.** It's a
-   behavior flag, not a secret, and this repo's `.env` is committed — see the memory rule about not
-   copying behavior flags into live env.
-
----
-
-## Open questions for the user (none of these blocked the work above, but they matter for Phases 3+)
-
-- **Calibration data collection**: who runs the representative-query sweep the plan's
-  "Calibration" section calls for, and against which persona/jurisdiction first?
-- **Intake's `UNSUPPORTED` tier**: the plan says intake launches with `GROUNDED`/`INFERENCE` only,
-  no `UNSUPPORTED`, until its own precision data exists. The Phase 7 verifier isn't built yet, so
-  this hasn't come up in practice — flagging it now so it isn't missed when Phase 7 starts.
-  `confidence.py`'s `checked=False` path for intake already reflects "nothing built yet" (coverage
-  reads `"none"`), not a decision about the tier itself.
-- **Which repo gets Phase 0.1 first**: `ilovelawyer-api` needs a clean branch state before that
-  one-line relay fix can land without mixing into unrelated work.
+- "Work on luna/terra" can't mean entropy: the Responses API exposes no logprobs. The provenance formula is the signal that works on every model.
+- Self-consistency sampling worked but cost 4–5×, and it was an indirect proxy for provenance, which has a direct, free answer.
+- Don't trust "fixed" without real output. Both open issues above were found only by driving the live tester, not by the 42 unit tests.
