@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-11-10 (verification session on a second machine)
 **Branch:** `feat/thermo-chat`, pushed. No PR yet. **Squash-merge it**, because `de97e55` accidentally committed the whole `.venv` (about 3M lines). `40aa3d1` untracks it, but it stays in branch history.
-**Status:** Core mechanism built, tested, and live-verified on two machines. One real coverage bug and one calibration gap are open; see "Open issues" first.
+**Status:** Core mechanism built, tested, and live-verified on two machines. Coverage and source-corpus bugs fixed on 2026-11-10; threshold calibration is the next step (see "Open issues").
 
 The old repo-root `thermo-chat-handoff.md` from earlier sessions is gone. This file and the architecture doc supersede it.
 
@@ -58,18 +58,30 @@ A citation `<a href>` is QUOTED the moment its href resolves to a retrieved sour
 
 ## Open issues
 
-### 1. Coverage bug: only the first 80 sentences are ever scored
-`confidence._candidate_sentences(text, limit=80)` stops at 80 sentences. Its own docstring says nothing should be left uncoloured, because an unshaded sentence reads as "never checked."
+### 1. Coverage and source corpus: FIXED 2026-11-10
+These two bugs were found live and fixed together:
+- **80-sentence cap.** `_candidate_sentences` scored only the first 80 sentences, which left 54 of 407 blocks shaded. It's now bounded only by `MAX_CANDIDATE_SENTENCES = 2000`, as a payload-safety bound.
+- **Thin corpus.** `_confidence_sources()` used only `title + snippet`. It now flattens each pool row with `legal_citations.collect_tool_result_text_corpus([row])`, one IDF document per row, so full `legislation_get_section` text and PH `court_reasoning`/`full_text` reach the formula.
+- **Smaller fixes in the same change:**
+  - Ordered-list markers (`1. `) are stripped. Before, those spans could never match the DOM.
+  - Quote characters are normalized the same way on both sides, so verbatim matches survive curly quotes.
+  - Sources are normalized once per turn, not once per sentence.
+  - The renderer caches block text, avoiding about 160K `textContent` reads on long answers.
 
-**Live evidence (2026-11-10):** a 31K-char UK unfair-dismissal answer had 407 text blocks, and only 54 got any shading. Everything after the first screenful is unshaded. The likely fix is to remove or raise the cap. The formula is cheap, and a cap should be about payload size rather than sentence count. After the fix, re-check payload size and render time on a long answer.
+**Live result** (same UK unfair-dismissal question):
 
-### 2. Most prose comes out UNSOURCED, because the source corpus is too thin
-In that same answer, 67 of 71 spans were UNSOURCED and 4 were SOURCED. The 5 citation links were correctly QUOTED.
+| | Spans | QUOTED | SOURCED | UNSOURCED | Blocks shaded |
+|---|---|---|---|---|---|
+| Before | 71 | 0 | 4 | 67 | 54 / 407 |
+| After | 757 | 12 | 490 | 255 | 658 / 658 |
 
-The cause is `_confidence_sources()`, which builds the corpus from search-result `title + snippet` only. The sources panel shows titles like "The right." and "General." The model actually read full statute text via `legislation_get_section`, and that text never reaches the formula. Fix the corpus before calibrating the threshold: include tool-returned section/judgment text. Tuning 0.45 against a corpus this thin would calibrate the wrong thing.
+Thermo view renders in 44ms.
 
-### 3. Formula constants are still starting guesses
-Calibrate them after #1 and #2.
+### 2. Formula constants are still starting guesses: next step
+With the full corpus in place, calibration now measures the right thing. The visible weak spot is **short fragments**. Two-to-three-word list items ("witness statements", "appeal documents") come out SOURCED, because a full statute contains almost any common word pair. Consider a minimum distinctive-token count before SOURCED is allowed, or a length-aware threshold, then tune `SOURCED_COVERAGE_THRESHOLD`/`QUOTE_MIN_CHARS` on real traffic.
+
+### 3. Sentences containing a citation link are unshaded apart from the link itself
+This is by design (see `_candidate_sentences`' docstring), but it's still a visible gap on citation-dense paragraphs.
 
 ### 4. Legal Terminal surface: discovered, not integrated
 `ilovelawyer-app/components/terminal/` (`law-panel.tsx` etc.) uses `/api/my-cases/:caseId/...` REST plus polled `AiJobStatus`, not `/chat-stream`. Start from `ilovelawyer-api/src/controllers/case-terminal.controller.ts` and `services/case-change-run.service.ts`.
@@ -118,7 +130,7 @@ To see it work:
 3. Open `legal_uk_chat_demo.html` and ask a UK question.
 4. Click "Thermo view".
 
-Expect green citation links and shaded sentences with markdown intact. Until open issue #1 is fixed, shading covers only the first ~80 sentences.
+Expect green citation links and every sentence shaded, with markdown intact.
 
 ## Things worth remembering
 

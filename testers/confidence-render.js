@@ -149,11 +149,17 @@
   /** Tries every block-level element in document order until `quote` is found in one — a span
    * almost always falls entirely within a single <p>/<li>/<h2>, since confidence.py's
    * sentence extraction splits on the same line/sentence boundaries markdown blocks do. */
-  function _findAndWrapInAnyBlock(containerEl, quote, wrapFn) {
+  function _findAndWrapInAnyBlock(containerEl, quote, wrapFn, blockCache) {
     if (!quote) return false;
-    var blocks = containerEl.querySelectorAll(BLOCK_SELECTOR);
+    // blockCache (optional): [{el, text}] built once per render. Wrapping a range in <mark>
+    // never changes a block's textContent, so the cached text stays valid across spans --
+    // and skipping blocks that can't contain the quote avoids re-reading textContent
+    // spans x blocks times (~160K reads on a long answer once every sentence is scored).
+    var blocks = blockCache || Array.prototype.map.call(
+      containerEl.querySelectorAll(BLOCK_SELECTOR), function (el) { return { el: el, text: null }; });
     for (var i = 0; i < blocks.length; i++) {
-      if (_wrapQuoteInBlock(blocks[i], quote, wrapFn)) return true;
+      if (blocks[i].text !== null && blocks[i].text.indexOf(quote) === -1) continue;
+      if (_wrapQuoteInBlock(blocks[i].el, quote, wrapFn)) return true;
     }
     return false;
   }
@@ -276,6 +282,8 @@
       remaining.sort(function (x, y) {
         return (y.quote || "").length - (x.quote || "").length;
       });
+      var blockCache = Array.prototype.map.call(
+        bubbleEl.querySelectorAll(BLOCK_SELECTOR), function (el) { return { el: el, text: el.textContent }; });
       for (var j = 0; j < remaining.length; j++) {
         (function (span) {
           _findAndWrapInAnyBlock(bubbleEl, span.quote, function () {
@@ -287,7 +295,7 @@
             mark.style.color = style.fg;
             mark.title = title;
             return mark;
-          });
+          }, blockCache);
         })(remaining[j]);
       }
     },

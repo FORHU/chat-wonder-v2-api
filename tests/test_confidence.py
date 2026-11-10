@@ -192,6 +192,12 @@ class ProvenanceSpansTests(unittest.TestCase):
         text = 'See <a href="https://x.gov.uk/s1">Some Act Law</a> for the rule, which applies broadly.'
         self.assertEqual(confidence._candidate_sentences(text), [])
 
+    def test_ordered_list_marker_is_stripped(self):
+        # marked renders "1. " as <ol> numbering, not text -- keeping it made the quote unmatchable.
+        sentences = confidence._candidate_sentences("1. The employee must have two years' service.\n2) Then claim.")
+        self.assertIn("The employee must have two years' service.", sentences)
+        self.assertIn("Then claim.", sentences)
+
     def test_table_row_splits_into_matchable_cells(self):
         text = "| Event | Date |\n| --- | --- |\n| Dismissal | 1 March |"
         sentences = confidence._candidate_sentences(text)
@@ -399,6 +405,63 @@ class ChatWonderStreamingTests(unittest.TestCase):
         out, state, client = self._run(confidence_live=True)
         pickled_state = state.__getstate__()
         self.assertIsNone(pickled_state["confidence_tokens"])
+
+
+class LongAnswerCoverageTests(unittest.TestCase):
+    """Found live (2026-11-10): a 31K-char UK answer had 407 text blocks but only the first 80
+    sentences were ever scored, leaving everything below the first screenful unshaded -- which
+    reads as "never checked", the exact failure _candidate_sentences' docstring forbids."""
+
+    def test_every_sentence_of_a_long_answer_gets_a_span(self):
+        text = "\n".join(f"- Point number {i} about unfair dismissal." for i in range(300))
+        spans = confidence.provenance_spans(text, ["unfair dismissal rules"])
+        self.assertEqual(len(spans), 300)
+
+
+class ConfidenceSourcesTests(unittest.TestCase):
+    """Found live (2026-11-10): 67 of 71 spans on a UK answer were UNSOURCED because the corpus
+    was only search-row title+snippet ("The right.", "General."), while the model had actually
+    read full statute text via legislation_get_section -- text already sitting in the pool."""
+
+    def _state(self, pool):
+        return SimpleNamespace(last_search_legal_results=pool, case_documents=None, prompt=[])
+
+    def test_uk_section_full_text_reaches_the_corpus(self):
+        section_text = ("An employee who is dismissed shall be regarded as unfairly dismissed if the "
+                        "reason for the dismissal is that the employee made a protected disclosure.")
+        pool = [{"title": "General.", "url": "https://www.legislation.gov.uk/ukpga/1996/18/section/103A",
+                 "section": {"heading": "Protected disclosure", "content": section_text}}]
+        with patch.object(srv, "exhibit_texts", return_value=[]):
+            sources = srv._confidence_sources("legal_uk", self._state(pool))
+        self.assertEqual(len(sources), 1)  # one document per pool row, so IDF stays meaningful
+        self.assertIn("protected disclosure", sources[0])
+
+    def test_ph_get_case_reasoning_reaches_the_corpus(self):
+        pool = [{"title": "People v. X", "snippet": "", "court_reasoning":
+                 "The constitutional right against unreasonable searches cannot be waived by silence."}]
+        with patch.object(srv, "exhibit_texts", return_value=[]):
+            sources = srv._confidence_sources("legal", self._state(pool))
+        self.assertTrue(any("unreasonable searches" in s for s in sources))
+
+    def test_sentence_drawn_from_full_section_text_is_not_unsourced(self):
+        section_text = ("An employee who is dismissed shall be regarded as unfairly dismissed if the "
+                        "reason for the dismissal is that the employee made a protected disclosure.")
+        pool = [{"title": "General.", "section": {"content": section_text}},
+                {"title": "Qualifying period of employment.", "snippet": "two years continuous employment"}]
+        with patch.object(srv, "exhibit_texts", return_value=[]):
+            sources = srv._confidence_sources("legal_uk", self._state(pool))
+        spans = confidence.provenance_spans(
+            "Dismissal because the employee made a protected disclosure is automatically unfair.", sources)
+        self.assertNotEqual(spans[0].tier, "UNSOURCED")
+
+    def test_verbatim_match_survives_curly_quotes(self):
+        # The pool corpus strips quote characters (legal_citations._normalize_quote_text); the
+        # sentence side must be normalized the same way or a real quotation never matches.
+        src = "The employer shall show the reason, or if more than one the principal reason, for the dismissal."
+        spans = confidence.provenance_spans(
+            "The employer shall show “the reason, or if more than one the principal reason”, for the dismissal.",
+            [src.lower()])
+        self.assertEqual(spans[0].tier, "QUOTED")
 
 
 if __name__ == "__main__":

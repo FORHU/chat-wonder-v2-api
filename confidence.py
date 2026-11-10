@@ -212,6 +212,9 @@ def _plain_for_match(s: str) -> str:
     s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
     s = re.sub(r"^#{1,6}\s*", "", s)
     s = re.sub(r"^[-*+]\s+", "", s)
+    # Ordered-list markers too: marked renders "1. " as <ol> numbering, never as text, so a
+    # quote that kept it could never match the DOM (found live: spans silently dropped).
+    s = re.sub(r"^\d{1,3}[.)]\s+", "", s)
     s = re.sub(r"^>\s?", "", s)
     s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
     s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", s)
@@ -219,7 +222,14 @@ def _plain_for_match(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _candidate_sentences(text: str, limit: int = 80) -> List[str]:
+#: Safety bound only -- NOT a coverage choice. An earlier hard limit of 80 left everything after
+#: the first screenful of a long answer unshaded (found live: 54 of 407 blocks covered on a
+#: 31K-char UK answer). Real answers stay far below this; it exists so a pathological output
+#: can't produce an unbounded payload.
+MAX_CANDIDATE_SENTENCES = 2000
+
+
+def _candidate_sentences(text: str, limit: int = MAX_CANDIDATE_SENTENCES) -> List[str]:
     """Cleaned sentence/cell text, matching what the rendered DOM will contain -- NOT verbatim
     substrings of final_text's raw markdown source (see the module-level comment above for
     why). Nothing is skipped by line type: headings, bullets and blockquotes are all candidates,
@@ -258,8 +268,14 @@ def _candidate_sentences(text: str, limit: int = 80) -> List[str]:
     return out
 
 
+#: Same character class legal_citations._normalize_quote_text strips. Sources built from the
+#: legal pool come through collect_tool_result_text_corpus, which already removed these, so the
+#: sentence side has to drop them too or a real quotation (“...”) can never verbatim-match.
+_QUOTE_CHARS = re.compile(r'[\"“”‘’*_`]')
+
+
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "")).strip().casefold()
+    return re.sub(r"\s+", " ", _QUOTE_CHARS.sub("", text or "")).strip().casefold()
 
 
 def _toks(text: str) -> Set[str]:
@@ -286,16 +302,20 @@ QUOTE_MIN_CHARS = 20
 SOURCED_COVERAGE_THRESHOLD = 0.45
 
 
-def _is_verbatim_match(sentence: str, sources: List[str]) -> bool:
+def _is_verbatim_match(sentence: str, sources: List[str], *, normalized: bool = False) -> bool:
     """Q(S) in the module docstring's formula: 1 if the normalized sentence (or a long enough
     normalized source passage) is a substring of the other, else 0. QUOTE_MIN_CHARS keeps a
     short, generic sentence from registering as a "quotation" of an unrelated source purely by
-    coincidence."""
+    coincidence.
+
+    `normalized=True` means `sources` were already passed through _normalize -- provenance_spans
+    does that once per turn, since sources are now full statute/judgment texts and
+    re-normalizing every one of them for every sentence would be quadratic in answer length."""
     norm_s = _normalize(sentence)
     if len(norm_s) < QUOTE_MIN_CHARS:
         return False
     for src in sources:
-        norm_src = _normalize(src)
+        norm_src = src if normalized else _normalize(src)
         if not norm_src:
             continue
         if norm_s in norm_src:
@@ -380,8 +400,9 @@ def provenance_spans(
     if not sentences:
         return spans
     idf = _source_idf(sources)
+    norm_sources = [_normalize(s) for s in sources]
     for sentence in sentences:
-        if _is_verbatim_match(sentence, sources):
+        if _is_verbatim_match(sentence, norm_sources, normalized=True):
             spans.append(Span(quote=sentence, tier="QUOTED", source="provenance",
                                why="near-verbatim match of an available source"))
             continue

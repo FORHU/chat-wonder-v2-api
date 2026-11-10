@@ -44,7 +44,7 @@ from juris_mcp.client import get_client as get_juris_mcp_client
 from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from uk_legal_mcp import urls as uk_urls
 from uk_legal_mcp.authorities import authorities_from_pool as uk_authorities_from_pool
-from legal_citations import apply_legal_citation_pipeline, select_related_cases
+from legal_citations import apply_legal_citation_pipeline, collect_tool_result_text_corpus, select_related_cases
 from attribution_check import attribution_check_enabled
 from exhibit_quotes import exhibit_texts, unquote_exhibit_misquotes
 from legal_fact_boost import (
@@ -2941,12 +2941,18 @@ def _confidence_sources(persona: str, state) -> list:
     doesn't need one — "sourced" here means "echoes something the client themselves said")."""
     sources: list = []
     if persona in ("legal", "legal_uk"):
+        # Everything the pool holds for each row, not just title+snippet: UK entries keep the
+        # whole tool payload (legislation_get_section's full section text, judgment paragraphs)
+        # and PH get_* entries keep court_reasoning/full_text. Title+snippet alone left 67 of 71
+        # spans UNSOURCED on a live UK answer whose model had read the full statute (2026-11-10).
+        # Same walker the quote gate uses, applied per row so each row stays one IDF document.
         for r in (getattr(state, "last_search_legal_results", None) or []):
             if not isinstance(r, dict):
                 continue
+            text = collect_tool_result_text_corpus([r])
             title = str(r.get("title") or "").strip()
-            snippet = str(r.get("snippet") or (r.get("metadata") or {}).get("snippet") or "").strip()
-            text = f"{title} {snippet}".strip()
+            if title and title.lower() not in text:
+                text = f"{title.lower()} {text}".strip()
             if text:
                 sources.append(text)
         sources += exhibit_texts(state)
