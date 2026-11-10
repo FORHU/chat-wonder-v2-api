@@ -29,6 +29,7 @@ from openai import OpenAI
 import contextvars
 import llm_usage
 from llm_usage import make_openai_client
+import model_registry
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query, Header
 from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,7 +44,7 @@ from juris_mcp.client import get_client as get_juris_mcp_client
 from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from uk_legal_mcp import urls as uk_urls
 from uk_legal_mcp.authorities import authorities_from_pool as uk_authorities_from_pool
-from legal_citations import apply_legal_citation_pipeline, select_related_cases
+from legal_citations import apply_legal_citation_pipeline, collect_tool_result_text_corpus, select_related_cases
 from attribution_check import attribution_check_enabled
 from exhibit_quotes import exhibit_texts, unquote_exhibit_misquotes
 from legal_fact_boost import (
@@ -56,6 +57,7 @@ from legal_fact_boost import (
 import legal_responses_chain
 import legal_decisions
 from legal_verify import DRAFT_DISCARD, inject_verifier_feedback, make_legal_verifier, verifier_trace_text
+import confidence
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -176,14 +178,26 @@ class ChatState:
         self.pending_session_id: Optional[str] = None
         self.pending_tools: Optional[list] = None
         self.pending_addendum: Optional[str] = None
+        # confidence.py telemetry: this turn's request opt-in (ChatRequest.confidence_live) and
+        # the (token_text, h) pairs captured during streaming, built from logprobs.content[],
+        # never from the yielded delta text — see confidence.group_words' docstring. Reset at the
+        # start of every turn in streaming_run_function_chain; read via getattr elsewhere
+        # (sessions restored from sessions.pkl predate these fields).
+        self.confidence_live: bool = False
+        self.confidence_tokens: Optional[list] = None
 
     def __getstate__(self):
         """Exclude the live OpenAI client from pickling — it wraps open sockets/threads and
         isn't serializable. Nothing is lost: every request path re-runs init_openai_client()
         unconditionally before touching state.openai_client (see /chat and the websocket
-        handler), so a restored session just gets a fresh client on its next turn."""
+        handler), so a restored session just gets a fresh client on its next turn.
+
+        confidence_tokens is per-turn telemetry with no reason to survive a restart (and no
+        bound on how large a long session's accumulated data could grow), so it is stripped
+        the same way."""
         state = self.__dict__.copy()
         state["openai_client"] = None
+        state["confidence_tokens"] = None
         return state
 
     def __setstate__(self, state):
@@ -469,6 +483,11 @@ class ChatRequest(BaseModel):
     # it, to the user who asked — a session id alone cannot, because collaborators on a shared
     # case share one session. Opaque to chat-wonder; None for callers that don't send it.
     trace_turn_id: Optional[str] = None
+    # Opt-in for live per-token [CONF] frames (see confidence.py). Default False, and the relay
+    # (ilovelawyer-api) never sends this field — only the dev testers set it. This is the request
+    # field, not an env var, specifically so a production client cannot receive live telemetry
+    # frames even if a server-side flag is flipped by mistake.
+    confidence_live: Optional[bool] = False
 
 class ApproveRequest(BaseModel):
     session_id: str
@@ -2234,8 +2253,9 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
     refine_round = 0
 
     def perform_chat(msgs):
+        _model = model or _context.model
         args = {
-            "model": model or _context.model,
+            "model": _model,
             "messages": msgs,
             "n": 1,
             "stream": True,
@@ -2257,8 +2277,10 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
             # argument fragments interleaved into one invalid JSON blob,
             # which fails to parse and makes the model retry forever.
             args["parallel_tool_calls"] = False
+        args = model_registry.shape_chat_args(_model, args)
         llm_usage.current().add_pass()
-        return state.openai_client.chat.completions.create(**args)
+        client = model_registry.get_client(_model, state.openai_client)
+        return client.chat.completions.create(**args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
     # on the last research iteration can still be audited and revised, while the
@@ -2910,6 +2932,57 @@ def _attribution_judge(state):
     return judge
 
 
+#: Pool-entry fields that are NOT legal source text: the user's own question echoed back
+#: ("issue", "query"), the model's own summary of the user ("user_context"), tool instructions
+#: ("how_to_use") and boilerplate ("disclaimer"). Found live in get_legal_recommendation_uk's
+#: research pack: counting them credited an answer for repeating the question or its disclaimer.
+_NON_SOURCE_FIELDS = frozenset({
+    "issue", "query", "q", "user_context", "how_to_use", "disclaimer",
+    "error", "errors", "search_errors", "note", "notes", "instructions",
+})
+
+
+def _strip_non_source_fields(obj, depth: int = 0):
+    """Copy of a pool entry without _NON_SOURCE_FIELDS, at any nesting depth."""
+    if depth > 8:
+        return obj
+    if isinstance(obj, dict):
+        return {k: _strip_non_source_fields(v, depth + 1) for k, v in obj.items()
+                if str(k).lower() not in _NON_SOURCE_FIELDS}
+    if isinstance(obj, list):
+        return [_strip_non_source_fields(v, depth + 1) for v in obj]
+    return obj
+
+
+def _confidence_sources(persona: str, state) -> list:
+    """Plain text describing what was actually available when this turn was generated, for
+    confidence.provenance_spans' lexical-overlap formula — what counts as "a source" is
+    different per persona. legal/legal_uk: retrieved case-law/legislation titles+snippets plus
+    any case-document exhibits. intake: the client's own prior messages in this conversation
+    (there is no citation/search infrastructure on this persona to reuse, but the formula
+    doesn't need one — "sourced" here means "echoes something the client themselves said")."""
+    sources: list = []
+    if persona in ("legal", "legal_uk"):
+        # Everything the pool holds for each row, not just title+snippet: UK entries keep the
+        # whole tool payload (legislation_get_section's full section text, judgment paragraphs)
+        # and PH get_* entries keep court_reasoning/full_text. Title+snippet alone left 67 of 71
+        # spans UNSOURCED on a live UK answer whose model had read the full statute (2026-11-10).
+        # Same walker the quote gate uses, applied per row so each row stays one IDF document.
+        for r in (getattr(state, "last_search_legal_results", None) or []):
+            if not isinstance(r, dict):
+                continue
+            text = collect_tool_result_text_corpus([_strip_non_source_fields(r)])
+            title = str(r.get("title") or "").strip()
+            if title and title.lower() not in text:
+                text = f"{title.lower()} {text}".strip()
+            if text:
+                sources.append(text)
+        sources += exhibit_texts(state)
+    else:
+        sources += [p for p in (getattr(state, "prompt", None) or []) if isinstance(p, str) and p.strip()]
+    return sources
+
+
 def _legal_model_override(persona: str, state=None, query: str = ""):
     """Legal answers use a stronger model, not the default persona config.
 
@@ -3097,9 +3170,18 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
     _verify_step_id = None  # open [TRACE] self-check step awaiting its 'result' frame
     _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
 
+    # confidence.py telemetry — see ChatState.confidence_tokens' docstring. Reset here (once per
+    # turn, this function's only entry point) rather than per-iteration below, so entropy from
+    # every chain iteration in this turn accumulates into one list the post-__END__ phase reads.
+    _eff_model = model or _context.model
+    _telemetry_on = model_registry.supports_logprobs(_eff_model) and confidence.confidence_enabled()
+    _confidence_live = _telemetry_on and bool(getattr(state, "confidence_live", False))
+    state.confidence_tokens = []
+
     def perform_chat(msgs):
+        _model = model or _context.model
         args = {
-            "model": model or _context.model,
+            "model": _model,
             "messages": msgs,
             "n": 1,
             "stream": True,
@@ -3118,8 +3200,13 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
             # See matching comment in run_function_chain's perform_chat: the
             # streaming tool-call accumulator only tracks one in-flight call.
             args["parallel_tool_calls"] = False
+        if _telemetry_on:
+            args["logprobs"] = True
+            args["top_logprobs"] = 5
+        args = model_registry.shape_chat_args(_model, args)
         llm_usage.current().add_pass()
-        return state.openai_client.chat.completions.create(**args)
+        client = model_registry.get_client(_model, state.openai_client)
+        return client.chat.completions.create(**args)
 
     # One extra iteration is reserved for a verify->refine round only: a draft produced
     # on the last research iteration can still be audited and revised, while the
@@ -3161,6 +3248,22 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
                 if _first_token_time is None:
                     _first_token_time = time.time()
                 part = delta.content.replace("~", "-")
+                # confidence.py telemetry: built from logprobs.content[].token, NEVER from
+                # `part` above — part has already been through .replace("~","-") and may not be
+                # 1:1 with the model's own tokens. [CONF] frames mirror [TRACE]'s pattern
+                # exactly (send then the websocket handler `continue`s), so this yield here is
+                # safe to interleave with the text yields below.
+                if _telemetry_on:
+                    _lp_content = getattr(getattr(chunk.choices[0], "logprobs", None), "content", None)
+                    for _lp_tok in (_lp_content or []):
+                        _tok_text = getattr(_lp_tok, "token", "") or ""
+                        _tok_logprobs = [
+                            getattr(_t, "logprob", None) for _t in (getattr(_lp_tok, "top_logprobs", None) or [])
+                        ]
+                        _h = confidence.token_entropy(_tok_logprobs)
+                        state.confidence_tokens.append((_tok_text, _h))
+                        if _confidence_live and _h is not None:
+                            yield confidence.to_live_frame(_tok_text, _h)
                 if not _xai_first_line_done:
                     _xai_buffer += part
                     if "\n" in _xai_buffer:
@@ -3552,6 +3655,14 @@ async def get_version():
             "metrics": [
                 "legal.citation_repair.count",
             ],
+        },
+        # Lets a frontend decide whether to offer the confidence-span toggle at all, rather
+        # than showing a control that does nothing — see confidence.py.
+        "confidence": {
+            "enabled": confidence.confidence_enabled(),
+            "schema_version": confidence.SCHEMA_VERSION,
+            "entropy_models": list(model_registry.logprob_capable_prefixes()),
+            "verification_personas": ["legal", "legal_uk"],
         },
     }
 
@@ -4188,6 +4299,14 @@ async def chat_stream(websocket: WebSocket):
                         if chunk.startswith("[TRACE]"):
                             await websocket.send_text(chunk)
                             continue
+                        # confidence.py live telemetry (dev testers only — see
+                        # ChatRequest.confidence_live): same pattern as [TRACE] immediately
+                        # above. The `continue` is the whole safety property; omitting it is
+                        # exactly how an earlier attempt's [METRIC] frames ended up accumulated
+                        # into full_response and sent as one unparseable blob.
+                        if chunk.startswith("[CONF]"):
+                            await websocket.send_text(chunk)
+                            continue
                         # Legal and intake answers are buffered and sent post-finalize below,
                         # same as the main streaming path — see _finalize_legal_response /
                         # _finalize_intake_citations.
@@ -4427,6 +4546,9 @@ async def chat_stream(websocket: WebSocket):
             # Set every turn so one request's opt-out never carries over to the next on this session.
             state.skip_legal_verify = bool(request.skip_legal_verify)
             state.require_research = request.require_research
+            # Dev-tester opt-in for live [CONF] frames — see ChatRequest.confidence_live. Reset
+            # every turn for the same reason as the two flags above.
+            state.confidence_live = bool(getattr(request, "confidence_live", False))
             try:
                 async for chunk in streaming_reason_loop(state, user_input, session_id=session_id, tools=filtered_tools, addendum_override=addendum_override, persona=persona):
                     if chunk.startswith("__HITL__"):
@@ -4458,6 +4580,12 @@ async def chat_stream(websocket: WebSocket):
                     if chunk.startswith("[TRACE]"):
                         await websocket.send_text(chunk)
                         continue
+                    # confidence.py live telemetry (dev testers only — see
+                    # ChatRequest.confidence_live). Same pattern as [TRACE] immediately above;
+                    # the `continue` is what keeps this out of full_response.
+                    if chunk.startswith("[CONF]"):
+                        await websocket.send_text(chunk)
+                        continue
                     if _ws_t_first_chunk is None:
                         _ws_t_first_chunk = time.time()
                     # Legal and intake answers must pass through citation gating (legal also
@@ -4474,12 +4602,13 @@ async def chat_stream(websocket: WebSocket):
                         final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
                     else:
                         _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
+                        _jurisdiction = "UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH"
                         final_text = _finalize_legal_response(
                             final_text,
                             state.last_search_legal_results,
                             legal_mode=_legal_mode,
                             user_input=user_input,
-                            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                            jurisdiction=_jurisdiction,
                             state=state,
                         )
                     if persona in ("legal", "legal_uk", "intake"):
@@ -4550,6 +4679,45 @@ async def chat_stream(websocket: WebSocket):
                 # A failure here must not become "[Error] ..." (see the except below): ilovelawyer-api
                 # treated any [Error] frame as a failed turn and never persisted the reply, so the
                 # user watched a full answer stream in and then found it gone from history.
+                #
+                # confidence.py: spans are built fresh against final_text, AFTER finalization, so
+                # they can never perturb the citation pipeline and are always anchored against the
+                # text the reader actually received. Isolated in its own try/except, same
+                # reasoning as above — a telemetry failure must never look like a failed turn to
+                # ilovelawyer-api.
+                if confidence.confidence_enabled() and persona in ("legal", "legal_uk", "intake") and full_response:
+                    # confidence.provenance_spans classifies every sentence by FORMULA (lexical
+                    # overlap against the sources actually available this turn), not a judge
+                    # call — see confidence.py's module docstring for why this replaced two
+                    # earlier, more expensive designs (citation/attribution-check reuse, then
+                    # K-sample self-consistency). No network call here means no per-source
+                    # try/except isolation is needed the way the self-consistency version
+                    # required; one try/except around the whole thing is enough defense.
+                    try:
+                        _sources = _confidence_sources(persona, state)
+                        _spans = confidence.provenance_spans(final_text, _sources)
+                        if persona in ("legal", "legal_uk"):
+                            _quoted = confidence.quoted_citation_spans(final_text, state.last_search_legal_results)
+                            # An href-resolved citation link is a more precise QUOTED signal
+                            # than the formula's own lexical-overlap read of the same text, so
+                            # it wins on overlap.
+                            _spans = _quoted + [
+                                s for s in _spans
+                                if not any(s.quote in q.quote or q.quote in s.quote for q in _quoted)
+                            ]
+                            _conf_model = os.getenv(f"LEGAL_CHAT_MODEL_{'UK' if persona == 'legal_uk' else 'PH'}") or "gpt-5.6-luna"
+                        else:
+                            _conf_model = os.getenv("INTAKE_CHAT_MODEL") or "gpt-5.6-luna"
+                        _conf_tokens = confidence.entropy_payload(getattr(state, "confidence_tokens", None) or [])
+                        _conf_payload = confidence.build_payload(
+                            persona, _conf_model, _spans, tokens=_conf_tokens, checked=True,
+                        )
+                        await websocket.send_text(confidence.to_frame(_conf_payload))
+                    except Exception as e:
+                        logging.warning(
+                            "/chat-stream [%s] confidence spans failed after %.2fs session=%s (answer already delivered): %s",
+                            persona, time.time() - _ws_t_start, session_id, e,
+                        )
                 mind_map_task = None
                 try:
                     if persona in ("legal", "legal_uk") and full_response:

@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Model Tester — GPT vs DeepSeek tool-calling check</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="confidence-render.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f11;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 14px 20px;
+      background: #16161a;
+      border-bottom: 1px solid #2d2d3a;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-weight: 600;
+      letter-spacing: .4px;
+    }
+    .badge-gpt { background: #1a2a1a; color: #4ade80; }
+    .badge-deepseek { background: #2d1a40; color: #c084fc; }
+
+    .confidence-toggle {
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 99px;
+      font-weight: 600;
+      letter-spacing: .2px;
+      background: #1e2430;
+      color: #94a3b8;
+      border: 1px solid #334155;
+      cursor: pointer;
+    }
+    .confidence-toggle.active { background: #2d1a40; color: #c084fc; border-color: #c084fc; }
+    .confidence-legend {
+      font-size: 11px;
+      color: #94a3b8;
+      padding: 6px 10px;
+      border-bottom: 1px solid #1e293b;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    .confidence-legend.confidence-unavailable { color: #64748b; font-style: italic; }
+    .legend-chip { font-size: 10px; padding: 1px 7px; border-radius: 99px; font-weight: 600; }
+    .conf-span, .conf-word { border-radius: 3px; padding: 0 1px; }
+    .confidence-clean-note { font-style: italic; color: #64748b; }
+
+    #status {
+      margin-left: auto;
+      font-size: 12px;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #ef4444;
+      transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    .config-bar {
+      padding: 8px 20px;
+      background: #12121a;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: #94a3b8;
+      flex-wrap: wrap;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      color: #e2e8f0;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 13px;
+      width: 220px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #60a5fa; }
+    .config-bar select {
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      color: #e2e8f0;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    #model-note {
+      font-size: 11px;
+      color: #64748b;
+      font-family: ui-monospace, monospace;
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      border-radius: 6px;
+      padding: 3px 8px;
+    }
+
+    .samples {
+      padding: 10px 20px;
+      background: #0f0f14;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .samples span.label {
+      font-size: 11px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      font-weight: 700;
+      margin-right: 4px;
+    }
+    .chip {
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      color: #cbd5e1;
+      border-radius: 99px;
+      padding: 5px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .chip:hover { border-color: #3b82f6; background: #1e293b; }
+
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #2d2d3a; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 820px; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      color: #475569;
+    }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.65;
+      font-size: 14px;
+      max-width: 100%;
+      white-space: pre-wrap;
+    }
+    .msg.user .bubble {
+      background: #1e3a5f;
+      color: #bfdbfe;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.assistant .bubble {
+      background: #1a1a24;
+      color: #e2e8f0;
+      border-bottom-left-radius: 4px;
+      border: 1px solid #2d2d3a;
+    }
+
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
+    .bubble p { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble code {
+      background: #0f172a;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: "Fira Code", monospace;
+      font-size: 12px;
+      color: #7dd3fc;
+    }
+    .bubble pre { background: #0f172a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+    .bubble pre code { background: none; padding: 0; }
+
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px;
+      background: #475569;
+      border-radius: 50%;
+      animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-6px); }
+    }
+
+    #trace-panel {
+      width: 380px;
+      border-left: 1px solid #1e1e2e;
+      overflow-y: auto;
+      background: #12121a;
+      display: flex;
+      flex-direction: column;
+    }
+    #trace-panel::-webkit-scrollbar { width: 4px; }
+    #trace-panel::-webkit-scrollbar-thumb { background: #2d2d3a; }
+    .trace-header {
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .6px;
+      text-transform: uppercase;
+      color: #475569;
+      border-bottom: 1px solid #1e1e2e;
+      position: sticky; top: 0;
+      background: #12121a;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    #tool-verdict {
+      padding: 10px 16px;
+      font-size: 12px;
+      border-bottom: 1px solid #1e1e2e;
+    }
+    #tool-verdict.pending { color: #64748b; }
+    #tool-verdict.ok { color: #4ade80; }
+    #tool-verdict.none { color: #fbbf24; }
+    #tool-verdict.failed { color: #f87171; }
+    #trace-list { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .trace-card {
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 11.5px;
+      line-height: 1.5;
+      font-family: ui-monospace, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .trace-card.tool { border-color: #c084fc; }
+    .trace-card .t-phase { color: #64748b; font-size: 10px; text-transform: uppercase; }
+    #trace-empty {
+      padding: 24px 16px;
+      color: #475569;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .input-area {
+      padding: 16px 20px;
+      border-top: 1px solid #1e1e2e;
+      background: #12121a;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    #input {
+      flex: 1;
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      color: #e2e8f0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      resize: none;
+      min-height: 42px;
+      max-height: 160px;
+      line-height: 1.5;
+      font-family: inherit;
+    }
+    #input:focus { outline: none; border-color: #3b82f6; }
+    #input::placeholder { color: #475569; }
+    #send-btn {
+      background: #2563eb;
+      border: none;
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+      white-space: nowrap;
+    }
+    #send-btn:hover { background: #1d4ed8; }
+    #send-btn:disabled { background: #1e2a40; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Model Tester</h1>
+  <span class="badge badge-deepseek" id="model-badge">deepseek-v4-pro</span>
+  <span id="confidence-toggle-container"></span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+<div id="confidence-legend-container"></div>
+
+<div class="config-bar">
+  <label>
+    Server:
+    <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <label>
+    Model:
+    <select id="model-select">
+      <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro</option>
+      <option value="deepseek-chat">DeepSeek Chat</option>
+      <option value="gpt-5.6-luna">GPT-5.6 Luna (default)</option>
+      <option value="gpt-4o-mini">GPT-4o mini</option>
+      <option value="">— persona default (no override) —</option>
+    </select>
+  </label>
+  <label>
+    Persona:
+    <select id="persona-select">
+      <option value="uk" selected>Legal UK — [legal ai uk]</option>
+      <option value="ph">Legal PH — [legal ai]</option>
+      <option value="intake">Intake — [intake]</option>
+      <option value="general">General — no tag</option>
+    </select>
+  </label>
+  <span id="model-note">A deepseek-* model forces the Chat Completions loop (bypasses the Responses API path, which isn't DeepSeek-wired yet).</span>
+</div>
+
+<div class="samples">
+  <span class="label">Try (tool-triggering)</span>
+  <button type="button" class="chip" data-q="What is the leading case on frustration of contract in English law?">Frustration of contract (UK)</button>
+  <button type="button" class="chip" data-q="What is illegal dismissal under Philippine labor law, and cite the controlling case?">Illegal dismissal (PH)</button>
+  <button type="button" class="chip" data-q="Search Hansard for recent debates on AI regulation.">Hansard search (UK)</button>
+  <button type="button" class="chip" data-q="Hi, can you help me?">Plain greeting (no tool expected)</button>
+</div>
+
+<div class="main">
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">System</span>
+      <div class="bubble" id="intro-bubble">
+        This checks whether a given model id can actually complete a turn <strong>and</strong> make a tool call
+        through chat-wonder's agentic loop — the thing that was broken for DeepSeek. Pick a model, pick a
+        persona, send a tool-triggering question, and watch the <strong>tool-call verdict</strong> panel on the
+        right: it tells you whether a tool call happened, failed, or never came (the model answered from
+        memory instead). Switch the Model dropdown mid-session to compare the same question against GPT vs
+        DeepSeek without restarting the server.
+      </div>
+    </div>
+  </div>
+
+  <div id="trace-panel">
+    <div class="trace-header">
+      <span>Tool-call trace</span>
+      <span id="elapsed"></span>
+    </div>
+    <div id="tool-verdict" class="pending">No turn sent yet.</div>
+    <div id="trace-list">
+      <div id="trace-empty">[TRACE] events for this turn will appear here.</div>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <textarea id="input" placeholder="Ask a question that should trigger a tool call…" rows="1"></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let sessionId = null;
+  let ws = null;
+  let currentBubble = null;
+  let currentRaw = "";
+  let lastBubble = null; // the most recently finished turn's bubble — see finishAssistantTurn
+  let lastRaw = "";
+  let isStreaming = false;
+  ConfidenceRender.renderToggle($("confidence-toggle-container"), function () {
+    const bubble = currentBubble || lastBubble;
+    const raw = currentBubble ? currentRaw : lastRaw;
+    if (bubble) ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+  });
+  let turnStart = 0;
+  let sawToolCall = false;
+  let sawToolResult = false;
+  let sawError = false;
+
+  function tagFor(persona, text) {
+    if (persona === "uk") return `[legal ai uk] ${text}`;
+    if (persona === "ph") return `[legal ai] ${text}`;
+    if (persona === "intake") return `[intake] ${text}`;
+    return text;
+  }
+
+  function updateModelBadge() {
+    const model = $("model-select").value;
+    const badge = $("model-badge");
+    badge.textContent = model || "persona default";
+    badge.className = "badge " + (model.startsWith("deepseek") ? "badge-deepseek" : "badge-gpt");
+  }
+  $("model-select").addEventListener("change", updateModelBadge);
+
+  $("input").addEventListener("input", () => {
+    const el = $("input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  $("server-url").addEventListener("change", connect);
+
+  async function connect() {
+    const host = $("server-url").value.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    $("server-url").value = host;
+    const base = `http://${host}`;
+    setStatus("connecting");
+
+    try {
+      const sessionRes = await fetch(`${base}/session-id`);
+      sessionId = (await sessionRes.json()).session_id;
+    } catch (e) {
+      setStatus("error", "Cannot reach server");
+      return;
+    }
+
+    const wsUrl = `ws://${host}/chat-stream`;
+    if (ws) ws.close();
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setStatus("ok", "Connected");
+      $("send-btn").disabled = false;
+    };
+    ws.onclose = () => {
+      setStatus("error", "Disconnected");
+      $("send-btn").disabled = true;
+    };
+    ws.onerror = () => setStatus("error", "WebSocket error");
+    ws.onmessage = ({ data }) => handleChunk(data);
+  }
+
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      finishAssistantTurn();
+      return;
+    }
+
+    if (chunk.startsWith("[Sources] ") || chunk.startsWith("[RELATED_CASES]")) return;
+
+    // Post-__END__ extras, same guard as the other Thermo testers: without it "[DONE]" (and any
+    // [STRUCTURED_DATA]) fell into the text accumulation below and rendered as a second
+    // "[DONE]" message bubble after every answer (found live, 2026-11-10).
+    if (chunk.startsWith("[STRUCTURED_DATA]")) return;
+    if (chunk === "[DONE]") return;
+
+    if (chunk.startsWith("[TRACE]")) {
+      try {
+        const payload = JSON.parse(chunk.slice(7, chunk.lastIndexOf("[/TRACE]") > -1 ? chunk.lastIndexOf("[/TRACE]") : undefined));
+        renderTraceEvent(payload);
+      } catch {
+        // tolerate the odd non-JSON [TRACE] line rather than breaking the turn
+      }
+      return;
+    }
+
+    if (chunk.startsWith("[Tool]")) {
+      sawToolResult = true;
+      appendSystem(escHtml(chunk));
+      updateVerdict();
+      return;
+    }
+
+    if (chunk.startsWith("[Error]")) {
+      sawError = true;
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false;
+      $("send-btn").disabled = false;
+      removeTyping();
+      updateVerdict();
+      return;
+    }
+
+    // Live per-token confidence telemetry (this tester opts in via confidence_live — see
+    // send()). Same pattern as [TRACE] above: consumed here, never falls through to the
+    // bubble's text accumulation below.
+    if (ConfidenceRender.handleLiveFrame(chunk)) return;
+
+    // The post-__END__ { "type": "confidence", ... } envelope, plus a defensive catch-all for
+    // any OTHER JSON-shaped frame this tester doesn't otherwise recognize — without this, an
+    // unrecognized envelope falls into the bubble's text accumulation below and corrupts it.
+    if (chunk.startsWith("{")) {
+      try {
+        const obj = JSON.parse(chunk);
+        if (obj && obj.type) {
+          // The confidence envelope arrives in the post-__END__ phase, after
+          // finishAssistantTurn() has already cleared currentBubble — fall back to the
+          // just-finished bubble/text in that case.
+          const bubble = currentBubble || lastBubble;
+          const raw = currentBubble ? currentRaw : lastRaw;
+          if (ConfidenceRender.handleEnvelope(obj) && bubble) {
+            ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+          }
+          return;
+        }
+      } catch (e) {
+        // Not JSON after all — fall through to plain-text handling below.
+      }
+    }
+
+    if (!currentBubble) {
+      currentBubble = createAssistantBubble();
+    }
+    removeTyping();
+    currentRaw += chunk;
+    if (ConfidenceRender.on) {
+      ConfidenceRender.render(currentBubble, currentRaw, $("confidence-legend-container"), marked.parse);
+    } else {
+      currentBubble.textContent = currentRaw;
+    }
+    scrollBottom();
+  }
+
+  function renderTraceEvent(payload) {
+    const list = $("trace-list");
+    const empty = document.getElementById("trace-empty");
+    if (empty) empty.remove();
+    const phase = payload.phase || payload.type || "event";
+    const tool = payload.tool || "";
+    // "self_check" is the verify/refine step, not a real manifest tool call — don't count it.
+    if (tool && tool !== "self_check" && (phase === "start" || phase === "result")) sawToolCall = true;
+    const card = document.createElement("div");
+    card.className = "trace-card" + (sawToolCall ? " tool" : "");
+    card.innerHTML = `<div class="t-phase">${escHtml(phase)}</div>${escHtml(JSON.stringify(payload))}`;
+    list.appendChild(card);
+    updateVerdict();
+  }
+
+  function updateVerdict() {
+    const el = $("tool-verdict");
+    const elapsed = turnStart ? `${((Date.now() - turnStart) / 1000).toFixed(1)}s` : "";
+    $("elapsed").textContent = elapsed;
+    if (sawError) {
+      el.className = "failed";
+      el.textContent = `Turn failed / errored. ${elapsed}`;
+    } else if (sawToolCall) {
+      el.className = "ok";
+      el.textContent = `Tool call made and returned. ${elapsed}`;
+    } else if (!isStreaming && turnStart) {
+      el.className = "none";
+      el.textContent = `Turn completed with no tool call — model answered from memory. ${elapsed}`;
+    } else {
+      el.className = "pending";
+      el.textContent = `Waiting for a tool call… ${elapsed}`;
+    }
+  }
+
+  function finishAssistantTurn() {
+    // The confidence envelope is sent AFTER __END__ (the post-__END__ extras phase — see
+    // chat-wonder-v2-api's websocket handler), so it arrives after this function has already
+    // run once for this turn. Keep a reference to the just-finished bubble/text so that later
+    // envelope can still annotate it instead of landing on a null currentBubble.
+    lastBubble = currentBubble;
+    lastRaw = currentRaw;
+    if (currentBubble && currentRaw) {
+      if (ConfidenceRender.on) {
+        ConfidenceRender.render(currentBubble, currentRaw, $("confidence-legend-container"), marked.parse);
+      } else {
+        try {
+          currentBubble.innerHTML = marked.parse(currentRaw);
+        } catch (e) {
+          currentBubble.textContent = currentRaw;
+        }
+      }
+    }
+    currentBubble = null;
+    currentRaw = "";
+    isStreaming = false;
+    $("send-btn").disabled = false;
+    removeTyping();
+    updateVerdict();
+  }
+
+  function send() {
+    const text = $("input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+    const persona = $("persona-select").value;
+    const model = $("model-select").value || null;
+    const userInput = tagFor(persona, text);
+
+    appendUserMsg(text, persona, model);
+    clearTrace();
+    ConfidenceRender.resetTurn();
+    $("input").value = "";
+    $("input").style.height = "auto";
+    $("send-btn").disabled = true;
+    isStreaming = true;
+    turnStart = Date.now();
+    sawToolCall = false;
+    sawToolResult = false;
+    sawError = false;
+    appendTyping();
+    updateVerdict();
+
+    const payload = { type: "chat", session_id: sessionId, user_input: userInput, confidence_live: true };
+    if (model) payload.test_model_override = model;
+    ws.send(JSON.stringify(payload));
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  document.querySelectorAll(".chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      $("input").value = chip.dataset.q || "";
+      $("input").dispatchEvent(new Event("input"));
+      send();
+    });
+  });
+
+  function appendUserMsg(text, persona, model) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    const tagLabel = persona === "uk" ? "[legal ai uk] " : persona === "ph" ? "[legal ai] " : persona === "intake" ? "[intake] " : "";
+    const modelLabel = model ? ` · model=${model}` : " · model=(persona default)";
+    div.innerHTML = `<span class="msg-label">You${escHtml(modelLabel)}</span><div class="bubble"><span style="opacity:.55">${escHtml(tagLabel)}</span>${escHtml(text)}</div>`;
+    $("messages").appendChild(div);
+    scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">Assistant</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap);
+    scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">Assistant</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap);
+    scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:#64748b;padding:4px 8px;align-self:center;";
+    div.innerHTML = html;
+    $("messages").appendChild(div);
+    scrollBottom();
+  }
+
+  function scrollBottom() {
+    const el = $("messages");
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  function clearTrace() {
+    const list = $("trace-list");
+    list.innerHTML = '<div id="trace-empty">[TRACE] events for this turn will appear here.</div>';
+  }
+
+  function setStatus(state, label) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  updateModelBadge();
+  connect();
+</script>
+</body>
+</html>

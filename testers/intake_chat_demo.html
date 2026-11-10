@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Case Intake Chat — advice + citation check</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="confidence-render.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -36,6 +37,19 @@
     }
     .badge-intake { background: #1e3a5f; color: #60a5fa; }
     .badge-general { background: #1a2a1a; color: #4ade80; }
+    .confidence-toggle {
+      font-size: 11px; padding: 3px 10px; border-radius: 99px; font-weight: 600;
+      background: #1e2430; color: #94a3b8; border: 1px solid #334155; cursor: pointer;
+    }
+    .confidence-toggle.active { background: #2d1a40; color: #c084fc; border-color: #c084fc; }
+    .confidence-legend {
+      font-size: 11px; color: #94a3b8; padding: 6px 10px; border-bottom: 1px solid #1e293b;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    }
+    .confidence-legend.confidence-unavailable { color: #64748b; font-style: italic; }
+    .legend-chip { font-size: 10px; padding: 1px 7px; border-radius: 99px; font-weight: 600; }
+    .conf-span, .conf-word { border-radius: 3px; padding: 0 1px; }
+    .confidence-clean-note { font-style: italic; color: #64748b; }
 
     #status {
       margin-left: auto;
@@ -357,11 +371,13 @@
 <header>
   <h1>Case Intake Chat</h1>
   <span class="badge badge-intake" id="persona-badge">Case Intake Mode</span>
+  <span id="confidence-toggle-container"></span>
   <div id="status">
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
   </div>
 </header>
+<div id="confidence-legend-container"></div>
 
 <div class="config-bar">
   <label>
@@ -424,7 +440,14 @@
   let ws = null;
   let currentBubble = null;
   let currentRaw = "";
+  let lastBubble = null; // the most recently finished turn's bubble — see finishAssistantTurn
+  let lastRaw = "";
   let isStreaming = false;
+  ConfidenceRender.renderToggle($("confidence-toggle-container"), function () {
+    const bubble = currentBubble || lastBubble;
+    const raw = currentBubble ? currentRaw : lastRaw;
+    if (bubble) ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+  });
   let lastRawCitations = null;
   let lastSources = [];
   let lastRelatedCases = [];
@@ -564,16 +587,32 @@
       return;
     }
 
+    // Glass-box research steps bypass intake's buffering, same as the production websocket
+    // handler — intake's bursty delivery (see the comment below) made this easy to miss since
+    // a [TRACE] frame would otherwise land in the same burst as the real answer text.
+    if (chunk.startsWith("[TRACE]")) return;
+
+    // Live per-token confidence telemetry — guard kept for parity, though this persona only
+    // ever gets the post-__END__ envelope in production.
+    if (ConfidenceRender.handleLiveFrame(chunk)) return;
+
     // Every other typed JSON envelope this socket can send (a {"type":"usage",...} bookkeeping
     // frame before __END__, a second one after the extras phase, a {"status":"pending_approval",
-    // ...} HITL prompt) — none of these are answer text. Swallow anything JSON-shaped here rather
-    // than letting it fall through to the plain-text branch below and corrupt the bubble.
+    // ...} HITL prompt, and now a {"type":"confidence",...} envelope) — none of these are
+    // answer text. Swallow anything JSON-shaped here rather than letting it fall through to
+    // the plain-text branch below and corrupt the bubble.
     if (chunk.startsWith("{")) {
       try {
         const ev = JSON.parse(chunk);
         if (ev && typeof ev === "object") {
           if (ev.status === "pending_approval") {
             appendSystem(`Tool <strong>${escHtml(ev.tool_name)}</strong> needs approval (unexpected — intake's lookups should be auto-approved).`);
+          } else if (ev.type === "confidence") {
+            const bubble = currentBubble || lastBubble;
+            const raw = currentBubble ? currentRaw : lastRaw;
+            if (ConfidenceRender.handleEnvelope(ev) && bubble) {
+              ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+            }
           }
           return;
         }
@@ -605,11 +644,21 @@
   }
 
   function finishAssistantTurn() {
+    // The confidence envelope arrives after __END__ (post-__END__ extras phase), so keep a
+    // reference to the just-finished bubble/text for handleChunk's envelope branch above. For
+    // intake specifically, coverage will read "none" until a dedicated verifier exists (see
+    // the architecture doc's Phase 7) — the toggle still works, it just has nothing to show.
+    lastBubble = currentBubble;
+    lastRaw = currentRaw;
     if (currentBubble && currentRaw) {
-      try {
-        currentBubble.innerHTML = marked.parse(currentRaw);
-      } catch (e) {
-        currentBubble.textContent = currentRaw;
+      if (ConfidenceRender.on) {
+        ConfidenceRender.render(currentBubble, currentRaw, $("confidence-legend-container"), marked.parse);
+      } else {
+        try {
+          currentBubble.innerHTML = marked.parse(currentRaw);
+        } catch (e) {
+          currentBubble.textContent = currentRaw;
+        }
       }
     }
     currentBubble = null;
@@ -628,6 +677,7 @@
 
     appendUserMsg(text, mode);
     clearSources();
+    ConfidenceRender.resetTurn();
     $("input").value = "";
     $("input").style.height = "auto";
     $("send-btn").disabled = true;
