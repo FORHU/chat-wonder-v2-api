@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from typing import List, Optional
 
+import decisions_research
 import llm_usage
 from legal_verify import DRAFT_DISCARD, Verifier, inject_verifier_feedback, verifier_trace_text
 
@@ -208,6 +210,52 @@ def _tool_choice_for(force: list) -> object:
     return {"type": "function", "name": name} if name else "auto"
 
 
+def _decisions_prefetch(state, function_call: dict, result, query: str, session_id, execute_function_call) -> list:
+    """R2 prototype (decisions_research.py): after a legislation search, choose and fetch the most
+    useful sections with OpenAI's Decisions API. Returns [{"args", "result", "label"}] (empty when off,
+    not applicable, or on any failure). Off unless LEGAL_DECISIONS_PREFETCH=true; never raises."""
+    if not decisions_research.prefetch_enabled():
+        return []
+
+    def run_tool(name: str, args: dict):
+        return execute_function_call({"name": name, "arguments": json.dumps(args)}, session_id=session_id)
+
+    out = decisions_research.prefetch_sections(
+        function_call.get("name"), result, query, getattr(state, "openai_client", None), run_tool
+    )
+    if not out:
+        return []
+    log = getattr(state, "decisions_prefetch_log", None)
+    if not isinstance(log, list):
+        log = []
+        state.decisions_prefetch_log = log
+    log.append(out["metrics"])
+    return out["fetched"]
+
+
+def _deliver_prefetched(fetched: list, input_items: list, funcall_chains: list, tool_log: list,
+                        prefetched_keys: set, summarize) -> list:
+    """Hand each prefetched section to the model as a real legislation_get_section call + result in
+    its history (no model call spent), and register it with the duplicate guard and the tool log --
+    exactly what the model's own fetch would have left behind. Returns the delivered entries."""
+    delivered = []
+    for i, f in enumerate(fetched):
+        key = decisions_research.section_key(f["args"])
+        if key is None or key in prefetched_keys:
+            continue
+        prefetched_keys.add(key)
+        call_id = f"prefetch_{len(prefetched_keys)}_{uuid.uuid4().hex[:8]}"
+        append_function_call_round_trip(
+            input_items, call_id=call_id, name="legislation_get_section",
+            arguments=json.dumps(f["args"]), result=f["result"],
+        )
+        funcall_chains.append({"name": "legislation_get_section", "args": f["args"]})
+        tool_log.append({"name": "legislation_get_section", "args": f["args"],
+                         "summary": summarize("legislation_get_section", f["result"]), "prefetched": True})
+        delivered.append({**f, "call_id": call_id})
+    return delivered
+
+
 def run_function_chain_responses(
     state,
     messages: list,
@@ -245,6 +293,7 @@ def run_function_chain_responses(
     _force_first = [force_first_tool if _manifest_has_tool(available_manifest, force_first_tool) else None]
     input_items = chat_messages_to_input_items(messages)
     funcall_chains = []
+    prefetched_keys: set = set()
     full_response = ""
     last_tool = None
     tool_log = []
@@ -357,6 +406,14 @@ def run_function_chain_responses(
         except Exception:
             cur_args = function_call["arguments"]
 
+        if (function_call["name"] == "legislation_get_section"
+                and decisions_research.section_key(cur_args) in prefetched_keys):
+            input_items.append({
+                "role": "system",
+                "content": "That section was already fetched for you above (see the earlier legislation_get_section result). Use it; do not fetch it again.",
+            })
+            continue
+
         is_dup = any(
             fc["name"] == function_call["name"] and fc["args"] == cur_args for fc in funcall_chains
         )
@@ -390,6 +447,7 @@ def run_function_chain_responses(
         result = execute_function_call(function_call, session_id=session_id)
         if result is None:
             continue
+        _prefetched = _decisions_prefetch(state, function_call, result, query, session_id, execute_function_call)
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
 
@@ -419,6 +477,8 @@ def run_function_chain_responses(
             arguments=function_call["arguments"],
             result=result,
         )
+        if _prefetched:
+            _deliver_prefetched(_prefetched, input_items, funcall_chains, tool_log, prefetched_keys, _summarize_tool_result)
         input_items.append({
             "role": "system",
             "content": "[Constraints]\nIf a complete response has been produced, TERMINATE. Only execute new actions if their conditions are fully satisfied.",
@@ -495,6 +555,7 @@ async def streaming_run_function_chain_responses(
     _force_first = [force_first_tool if _manifest_has_tool(available_manifest, force_first_tool) else None]
     input_items = chat_messages_to_input_items(messages)
     funcall_chains = []
+    prefetched_keys: set = set()
     full_response = ""
     last_tool = None
     tool_log = []
@@ -681,6 +742,14 @@ async def streaming_run_function_chain_responses(
         except Exception:
             cur_args = function_call["arguments"]
 
+        if (function_call["name"] == "legislation_get_section"
+                and decisions_research.section_key(cur_args) in prefetched_keys):
+            input_items.append({
+                "role": "system",
+                "content": "That section was already fetched for you above (see the earlier legislation_get_section result). Use it; do not fetch it again.",
+            })
+            continue
+
         is_dup = any(
             fc["name"] == function_call["name"] and fc["args"] == cur_args for fc in funcall_chains
         )
@@ -719,6 +788,7 @@ async def streaming_run_function_chain_responses(
         result = await asyncio.to_thread(execute_function_call, function_call, session_id=session_id)
         if result is None:
             continue
+        _prefetched = await asyncio.to_thread(_decisions_prefetch, state, function_call, result, query, session_id, execute_function_call)
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
 
@@ -751,6 +821,11 @@ async def streaming_run_function_chain_responses(
             arguments=function_call["arguments"],
             result=result,
         )
+        if _prefetched:
+            for _pf in _deliver_prefetched(_prefetched, input_items, funcall_chains, tool_log, prefetched_keys, _summarize_tool_result):
+                _pf_id = f"{iteration}:prefetch:{_pf['call_id']}"
+                yield f"[TRACE]{json.dumps({'id': _pf_id, 'phase': 'start', 'tool': 'legislation_get_section', 'label': _trace_label_for_call('legislation_get_section', _pf['args'])})}[/TRACE]"
+                yield f"[TRACE]{json.dumps({'id': _pf_id, 'phase': 'result', 'tool': 'legislation_get_section', 'count': _trace_count_for_result('legislation_get_section', _pf['result'])})}[/TRACE]"
         input_items.append({
             "role": "system",
             "content": "[Constraints]\nIf a complete response has been produced, TERMINATE.",
