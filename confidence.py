@@ -31,17 +31,31 @@ real, documented lesson:
      "Calibration" section already takes toward the entropy display bands).
 
 Also still here: real per-token Shannon entropy from Chat Completions logprobs, for the dev
-testers/staff only (gpt-4o-mini, deepseek-chat — the only models with real logprob support; see
-model_registry.supports_logprobs). Two deliberate divergences from the Thermo Chat reference (a
-folder on the author's Desktop, All Rights Reserved except its CC BY 4.0 preprint — nothing here
-is copied from it, only the published formula is reimplemented from the paper):
-  - token_entropy RENORMALIZES the top-5 probabilities before computing entropy. The reference's
-    remote/vLLM path sums raw top-5 probabilities without renormalizing, which is a different,
-    unbounded quantity from the preprint's H_t (Eq. 1).
-  - There is no "t_t" (a sampling temperature this module sets). The reference's t_t is a CONTROL
-    OUTPUT that adjusts the sampler; this module never touches sampling, so publishing a
-    "temperature" we never applied would be fabrication. Only h (nats) and hn = h/ln5 (0-1) are
-    emitted; thresholds band hn.
+testers/staff only (gpt-4o*, gpt-4.1*, deepseek-chat -- see model_registry.supports_logprobs).
+
+Reference:
+  Kim, M. H. (2026). "Thermo Pulse: Entropy-Feedback Temperature Control for Autoregressive
+  Language Model Decoding." Preprints.org, posted 4 November 2026.
+  https://doi.org/10.20944/preprints202611.0277.v1 -- licensed CC BY 4.0.
+token_entropy reimplements that paper's Eq. 1 (renormalized top-5 entropy, bounded by ln 5);
+group_words follows its word-level display rule (a word's value is the MAX over its tokens). The
+Thermo Chat demo package itself is All Rights Reserved; nothing here is copied from it.
+
+What we can and cannot reproduce on OpenAI (each verified live, 2026-11-10):
+  - CAN: H_t. top_logprobs=5 gives the five highest log-probs, which are pre-temperature (they
+    barely move between temperature 0 and 1.8), i.e. the raw-logit distribution Eq. 1 requires.
+    token_entropy matches an independent Eq. 1 implementation to ~5e-12 on live gpt-4o-mini
+    tokens; mean H was 0.33 nats, in line with the preprint's 0.26-0.29.
+  - CANNOT: the Thermo Pulse controller (Eq. 2, per-token temperature T_t) or its 5% cutoff.
+    The API takes one fixed temperature per request (a per-token value is rejected outright),
+    so there is no T_t here -- publishing a "temperature" we never applied would be
+    fabrication. Only h (nats) and hn = h/ln5 (0-1) are emitted.
+  - CANNOT on reasoning models: gpt-5.6-luna/terra reject logprobs on both APIs ("logprobs are
+    not supported with reasoning models"), so production legal answers get no H_t at all --
+    the reason provenance_spans exists as the signal that does work on them.
+One deliberate divergence from the demo package: its remote/vLLM path computes entropy over the
+raw top-5 probabilities WITHOUT renormalizing, a different quantity from Eq. 1. We renormalize,
+as the paper and the package's own local engine do.
 
 Fails open throughout: any error here must never alter or block an answer, only omit a span.
 """

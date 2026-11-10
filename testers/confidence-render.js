@@ -1,4 +1,4 @@
-/* confidence-render.js — shared "Thermo view" renderer for the dev testers.
+/* confidence-render.js — shared "Confidence view" renderer for the dev testers (formerly "Thermo view").
  *
  * Built once and <script src>'d from all four testers (model_tester_demo.html,
  * legal_chat_demo.html, legal_uk_chat_demo.html, intake_chat_demo.html) rather than pasted
@@ -40,21 +40,16 @@
     UNSOURCED: { bg: "rgba(148,163,184,0.16)", fg: "#64748b", label: "No source" },
   };
 
-  // hn = h / ln(5), so these are fractions of the maximum possible top-5 entropy, not raw
-  // nats. STARTING GUESSES ONLY — the Thermo Chat reference's own measured mean hn on a real
-  // model was far below its own displayed thresholds, so these must be replaced with real
-  // percentiles once CONFIDENCE_SPANS has run against representative traffic (see the
-  // architecture doc's "Calibration" section).
-  var ENTROPY_BANDS = { blue: 0.25, orange: 0.45, red: 0.65 };
-  var ENTROPY_PURPLE_HN = 0.9; // fraction of ln5 above which the purple "high uncertainty" background shows
-
-  function entropyColor(hn) {
-    if (hn == null) return null;
-    if (hn >= ENTROPY_BANDS.red) return "#ef4444";
-    if (hn >= ENTROPY_BANDS.orange) return "#fb923c";
-    if (hn >= ENTROPY_BANDS.blue) return "#38bdf8";
-    return null;
-  }
+  // Per-word entropy (dev testers, logprob-capable models only -- see confidence.token_entropy).
+  //
+  // Only ONE entropy cue, matching the reference's meaning: in Thermo Chat the purple
+  // BACKGROUND is entropy, while blue/orange/red TEXT is the sampling temperature its M9
+  // controller applied. We never set a temperature (the OpenAI API takes one fixed temperature
+  // per request), so painting entropy in the temperature colours would show a quantity we
+  // never produced. Threshold = the reference's own default/Reset value, 1.00 nats. The old
+  // 0.9*ln5 = 1.448 nats never fired on live gpt-4o-mini output (0% of tokens vs 6% at 1.00;
+  // mean H 0.33 nats, in line with the preprint's 0.26-0.29), verified 2026-11-10.
+  var ENTROPY_PURPLE_NATS = 1.0;
 
   function escHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -94,6 +89,49 @@
   }
 
   var BLOCK_SELECTOR = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dd, dt";
+
+
+  /** A raw model "word" reduced to the pieces marked actually renders as visible text:
+   * emphasis/code markers and heading/quote prefixes removed, split on whitespace, and
+   * list markers ("1.", "-") dropped since marked renders those as <ol>/<ul>, not text. */
+  function _visiblePieces(raw) {
+    return String(raw || "")
+      .replace(/\*\*|__|[*`]/g, "")
+      .split(/\s+/)
+      .map(function (p) { return p.replace(/^#{1,6}$|^>$/, ""); })
+      .filter(function (p) { return p && !/^\d{1,3}[.)]$/.test(p) && !/^[-+*]$/.test(p); });
+  }
+
+  // How far past the cursor a word's piece may be found. Small on purpose: a piece that isn't
+  // nearby is skipped rather than allowed to jump ahead and steal later words' positions.
+  var WORD_LOOKAHEAD = 40;
+
+  /** In-order [{s, e, w}] character ranges of measured words within `text`. */
+  function _wordRanges(text, words) {
+    var out = [], cursor = 0;
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i], pieces = _visiblePieces(w.w);
+      for (var j = 0; j < pieces.length; j++) {
+        var idx = text.indexOf(pieces[j], cursor);
+        if (idx === -1 || idx - cursor > WORD_LOOKAHEAD) continue;
+        if (w.h != null) out.push({ s: idx, e: idx + pieces[j].length, w: w });
+        cursor = idx + pieces[j].length;
+      }
+    }
+    return out;
+  }
+
+  /** One measured word: tooltip always (as in the reference), purple only above threshold. */
+  function _entropyWordHtml(visible, w) {
+    var purple = w.h >= ENTROPY_PURPLE_NATS;
+    return (
+      '<span class="conf-word"' +
+      (purple ? ' style="background:rgba(168,85,247,0.25)"' : "") +
+      ' title="Maximum entropy: ' + Number(w.h).toFixed(3) + " nats (" +
+      Math.round((w.hn || 0) * 100) + "% of the top-5 maximum)" +
+      (w.n ? " · Subwords: " + w.n : "") + '">' + escHtml(visible) + "</span>"
+    );
+  }
 
   /** Converts a flat character offset within blockEl's rendered text into a (node, offset)
    * position usable by Range.setStart/setEnd, by walking the block's text nodes and
@@ -225,8 +263,11 @@
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "confidence-toggle";
-      btn.textContent = "Thermo view";
-      btn.title = "Toggle confidence shading for this answer";
+      // Not "Thermo view": Thermo Chat's colours mean token uncertainty and the sampling
+      // temperature its controller sets. This toggle shows source provenance (legal answers)
+      // or uncertainty only (logprob-capable models) -- the legend names which.
+      btn.textContent = "Confidence view";
+      btn.title = "Toggle confidence shading for this answer: where each sentence came from, or how unsure the model was";
       btn.addEventListener("click", function () {
         self.on = !self.on;
         btn.classList.toggle("active", self.on);
@@ -236,9 +277,22 @@
       return btn;
     },
 
-    renderLegend: function (container) {
+    /** mode: "sources" (provenance spans), "entropy" (per-word top-5 entropy only), or "none".
+     * Names the signal actually shown -- an entropy-only answer (live [CONF] frames, no
+     * envelope) used to say "nothing was checked" while its words were visibly shaded. */
+    renderLegend: function (container, mode) {
       if (!container) return;
-      if (!this.payload || this.payload.coverage === "none") {
+      if (mode === "entropy") {
+        container.innerHTML =
+          '<div class="confidence-legend"><strong>Uncertainty shading</strong> marks words where the model was unsure ' +
+          "between its top 5 next-word candidates (entropy &ge; " +
+          ENTROPY_PURPLE_NATS.toFixed(2) +
+          ' nats; hover for values). It measures hesitation, not correctness. ' +
+          '<span class="legend-chip" style="background:rgba(168,85,247,0.25)">High uncertainty</span>' +
+          ' <span class="confidence-clean-note">Method: top-5 entropy, Eq. 1 of Kim, “Thermo Pulse”, Preprints.org 2026 (CC BY 4.0).</span></div>';
+        return;
+      }
+      if (mode !== "sources" || !this.payload || this.payload.coverage === "none") {
         container.innerHTML =
           '<div class="confidence-legend confidence-unavailable">Confidence shading unavailable for this answer — nothing was checked.</div>';
         return;
@@ -317,66 +371,45 @@
       }
     },
 
-    /** Per-word entropy coloring, applied the same DOM-walking way: collects every text node
-     * first (mutating mid-walk breaks a live TreeWalker), then re-runs the existing
-     * string-level word colorer on each node's own text and splices the result back in,
-     * preserving whatever markdown structure (headings, bold, etc.) that node already sits
-     * inside. `words` is already word-grouped and MAX-aggregated server-side
-     * (confidence.group_words). */
+    /** Per-word entropy shading. `words` is word-grouped and MAX-aggregated (confidence.group_words
+     * or _liveWordsAsPayloadWords), in emission order, but each word is still raw model text --
+     * "**Completion", "methods:\n\n1." -- while the DOM holds marked-rendered text. So: walk the
+     * words ONCE, in order, against the concatenated visible text of the whole bubble, matching
+     * each word's visible pieces only a short way past the cursor; then shade every text node with
+     * the ranges that fall in it. The old per-node rescan of the full word list let a common word
+     * ("the") match far ahead and skip real matches -- only 38 of 131 words were shaded live
+     * (2026-11-10). Text inside citation <a> elements is never wrapped. */
     _applyWordEntropyToDom: function (bubbleEl, words) {
       var walker = document.createTreeWalker(bubbleEl, NodeFilter.SHOW_TEXT, null, false);
-      var nodes = [];
-      var node;
+      var nodes = [], starts = [], text = "", node;
       while ((node = walker.nextNode())) {
-        if (_hasAncestorTag(node, "A")) continue;
         nodes.push(node);
+        starts.push(text.length);
+        text += node.nodeValue;
       }
+      var ranges = _wordRanges(text, words);
+      if (!ranges.length) return;
+      var r = 0;
       for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        var plainEscaped = escHtml(n.nodeValue);
-        var html = this._wordEntropyHtml(n.nodeValue, words);
-        if (html === plainEscaped) continue; // nothing in this node matched — leave it alone
+        var n = nodes[i], ns = starts[i], ne = ns + n.nodeValue.length;
+        while (r < ranges.length && ranges[r].e <= ns) r++;
+        if (_hasAncestorTag(n, "A")) continue;
+        var html = "", pos = ns, touched = false;
+        for (var k = r; k < ranges.length && ranges[k].s < ne; k++) {
+          var s = Math.max(ranges[k].s, ns), e = Math.min(ranges[k].e, ne);
+          if (e <= s) continue;
+          html += escHtml(text.slice(pos, s)) + _entropyWordHtml(text.slice(s, e), ranges[k].w);
+          pos = e;
+          touched = true;
+        }
+        if (!touched) continue;
+        html += escHtml(text.slice(pos, ne));
         var wrapper = document.createElement("span");
         wrapper.innerHTML = html;
         var frag = document.createDocumentFragment();
         while (wrapper.firstChild) frag.appendChild(wrapper.firstChild);
         n.parentNode.replaceChild(frag, n);
       }
-    },
-
-    _wordEntropyHtml: function (rawText, words) {
-      var out = "";
-      var cursor = 0;
-      var LN5 = Math.log(5);
-      for (var i = 0; i < words.length; i++) {
-        var w = words[i];
-        var idx = rawText.indexOf(w.w, cursor);
-        if (idx === -1) continue;
-        out += escHtml(rawText.slice(cursor, idx));
-        var color = entropyColor(w.hn);
-        var purple = w.h != null && w.h >= LN5 * ENTROPY_PURPLE_HN;
-        var styleParts = [];
-        if (color) styleParts.push("color:" + color);
-        if (purple) styleParts.push("background:rgba(168,85,247,0.22)");
-        var wordHtml = escHtml(w.w);
-        if (styleParts.length) {
-          out +=
-            '<span class="conf-word" style="' +
-            styleParts.join(";") +
-            '" title="h=' +
-            w.h +
-            " nats, hn=" +
-            w.hn +
-            '">' +
-            wordHtml +
-            "</span>";
-        } else {
-          out += wordHtml;
-        }
-        cursor = idx + w.w.length;
-      }
-      out += escHtml(rawText.slice(cursor));
-      return out;
     },
 
     /** Live per-token frames carry one token each (confidence.to_live_frame), not pre-grouped
@@ -435,15 +468,18 @@
         if (legendContainer) legendContainer.innerHTML = "";
         return;
       }
-      this.renderLegend(legendContainer);
       var spans = this.payload && this.payload.spans;
       var words =
         (this.payload && this.payload.tokens && this.payload.tokens.words) ||
         (this.liveWords.length ? this._liveWordsAsPayloadWords() : null);
       if (spans && spans.length) {
+        this.renderLegend(legendContainer, "sources");
         this._applySpansToDom(bubbleEl, spans);
       } else if (words && words.length) {
+        this.renderLegend(legendContainer, "entropy");
         this._applyWordEntropyToDom(bubbleEl, words);
+      } else {
+        this.renderLegend(legendContainer, this.payload ? "sources" : "none");
       }
     },
   };

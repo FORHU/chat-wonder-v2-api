@@ -42,6 +42,23 @@ class TokenEntropyTests(unittest.TestCase):
         self.assertIsNone(confidence.token_entropy([float("nan"), float("inf"), None]))
         self.assertIsNone(confidence.token_entropy(None))
 
+    def test_matches_preprint_eq1_on_real_gpt4o_mini_top5(self):
+        # Top-5 log-probs recorded from a live gpt-4o-mini token (2026-11-10). Eq. 1 written
+        # independently in log-sum-exp form: q_i = exp(z_i - LSE(z)), H = -sum q_i ln q_i.
+        # Log-probs differ from logits only by a constant, which cancels in q.
+        lps = [-0.0062, -5.5062, -6.2562, -9.0062, -9.8812]
+        m = max(lps)
+        lse = m + math.log(sum(math.exp(l - m) for l in lps))
+        expected = -sum(math.exp(l - lse) * (l - lse) for l in lps)
+        self.assertAlmostEqual(confidence.token_entropy(lps), expected, places=9)
+
+    def test_is_invariant_to_a_constant_logit_shift(self):
+        # Pre-temperature log-probs and raw logits differ by a per-token constant; Eq. 1 must
+        # give the same H for both, which is why top_logprobs is a valid input at all.
+        lps = [-0.3, -1.6, -2.2, -2.9, -4.0]
+        self.assertAlmostEqual(confidence.token_entropy(lps),
+                               confidence.token_entropy([l - 0.7 for l in lps]), places=9)
+
     def test_renormalizes_unlike_the_reference_remote_path(self):
         # The Thermo Chat reference's remote path sums raw probabilities WITHOUT renormalizing
         # (a partial-sum surprisal, unbounded relative to ln5). This module must renormalize:

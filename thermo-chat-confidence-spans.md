@@ -28,7 +28,7 @@ A deterministic formula (IDF-weighted lexical overlap) assigns the category, not
 | `the_server.py` | `_confidence_sources()`, confidence assembly in the post-`__END__` extras phase, `[CONF]` live-frame guards in both websocket loops, `ChatRequest.confidence_live`, `ChatState.confidence_live`/`confidence_tokens` (stripped from pickle), `/version` `confidence` block. |
 | `model_registry.py` | Came in with `2079417` (DeepSeek non-thinking routing: `get_client`, `shape_chat_args`). This work added `supports_logprobs()` (gpt-4o*, gpt-4.1*, deepseek-chat; not luna/terra/deepseek-reasoner). |
 | `testers/confidence-render.js` | Shared renderer: `marked.parse()` first, unconditionally; spans overlaid per block element via `Range.extractContents()`; citation `<a>`s styled in place by href. |
-| 4 testers (`model_tester_demo`, `legal_chat_demo`, `legal_uk_chat_demo`, `intake_chat_demo`) | "Thermo view" toggle (off by default), `[CONF]`/envelope guards, plus `[STRUCTURED_DATA]`/`[DONE]` guards where they were missing. |
+| 4 testers (`model_tester_demo`, `legal_chat_demo`, `legal_uk_chat_demo`, `intake_chat_demo`) | "Confidence view" toggle (off by default; renamed from "Thermo view"), `[CONF]`/envelope guards, plus `[STRUCTURED_DATA]`/`[DONE]` guards where they were missing. |
 | `tests/test_confidence.py` | 42 tests, including the regression test proving `[CONF]` frames can never leak into `full_response`. |
 
 `_finalize_legal_response`, the citation pipeline and the doctrine guards are untouched.
@@ -56,6 +56,19 @@ A citation `<a href>` is QUOTED the moment its href resolves to a retrieved sour
 
 ---
 
+### Fidelity to the Thermo Pulse paper: verified live 2026-11-10
+Reference: Kim, M. H. (2026), "Thermo Pulse", Preprints.org, https://doi.org/10.20944/preprints202611.0277.v1 (CC BY 4.0). The citation is in `confidence.py` and in the uncertainty legend.
+
+| Paper element | Here? | Evidence |
+|---|---|---|
+| H_t, renormalized top-5 entropy (Eq. 1) | Yes, gpt-4o*/4.1*/deepseek-chat | Matches an independent Eq. 1 to about 5e-12 on live gpt-4o-mini tokens. OpenAI `top_logprobs` are pre-temperature (unchanged between T=0 and T=1.8), which is what Eq. 1 needs. Mean H was 0.33 nats on a tight prompt, against the paper's 0.26–0.29. |
+| Word display = max H over the word's tokens | Yes | Same rule as the reference UI; 0 alignment mismatches across 249 live words. |
+| Purple threshold | Yes, 1.00 nats | The reference's default. The old 0.9×ln5 = 1.45 nats fired on 0% of tokens. |
+| T_t, the PD temperature controller (Eq. 2), and the 5% cutoff | **No, impossible on OpenAI** | `temperature` is one number per request; a per-token array is rejected. |
+| Any H_t on luna/terra (production legal) | **No** | Both APIs reject logprobs ("not supported with reasoning models"). This is why provenance spans exist. |
+
+The reference's blue/orange/red text means the **temperature its controller applied**. We never set one, so those colours were removed rather than reused for entropy. The toggle is "Confidence view": it shows source provenance on legal answers and uncertainty on logprob-capable models, and the legend names which one.
+
 ## Open issues
 
 ### 1. Coverage and source corpus: FIXED 2026-11-10
@@ -75,7 +88,7 @@ These two bugs were found live and fixed together:
 | Before | 71 | 0 | 4 | 67 | 54 / 407 |
 | After | 757 | 12 | 490 | 255 | 658 / 658 |
 
-Thermo view renders in 44ms.
+The view renders in 44ms.
 
 ### 2. Formula constants are still starting guesses: next step
 With the full corpus in place, calibration now measures the right thing. The visible weak spot is **short fragments**. Two-to-three-word list items ("witness statements", "appeal documents") come out SOURCED, because a full statute contains almost any common word pair. Consider a minimum distinctive-token count before SOURCED is allowed, or a length-aware threshold, then tune `SOURCED_COVERAGE_THRESHOLD`/`QUOTE_MIN_CHARS` on real traffic.
@@ -128,7 +141,7 @@ To see it work:
 1. Start the server fresh.
 2. Serve `testers/` over HTTP (`python -m http.server`), since Playwright blocks `file://`.
 3. Open `legal_uk_chat_demo.html` and ask a UK question.
-4. Click "Thermo view".
+4. Click "Confidence view".
 
 Expect green citation links and every sentence shaded, with markdown intact.
 

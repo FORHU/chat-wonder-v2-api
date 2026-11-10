@@ -486,6 +486,12 @@
 
     if (chunk.startsWith("[Sources] ") || chunk.startsWith("[RELATED_CASES]")) return;
 
+    // Post-__END__ extras, same guard as the other Thermo testers: without it "[DONE]" (and any
+    // [STRUCTURED_DATA]) fell into the text accumulation below and rendered as a second
+    // "[DONE]" message bubble after every answer (found live, 2026-11-10).
+    if (chunk.startsWith("[STRUCTURED_DATA]")) return;
+    if (chunk === "[DONE]") return;
+
     if (chunk.startsWith("[TRACE]")) {
       try {
         const payload = JSON.parse(chunk.slice(7, chunk.lastIndexOf("[/TRACE]") > -1 ? chunk.lastIndexOf("[/TRACE]") : undefined));
