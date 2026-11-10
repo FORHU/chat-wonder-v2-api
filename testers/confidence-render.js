@@ -51,6 +51,19 @@
   // mean H 0.33 nats, in line with the preprint's 0.26-0.29), verified 2026-11-10.
   var ENTROPY_PURPLE_NATS = 1.0;
 
+  // Testers style <strong>/<em> with their own text colour (e.g. white), which overrode a
+  // span's tier colour, so bold case names inside an amber sentence showed white (found in a
+  // live screenshot). Emphasis inside a span now takes the span's colour; weight/italics stay.
+  (function injectSpanStyle() {
+    if (typeof document === "undefined" || document.getElementById("conf-span-style")) return;
+    var st = document.createElement("style");
+    st.id = "conf-span-style";
+    st.textContent =
+      "mark.conf-span strong, mark.conf-span b, mark.conf-span em, mark.conf-span i," +
+      " mark.conf-span code { color: inherit; }";
+    (document.head || document.documentElement).appendChild(st);
+  })();
+
   function escHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];

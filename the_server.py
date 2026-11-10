@@ -2932,6 +2932,28 @@ def _attribution_judge(state):
     return judge
 
 
+#: Pool-entry fields that are NOT legal source text: the user's own question echoed back
+#: ("issue", "query"), the model's own summary of the user ("user_context"), tool instructions
+#: ("how_to_use") and boilerplate ("disclaimer"). Found live in get_legal_recommendation_uk's
+#: research pack: counting them credited an answer for repeating the question or its disclaimer.
+_NON_SOURCE_FIELDS = frozenset({
+    "issue", "query", "q", "user_context", "how_to_use", "disclaimer",
+    "error", "errors", "search_errors", "note", "notes", "instructions",
+})
+
+
+def _strip_non_source_fields(obj, depth: int = 0):
+    """Copy of a pool entry without _NON_SOURCE_FIELDS, at any nesting depth."""
+    if depth > 8:
+        return obj
+    if isinstance(obj, dict):
+        return {k: _strip_non_source_fields(v, depth + 1) for k, v in obj.items()
+                if str(k).lower() not in _NON_SOURCE_FIELDS}
+    if isinstance(obj, list):
+        return [_strip_non_source_fields(v, depth + 1) for v in obj]
+    return obj
+
+
 def _confidence_sources(persona: str, state) -> list:
     """Plain text describing what was actually available when this turn was generated, for
     confidence.provenance_spans' lexical-overlap formula — what counts as "a source" is
@@ -2949,7 +2971,7 @@ def _confidence_sources(persona: str, state) -> list:
         for r in (getattr(state, "last_search_legal_results", None) or []):
             if not isinstance(r, dict):
                 continue
-            text = collect_tool_result_text_corpus([r])
+            text = collect_tool_result_text_corpus([_strip_non_source_fields(r)])
             title = str(r.get("title") or "").strip()
             if title and title.lower() not in text:
                 text = f"{title.lower()} {text}".strip()

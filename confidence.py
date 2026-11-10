@@ -62,6 +62,7 @@ Fails open throughout: any error here must never alter or block an answer, only 
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import math
@@ -303,6 +304,21 @@ def _candidate_sentences(text: str, limit: int = MAX_CANDIDATE_SENTENCES) -> Lis
 _QUOTE_CHARS = re.compile(r'[\"“”‘’*_`]')
 
 
+_MARKUP_TAG_RE = re.compile(r"<[^<>]{0,2000}>")
+
+
+def _clean_source(text: str) -> str:
+    """Source text as a reader would see it. National Archives judgments arrive as Akoma Ntoso
+    XML with HTML entities (found live: Lord Radcliffe's dictum stored as
+    '<p class=quote>&#8220;&#8230;frustration occurs ...'), so a verbatim quotation of it
+    never matched, and markup words ("xmlns", "oasis", "akn") leaked into the vocabulary.
+    Entities are decoded and tags dropped before any matching or scoring."""
+    if not text:
+        return ""
+    text = html.unescape(_MARKUP_TAG_RE.sub(" ", html.unescape(str(text))))
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", _QUOTE_CHARS.sub("", text or "")).strip().casefold()
 
@@ -362,6 +378,45 @@ def _is_verbatim_match(sentence: str, sources: List[str], *, normalized: bool = 
             return True
         if len(norm_src) >= QUOTE_MIN_CHARS and norm_src in norm_s:
             return True
+        if _long_verbatim_run(norm_s, norm_src):
+            return True
+    return False
+
+
+#: A long sentence is also QUOTED when one contiguous verbatim run covers at least this share of
+#: it AND at least QUOTE_RUN_MIN_CHARS -- for a quotation whose only retrieved copy is a snippet
+#: cut mid-sentence (found live: "eing performed because ..."). 100 identical characters in a row
+#: is far beyond coincidental overlap. Uncalibrated, like the other constants here.
+QUOTE_RUN_MIN_SHARE = 0.5
+QUOTE_RUN_MIN_CHARS = 100
+_RUN_WINDOW, _RUN_STEP = 40, 8
+
+
+def _long_verbatim_run(norm_s: str, norm_src: str) -> bool:
+    """Longest run of consecutive 40-char windows of the sentence that all occur in the source,
+    each found right after the previous one (so the run is contiguous in the source too)."""
+    need = max(QUOTE_RUN_MIN_CHARS, int(QUOTE_RUN_MIN_SHARE * len(norm_s)))
+    if len(norm_s) < need or len(norm_src) < need:
+        return False
+    best = 0
+    i = 0
+    while i + _RUN_WINDOW <= len(norm_s):
+        pos = norm_src.find(norm_s[i:i + _RUN_WINDOW])
+        if pos == -1:
+            i += _RUN_STEP
+            continue
+        start, j = i, i
+        while j + _RUN_STEP + _RUN_WINDOW <= len(norm_s) and \
+                norm_src.startswith(norm_s[j + _RUN_STEP:j + _RUN_STEP + _RUN_WINDOW], pos + (j + _RUN_STEP - start)):
+            j += _RUN_STEP
+        # Extend to the true end of the matching stretch (up to one step beyond the last window).
+        end = j + _RUN_WINDOW
+        while end < len(norm_s) and pos + (end - start) < len(norm_src) and norm_s[end] == norm_src[pos + (end - start)]:
+            end += 1
+        best = max(best, end - start)
+        if best >= need:
+            return True
+        i = j + _RUN_STEP
     return False
 
 
@@ -442,6 +497,7 @@ def provenance_spans(
     sentences = _candidate_sentences(final_text)
     if not sentences:
         return spans
+    sources = [_clean_source(s) for s in (sources or [])]
     idf = _source_idf(sources)
     norm_sources = [_normalize(s) for s in sources]
     for sentence in sentences:

@@ -264,6 +264,25 @@ class ProvenanceSpansTests(unittest.TestCase):
                  "different from that which was undertaken by the contract.”")
         self.assertEqual(confidence.provenance_spans(quote, [src])[0].tier, "QUOTED")
 
+    def test_quotation_is_quoted_when_the_source_snippet_is_truncated(self):
+        # Found live: the only copy of Lord Radcliffe's dictum was a grep snippet cut mid-word
+        # ("eing performed because ..."), so the full quotation never matched whole and came
+        # out SOURCED, while its short last sentence went green.
+        snippet = ("eing performed because the circumstances in which performance is called for would "
+                   "render it a thing radically different from that which was undertaken by the contract. "
+                   "non haec in foedera veni.")
+        quote = ("“Frustration occurs whenever the law recognises that without default of either party a "
+                 "contractual obligation has become incapable of being performed because the circumstances "
+                 "in which performance is called for would render it a thing radically different from that "
+                 "which was undertaken by the contract.”")
+        self.assertEqual(confidence.provenance_spans(quote, [snippet])[0].tier, "QUOTED")
+
+    def test_short_shared_phrase_in_a_long_sentence_is_not_quoted(self):
+        src = "The court applied the radically different test to the facts before it in some detail."
+        sentence = ("Applying the radically different test, I think a tribunal would probably decide that the "
+                    "lease survives, because the tenant can still occupy most of the premises for its business.")
+        self.assertNotEqual(confidence.provenance_spans(sentence, [src])[0].tier, "QUOTED")
+
     def test_elided_quotation_split_across_sources_is_not_quoted(self):
         a = "The contract was signed by both parties in London on the first day of March."
         b = "Payment was due within thirty days of delivery of the goods to the warehouse."
@@ -503,6 +522,25 @@ class ConfidenceSourcesTests(unittest.TestCase):
         self.assertEqual(len(sources), 1)  # one document per pool row, so IDF stays meaningful
         self.assertIn("protected disclosure", sources[0])
 
+    def test_research_pack_echo_and_boilerplate_are_not_sources(self):
+        # Found live: get_legal_recommendation_uk returns the user's own question ("issue"), the
+        # model's summary of the user ("user_context"), tool instructions ("how_to_use") and a
+        # disclaimer. None is law; counting them credited the answer for repeating the question
+        # or its own disclaimer.
+        pool = [{
+            "issue": "what is the leading case on frustration of contract",
+            "user_context": "the user wants a detailed explanation and an exact quotation",
+            "how_to_use": "These are search hits only, not verified statements of law.",
+            "disclaimer": "This is general legal information, not legal advice.",
+            "case_law": [{"title": "Davis Contractors v Fareham UDC", "snippet": "radically different test"}],
+        }]
+        with patch.object(srv, "exhibit_texts", return_value=[]):
+            sources = srv._confidence_sources("legal_uk", self._state(pool))
+        joined = " ".join(sources)
+        self.assertIn("radically different test", joined)
+        for leaked in ("leading case on frustration", "the user wants", "search hits only", "not legal advice"):
+            self.assertNotIn(leaked, joined)
+
     def test_ph_get_case_reasoning_reaches_the_corpus(self):
         pool = [{"title": "People v. X", "snippet": "", "court_reasoning":
                  "The constitutional right against unreasonable searches cannot be waived by silence."}]
@@ -520,6 +558,28 @@ class ConfidenceSourcesTests(unittest.TestCase):
         spans = confidence.provenance_spans(
             "Dismissal because the employee made a protected disclosure is automatically unfair.", sources)
         self.assertNotEqual(spans[0].tier, "UNSOURCED")
+
+    def test_judgment_xml_and_entities_do_not_block_a_real_quotation(self):
+        # Found live: National Archives judgments arrive as Akoma Ntoso XML with HTML entities,
+        # so Lord Radcliffe's dictum sat between tags as "&#8220;&#8230;frustration occurs ..."
+        # and the answer's verbatim quotation of it came out SOURCED instead of QUOTED.
+        xml = ('<p class=quote style=margin-left:1in>&#8220;&#8230;frustration occurs whenever the law '
+               'recognises that without default of either party a contractual obligation has become '
+               'incapable of being performed because the circumstances in which performance is called '
+               'for would render it a thing radically <i>different</i> from that which was undertaken '
+               'by the contract.&#8221;<authorialnote class=footnote marker=1>')
+        quote = ("“Frustration occurs whenever the law recognises that without default of either party a "
+                 "contractual obligation has become incapable of being performed because the circumstances "
+                 "in which performance is called for would render it a thing radically different from that "
+                 "which was undertaken by the contract.”")
+        self.assertEqual(confidence.provenance_spans(quote, [xml])[0].tier, "QUOTED")
+
+    def test_markup_vocabulary_does_not_count_as_coverage(self):
+        # "xmlns", "oasis", "akn" etc. are markup, not law; a sentence made of them must not be
+        # credited as drawing on a source.
+        xml = "<paragraph xmlns=http://docs.oasis-open.org/legaldocml/ns/akn/3.0><p>Rent is payable.</p></paragraph>"
+        spans = confidence.provenance_spans("The xmlns oasis legaldocml namespace paragraph.", [xml])
+        self.assertEqual(spans[0].tier, "UNSOURCED")
 
     def test_verbatim_match_survives_curly_quotes(self):
         # The pool corpus strips quote characters (legal_citations._normalize_quote_text); the
