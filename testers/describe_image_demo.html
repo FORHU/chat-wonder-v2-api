@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Describe Image — Vision Fallback Tester</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f11;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 28px 24px;
+    }
+
+    h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; margin-bottom: 4px; color: #fff; }
+    .subtitle { font-size: 12px; color: #64748b; margin-bottom: 24px; }
+    .subtitle code { font-family: ui-monospace, monospace; color: #94a3b8; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 24px;
+      max-width: 1180px;
+      align-items: start;
+    }
+
+    .panel {
+      background: #16161a;
+      border: 1px solid #2d2d3a;
+      border-radius: 14px;
+      padding: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+
+    .field { margin-bottom: 16px; }
+
+    input[type="text"] {
+      width: 100%;
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 13px;
+      font-family: inherit;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus { border-color: #60a5fa; }
+
+    input[type="file"] {
+      width: 100%;
+      font-size: 12px;
+      color: #94a3b8;
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #64748b;
+      margin-bottom: 16px;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #334155; flex-shrink: 0; }
+    .dot.ok { background: #22c55e; }
+    .dot.error { background: #ef4444; }
+
+    .preview-wrap {
+      background: #0f0f14;
+      border: 1px solid #2d2d3a;
+      border-radius: 10px;
+      overflow: hidden;
+      min-height: 160px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 16px;
+    }
+    .preview-wrap img {
+      max-width: 100%;
+      max-height: 320px;
+      display: block;
+    }
+    .preview-empty {
+      font-size: 12px;
+      color: #475569;
+      padding: 40px 16px;
+      text-align: center;
+    }
+
+    .btn-describe {
+      width: 100%;
+      background: #2563eb;
+      border: none;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 12px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .btn-describe:hover:not(:disabled) { background: #1d4ed8; }
+    .btn-describe:disabled { background: #1e2a40; color: #475569; cursor: not-allowed; }
+
+    hr { border: none; border-top: 1px solid #1e1e2e; margin: 16px 0; }
+
+    .result-panel { display: flex; flex-direction: column; gap: 16px; }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #475569;
+      margin-bottom: 6px;
+    }
+
+    .status-line {
+      font-size: 13px;
+      color: #94a3b8;
+      min-height: 18px;
+    }
+    .status-line.error { color: #f87171; white-space: pre-wrap; word-break: break-word; }
+
+    .compare-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .bubble {
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      border-radius: 12px;
+      padding: 14px 16px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: #e2e8f0;
+      min-height: 60px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble.empty { color: #475569; font-style: italic; }
+
+    .usage-box {
+      background: #0f0f14;
+      border: 1px solid #2d2d3a;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 11.5px;
+      font-family: ui-monospace, monospace;
+      color: #7dd3fc;
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 40px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Describe Image — Vision Fallback Tester</h1>
+<p class="subtitle">
+  <code>document-upload-url</code> &rarr; S3 PUT &rarr; <code>describe-image</code> — manual check for
+  the OCR-found-no-text photo fallback.
+</p>
+
+<div class="layout">
+
+  <!-- LEFT: Controls -->
+  <div class="panel">
+
+    <div class="field">
+      <label>Server</label>
+      <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+    </div>
+
+    <div class="status-row">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">Idle</span>
+    </div>
+
+    <div class="field">
+      <label>Image file</label>
+      <input type="file" id="file-input" accept="image/jpeg,image/png" />
+    </div>
+
+    <div class="preview-wrap" id="preview-wrap">
+      <div class="preview-empty" id="preview-empty">No image chosen yet</div>
+      <img id="preview-img" style="display:none;" alt="Local preview" />
+    </div>
+
+    <button class="btn-describe" id="describe-btn" disabled>Describe Image</button>
+
+  </div>
+
+  <!-- RIGHT: Results -->
+  <div class="result-panel">
+
+    <div>
+      <div class="section-label">Status</div>
+      <div class="status-line" id="run-status">Pick an image and click Describe Image.</div>
+    </div>
+
+    <div class="compare-row">
+      <div>
+        <div class="section-label">Local photo (what you picked)</div>
+        <div class="preview-wrap" id="compare-preview-wrap" style="min-height:220px;">
+          <div class="preview-empty">No image chosen yet</div>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">AI description</div>
+        <div class="bubble empty" id="description-bubble">No description yet.</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Usage</div>
+      <div class="usage-box" id="usage-box">—</div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let chosenFile = null;
+
+  function baseUrl() {
+    const host = $("server-url").value.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    $("server-url").value = host;
+    return `http://${host}`;
+  }
+
+  function setDotStatus(state, label) {
+    $("status-dot").className = "dot" + (state === "ok" ? " ok" : state === "error" ? " error" : "");
+    $("status-text").textContent = label;
+  }
+
+  function setRunStatus(text, isError) {
+    const el = $("run-status");
+    el.textContent = text;
+    el.className = "status-line" + (isError ? " error" : "");
+  }
+
+  $("file-input").addEventListener("change", () => {
+    const file = $("file-input").files[0];
+    chosenFile = file || null;
+    $("describe-btn").disabled = !chosenFile;
+
+    const previewImg = $("preview-img");
+    const previewEmpty = $("preview-empty");
+    const compareWrap = $("compare-preview-wrap");
+
+    if (!chosenFile) {
+      previewImg.style.display = "none";
+      previewEmpty.style.display = "block";
+      compareWrap.innerHTML = '<div class="preview-empty">No image chosen yet</div>';
+      return;
+    }
+
+    const url = URL.createObjectURL(chosenFile);
+    previewImg.src = url;
+    previewImg.style.display = "block";
+    previewEmpty.style.display = "none";
+    compareWrap.innerHTML = `<img src="${url}" alt="Local preview" style="max-width:100%;max-height:320px;display:block;" />`;
+
+    // Reset prior results when a new file is picked.
+    $("description-bubble").textContent = "No description yet.";
+    $("description-bubble").className = "bubble empty";
+    $("usage-box").textContent = "—";
+    setRunStatus("Ready — click Describe Image.", false);
+    setDotStatus("", "Idle");
+  });
+
+  async function describeImage() {
+    if (!chosenFile) return;
+    const base = baseUrl();
+
+    $("describe-btn").disabled = true;
+    $("description-bubble").textContent = "No description yet.";
+    $("description-bubble").className = "bubble empty";
+    $("usage-box").textContent = "—";
+
+    try {
+      setRunStatus("Requesting upload URL…", false);
+      setDotStatus("", "Requesting upload URL…");
+      const uploadUrlRes = await fetch(`${base}/api/legal/document-upload-url`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: chosenFile.name, content_type: chosenFile.type }),
+      });
+      const uploadUrlBody = await uploadUrlRes.json().catch(() => null);
+      if (!uploadUrlRes.ok || !uploadUrlBody || !uploadUrlBody.success) {
+        throw new Error(
+          `document-upload-url failed (HTTP ${uploadUrlRes.status}): ${JSON.stringify(uploadUrlBody)}`
+        );
+      }
+      const { s3_key, url, content_type } = uploadUrlBody;
+
+      setRunStatus("Uploading to S3…", false);
+      setDotStatus("", "Uploading to S3…");
+      const putRes = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": content_type },
+        body: chosenFile,
+      });
+      if (!putRes.ok) {
+        const putBody = await putRes.text().catch(() => "");
+        throw new Error(`S3 upload failed (HTTP ${putRes.status}): ${putBody}`);
+      }
+
+      setRunStatus("Describing image…", false);
+      setDotStatus("", "Describing image…");
+      const describeRes = await fetch(`${base}/api/legal/describe-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ s3_key, filename: chosenFile.name }),
+      });
+      const describeBody = await describeRes.json().catch(() => null);
+      if (!describeRes.ok) {
+        throw new Error(`describe-image failed (HTTP ${describeRes.status}): ${JSON.stringify(describeBody)}`);
+      }
+
+      const bubble = $("description-bubble");
+      if (describeBody && describeBody.success && describeBody.description) {
+        bubble.textContent = describeBody.description;
+        bubble.className = "bubble";
+        setRunStatus("Done.", false);
+        setDotStatus("ok", "Done");
+      } else {
+        bubble.textContent = "No description yet.";
+        bubble.className = "bubble empty";
+        setRunStatus(
+          `Server returned success=false (no description) — raw response: ${JSON.stringify(describeBody)}`,
+          true
+        );
+        setDotStatus("error", "No description returned");
+      }
+      $("usage-box").textContent = JSON.stringify(describeBody && describeBody.usage, null, 2);
+    } catch (e) {
+      setRunStatus(String(e && e.message ? e.message : e), true);
+      setDotStatus("error", "Error");
+    } finally {
+      $("describe-btn").disabled = false;
+    }
+  }
+
+  $("describe-btn").addEventListener("click", describeImage);
+</script>
+</body>
+</html>
