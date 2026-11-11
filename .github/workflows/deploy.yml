@@ -1,297 +1,231 @@
-name: Deploy to EC2
+name: Deploy to EC2 (UK)
+
+# FORHU/chat-wonder-v2-api → the chat-wonder UK host (eu-west-2).
+#
+# Same build as deploy.yml (Singapore), with three differences:
+#   * OIDC instead of AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for the pipeline;
+#   * SSM Run Command instead of ssh-action — the UK host has no SSH port and no
+#     key pair;
+#   * both env files travel through Parameter Store, encrypted, instead of being
+#     written over an SSH session.
+#
+# On demand only -- see the note on the trigger below. Singapore's pipeline still runs
+# on every push to staging; the concurrency group below only serialises the UK side.
+#
+# Images are tagged uk-<sha> in the same ap-southeast-1 registry, so Singapore's
+# :latest and :<sha> are never touched.
 
 on:
-    push:
-        branches: [staging]
+    # No push trigger: eu-west-2 is paused. Host i-0c9dd23726b872041 was stopped
+    # 2026-10-29 and the region's RDS and ElastiCache were deleted, so every push to
+    # staging failed SendCommand with
+    #   InvalidInstanceId: Instances not in a valid state for account
+    # -- which is what a stopped, SSM-unregistered instance looks like. That was every
+    # merge from 2026-10-29 to 2026-11-11 reporting red for a region nobody was using.
+    # Restoring UK is more than starting the box: check its datastores first.
     workflow_dispatch:
         inputs:
+            ref:
+                description: "Branch, tag, or SHA to deploy"
+                required: true
+                default: staging
             image_tag:
-                description: "Image tag to deploy (defaults to latest commit SHA)"
+                description: "Existing image tag to deploy. Leave blank to build from ref."
                 required: false
                 default: ""
 
+concurrency:
+    group: chatwonder-uk-deploy # shared with scl-core-v2: one deploy at a time
+    cancel-in-progress: false
+
 env:
-    ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-    ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-    IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+    ECR_REPOSITORY: chat-wonder-v2-api
+    ECR_REGION: ap-southeast-1 # where the images live
+    AWS_REGION: eu-west-2 # where the UK host runs
+    ACCOUNT_ID: "617163942417"
+    INSTANCE_ID: i-0c9dd23726b872041
+    CONTAINER: chat-wonder-v2
+    APP_DIR: /opt/chat-wonder-v2
 
 jobs:
     deploy:
-        # arm64, built natively. The deploy target forhu-chatwonder-ec2-v3 is a Graviton
-        # t4g box; an x86 runner's docker build produces an amd64-only manifest and the
-        # box's docker pull then refuses it outright:
-        #   no matching manifest for linux/arm64/v8 in the manifest list entries
-        # which is what failed every deploy from 2026-11-10. Native beats cross-building
-        # under QEMU, where a pip install that compiles wheels takes hours and looks hung.
-        # If this image ever needs a second architecture, use buildx with
-        # --platform linux/amd64,linux/arm64 --push rather than reverting this.
-        runs-on: ubuntu-24.04-arm
-        environment: staging
+        name: Build, Push & Deploy (UK)
+        # x86_64: the UK chat-wonder host is t3.large.
+        runs-on: ubuntu-latest
+        environment: uk
+
         permissions:
             id-token: write
             contents: read
 
         steps:
+            # On push there is no `ref` input, so fall back to the pushed commit.
             - name: Checkout code
               uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.event.inputs.ref || github.sha }}
 
-            - name: Validate required deploy configuration
-              env:
-                  V_EC2_TARGET_TAG_KEY: ${{ vars.EC2_TARGET_TAG_KEY }}
-                  V_EC2_TARGET_TAG_VALUE: ${{ vars.EC2_TARGET_TAG_VALUE }}
-                  V_AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-                  V_AWS_REGION: ${{ vars.AWS_REGION }}
-                  V_ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-                  V_ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-                  S_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-              run: |
-                  MISSING=""
-
-                  require_env() {
-                    if [ -z "$2" ]; then
-                      MISSING="${MISSING} $1"
-                    fi
-                  }
-
-                  # These are needed for the SSM deploy mechanics itself -- missing any
-                  # of them fails the pipeline before we touch AWS, not partway through.
-                  require_env EC2_TARGET_TAG_KEY "$V_EC2_TARGET_TAG_KEY"
-                  require_env EC2_TARGET_TAG_VALUE "$V_EC2_TARGET_TAG_VALUE"
-                  require_env AWS_DEPLOY_ROLE_ARN "$V_AWS_DEPLOY_ROLE_ARN"
-                  require_env AWS_REGION "$V_AWS_REGION"
-                  require_env ECR_REGISTRY "$V_ECR_REGISTRY"
-                  require_env ECR_REPOSITORY "$V_ECR_REPOSITORY"
-
-                  # OPENAI_API_KEY defaults to "" in the_server.py rather than raising at
-                  # boot, so a missing key wouldn't crash-loop the container -- but it would
-                  # silently ship a deploy where the core chat functionality can't work, so
-                  # it's still worth failing the pipeline over.
-                  require_env OPENAI_API_KEY "$S_OPENAI_API_KEY"
-
-                  if [ -n "$MISSING" ]; then
-                    echo "Missing required GitHub variables/secrets:${MISSING}" >&2
-                    exit 1
-                  fi
-
-            - name: Configure AWS credentials
+            - name: Configure AWS credentials (OIDC)
               uses: aws-actions/configure-aws-credentials@v4
               with:
-                  role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-                  aws-region: ${{ vars.AWS_REGION }}
+                  role-to-assume: ${{ vars.AWS_UK_DEPLOY_ROLE_ARN }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            - name: Resolve image tag
+              id: tag
+              run: |
+                  TAG="${{ github.event.inputs.image_tag }}"
+                  [ -z "$TAG" ] && TAG="uk-${{ github.sha }}"
+                  echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+                  echo "registry=${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.ECR_REGION }}.amazonaws.com" >> "$GITHUB_OUTPUT"
+                  echo "Deploying ${{ env.ECR_REPOSITORY }}:$TAG"
 
             - name: Login to Amazon ECR
-              id: login-ecr
-              uses: aws-actions/amazon-ecr-login@v2
-
-            - name: Write user_functions.env into build context
               run: |
+                  aws ecr get-login-password --region "${{ env.ECR_REGION }}" \
+                    | docker login --username AWS --password-stdin "${{ steps.tag.outputs.registry }}"
+
+            # This file is COPYed into the image by the Dockerfile, so it must
+            # exist before the build. UK values: the London bucket and region,
+            # and the UK ilovelawyer API.
+            #
+            # No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY here. They would be
+            # baked into a layer and pushed to ECR, readable by anyone who can
+            # pull the image. The instance role covers S3 instead.
+            - name: Write user_functions.env into build context
+              if: ${{ github.event_name == 'push' || github.event.inputs.image_tag == '' }}
+              run: |
+                  mkdir -p resources/functions
                   cat > resources/functions/user_functions.env << 'FUNCEOF'
-                  JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
-                  LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=${{ vars.AWS_REGION }}
-                  AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-                  AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
-                  GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
-                  OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
-                  COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
-                  GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
-                  ILOVELAWYER_API_BASE=${{ secrets.ILOVELAWYER_API_BASE }}
-                  CHAT_WONDER_API_KEY=${{ secrets.CHAT_WONDER_API_KEY }}
+                  LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
+                  AWS_REGION=${{ env.AWS_REGION }}
+                  ILOVELAWYER_API_BASE=${{ vars.UK_ILOVELAWYER_API_BASE }}
                   FUNCEOF
 
             - name: Build and push Docker image
+              if: ${{ github.event_name == 'push' || github.event.inputs.image_tag == '' }}
+              env:
+                  IMAGE: ${{ steps.tag.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.tag }}
               run: |
-                  docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-                  docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-                  docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-                  docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+                  docker build -t "$IMAGE" .
+                  docker push "$IMAGE"
 
-            # Env content is base64-encoded and embedded directly in the SSM command below
-            # (matching the hris-api deploy) rather than staged through S3. Base64 keeps
-            # quotes/$/backticks in secret values from being interpreted as shell syntax
-            # while the script is assembled and while it runs on the instance.
-            #
-            # Security note: this means secrets travel through, and are retained in, AWS's
-            # SSM command history -- readable by any principal with
-            # ssm:GetCommandInvocation/ListCommands on this account. Narrower than shipping
-            # them over SSH, but not as tight as a KMS-gated secret store. Content is never
-            # printed to GitHub Actions logs.
-            - name: Build SSM deploy script
+            # No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY anywhere below: the
+            # instance role grants S3 on the London bucket, and boto3 picks it up
+            # from instance metadata. Setting them empty would break that.
+            - name: Store env files in Parameter Store
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  ILOVELAWYER_API_BASE: ${{ vars.UK_ILOVELAWYER_API_BASE }}
+                  CHAT_WONDER_API_KEY: ${{ secrets.CHAT_WONDER_API_KEY }}
+                  TRACE_STREAM_API_KEY: ${{ secrets.TRACE_STREAM_API_KEY || secrets.CHAT_WONDER_API_KEY }}
               run: |
-                  mkdir -p /tmp/deploy-env/resources/functions
+                  set -euo pipefail
+                  umask 077
 
-                  cat > /tmp/deploy-env/.env << 'ENVEOF'
-                  OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-                  TRACE_STREAM_API_KEY=${{ secrets.TRACE_STREAM_API_KEY || secrets.CHAT_WONDER_API_KEY }}
+                  cat > app.env << ENVEOF
+                  OPENAI_API_KEY=${OPENAI_API_KEY}
+                  TRACE_STREAM_API_KEY=${TRACE_STREAM_API_KEY}
                   CHAT_MODEL=${{ vars.CHAT_MODEL }}
-                  LEGAL_CHAT_MODEL_PH=${{ vars.LEGAL_CHAT_MODEL_PH }}
                   LEGAL_CHAT_MODEL_UK=${{ vars.LEGAL_CHAT_MODEL_UK }}
-                  LEGAL_REASONING_EFFORT_PH=${{ vars.LEGAL_REASONING_EFFORT_PH }}
                   LEGAL_REASONING_EFFORT_UK=${{ vars.LEGAL_REASONING_EFFORT_UK }}
                   INTAKE_CHAT_MODEL=${{ vars.INTAKE_CHAT_MODEL }}
                   INTAKE_REASONING_EFFORT=${{ vars.INTAKE_REASONING_EFFORT }}
-                  JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
+                  LEGAL_DECISIONS_PREFETCH=${{ vars.LEGAL_DECISIONS_PREFETCH }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
-                  LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=${{ vars.AWS_REGION }}
-                  AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-                  AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  COSMETICS_MODEL=${{ secrets.COSMETICS_MODEL }}
-                  COSMETICS_S3_BUCKET_NAME=${{ secrets.COSMETICS_S3_BUCKET_NAME }}
-                  COSMETICS_AWS_REGION=${{ secrets.COSMETICS_AWS_REGION }}
-                  COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
-                  GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
-                  GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
-                  OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
-                  GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
-                  TAILOR_S3_BUCKET_NAME=${{ vars.TAILOR_S3_BUCKET_NAME }}
-                  TAILOR_AWS_REGION=${{ vars.TAILOR_AWS_REGION }}
+                  LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
+                  LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
+                  AWS_REGION=${{ env.AWS_REGION }}
                   ENVEOF
 
-                  cat > /tmp/deploy-env/resources/functions/user_functions.env << 'FUNCEOF'
-                  JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
+                  cat > functions.env << FUNCEOF
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
-                  LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
-                  AWS_REGION=${{ vars.AWS_REGION }}
-                  AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-                  AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  GARMENTS_API_BASE=${{ secrets.GARMENTS_API_BASE }}
-                  GARMENTS_API_KEY=${{ secrets.GARMENTS_API_KEY }}
-                  OUTFITS_API_BASE=${{ secrets.OUTFITS_API_BASE }}
-                  COSMETICS_API_BASE=${{ secrets.COSMETICS_API_BASE }}
-                  GOOGLE_PLACES_API_KEY=${{ secrets.GOOGLE_PLACES_API_KEY }}
-                  ILOVELAWYER_API_BASE=${{ secrets.ILOVELAWYER_API_BASE }}
-                  CHAT_WONDER_API_KEY=${{ secrets.CHAT_WONDER_API_KEY }}
+                  LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
+                  AWS_REGION=${{ env.AWS_REGION }}
+                  ILOVELAWYER_API_BASE=${ILOVELAWYER_API_BASE}
+                  CHAT_WONDER_API_KEY=${CHAT_WONDER_API_KEY}
                   FUNCEOF
 
-                  ENV_B64=$(base64 -w0 /tmp/deploy-env/.env)
-                  FUNC_ENV_B64=$(base64 -w0 /tmp/deploy-env/resources/functions/user_functions.env)
+                  aws ssm put-parameter --name /chatwonder-uk/api-env \
+                    --type SecureString --overwrite --value "file://app.env" \
+                    --region "${{ env.AWS_REGION }}" > /dev/null
 
-                  cat > /tmp/deploy.sh << SCRIPT
-                  set -e
+                  aws ssm put-parameter --name /chatwonder-uk/api-functions-env \
+                    --type SecureString --overwrite --value "file://functions.env" \
+                    --region "${{ env.AWS_REGION }}" > /dev/null
 
-                  # ── Bootstrap: Docker ─────────────────────────────────────────
-                  if ! command -v docker &> /dev/null; then
-                    sudo dnf install -y docker
-                    sudo systemctl enable --now docker
-                    sudo usermod -aG docker ec2-user
-                  fi
+                  rm -f app.env functions.env
 
-                  # ── Bootstrap: AWS CLI ────────────────────────────────────────
-                  if ! command -v aws &> /dev/null; then
-                    # Escaped so uname runs on the instance: this heredoc is unquoted, so
-                    # an unescaped $() would be expanded by the runner instead. aarch64 on
-                    # the t4g box; the x86_64 zip installs and then cannot execute.
-                    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-\$(uname -m).zip" -o /tmp/awscliv2.zip
-                    unzip -q /tmp/awscliv2.zip -d /tmp
-                    sudo /tmp/aws/install
-                    rm -rf /tmp/awscliv2.zip /tmp/aws
-                  fi
-
-                  # ── App directories ──────────────────────────────────────────
-                  sudo mkdir -p /opt/chat-wonder-v2/resources/functions
-                  sudo chown -R ec2-user:ec2-user /opt/chat-wonder-v2
-
-                  # ── Write env files ────────────────────────────────────────────
-                  echo "$ENV_B64" | base64 -d | sudo tee /opt/chat-wonder-v2/.env > /dev/null
-                  echo "$FUNC_ENV_B64" | base64 -d | sudo tee /opt/chat-wonder-v2/resources/functions/user_functions.env > /dev/null
-                  sudo chmod 600 /opt/chat-wonder-v2/.env /opt/chat-wonder-v2/resources/functions/user_functions.env
-
-                  # ── Authenticate EC2 to ECR ───────────────────────────────────
-                  aws ecr get-login-password --region ${{ vars.AWS_REGION }} \
-                    | docker login --username AWS --password-stdin ${{ vars.ECR_REGISTRY }}
-
-                  # ── Pull latest image ─────────────────────────────────────────
-                  docker pull ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
-
-                  # ── Stop and remove old container (ignore error if not running)
-                  docker stop chat-wonder-v2 || true
-                  docker rm   chat-wonder-v2 || true
-
-                  # ── Start new container ───────────────────────────────────────
-                  docker run -d \
-                    --name chat-wonder-v2 \
-                    --restart unless-stopped \
-                    -p 8000:8000 \
-                    --env-file /opt/chat-wonder-v2/.env \
-                    -v /opt/chat-wonder-v2/resources/functions/user_functions.env:/app/resources/functions/user_functions.env:ro \
-                    ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest
-
-                  # ── Cleanup ────────────────────────────────────────────────────
-                  docker image prune -f
-                  SCRIPT
-
-            - name: Send deploy command via SSM
-              id: send-command
+            - name: Deploy via SSM
+              id: send
               env:
-                  TAG_KEY: ${{ vars.EC2_TARGET_TAG_KEY }}
-                  TAG_VALUE: ${{ vars.EC2_TARGET_TAG_VALUE }}
-              run: |
-                  jq -n --rawfile cmd /tmp/deploy.sh '{commands: ($cmd | rtrimstr("\n") | split("\n"))}' > /tmp/ssm-params.json
-
-                  COMMAND_ID=$(aws ssm send-command \
-                    --document-name "AWS-RunShellScript" \
-                    --comment "Deploy chat-wonder-v2 staging ($IMAGE_TAG)" \
-                    --targets "Key=tag:${TAG_KEY},Values=${TAG_VALUE}" \
-                    --parameters file:///tmp/ssm-params.json \
-                    --timeout-seconds 300 \
-                    --query "Command.CommandId" --output text)
-
-                  echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
-                  echo "Sent SSM command $COMMAND_ID targeting tag:${TAG_KEY}=${TAG_VALUE}"
-
-            - name: Wait for deploy to finish
-              env:
-                  COMMAND_ID: ${{ steps.send-command.outputs.command_id }}
-                  TAG_KEY: ${{ vars.EC2_TARGET_TAG_KEY }}
-                  TAG_VALUE: ${{ vars.EC2_TARGET_TAG_VALUE }}
+                  REGISTRY: ${{ steps.tag.outputs.registry }}
+                  TAG: ${{ steps.tag.outputs.tag }}
               run: |
                   set -euo pipefail
+                  IMAGE="${REGISTRY}/${{ env.ECR_REPOSITORY }}:${TAG}"
+                  D="${{ env.APP_DIR }}"
 
-                  # Give SSM a moment to fan the command out to matching instances.
-                  sleep 8
+                  COMMANDS=(
+                    "set -euo pipefail"
+                    "mkdir -p ${D}/resources/functions"
+                    "aws ssm get-parameter --name /chatwonder-uk/api-env --with-decryption --region ${{ env.AWS_REGION }} --query Parameter.Value --output text > ${D}/.env"
+                    "aws ssm get-parameter --name /chatwonder-uk/api-functions-env --with-decryption --region ${{ env.AWS_REGION }} --query Parameter.Value --output text > ${D}/resources/functions/user_functions.env"
+                    "chmod 600 ${D}/.env ${D}/resources/functions/user_functions.env"
+                    "aws ecr get-login-password --region ${{ env.ECR_REGION }} | docker login --username AWS --password-stdin ${REGISTRY}"
+                    "docker pull ${IMAGE}"
+                    "docker rm -f ${{ env.CONTAINER }} 2>/dev/null || true"
+                    "docker run -d --name ${{ env.CONTAINER }} --restart unless-stopped -p 127.0.0.1:8000:8000 --env-file ${D}/.env -v ${D}/resources/functions/user_functions.env:/app/resources/functions/user_functions.env:ro ${IMAGE}"
+                    "docker image prune -f"
+                  )
 
-                  for i in $(seq 1 30); do
-                    STATUS=$(aws ssm list-commands --command-id "$COMMAND_ID" \
-                      --query "Commands[0].Status" --output text 2>/dev/null || echo "Pending")
-                    if [ "$STATUS" != "Pending" ] && [ "$STATUS" != "InProgress" ]; then
-                      break
-                    fi
-                    echo "Deploy status: $STATUS (attempt $i/30)"
+                  # jq builds the JSON, so a quote inside any command cannot break it.
+                  PARAMS=$(printf '%s\n' "${COMMANDS[@]}" | jq -R . | jq -sc '{commands: .}')
+
+                  CMD_ID=$(aws ssm send-command \
+                    --region "${{ env.AWS_REGION }}" \
+                    --instance-ids "${{ env.INSTANCE_ID }}" \
+                    --document-name AWS-RunShellScript \
+                    --comment "deploy ${{ env.CONTAINER }} ${TAG}" \
+                    --timeout-seconds 900 \
+                    --parameters "${PARAMS}" \
+                    --query Command.CommandId --output text)
+
+                  echo "command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
+                  echo "SSM command: $CMD_ID"
+
+            - name: Wait for the deploy
+              run: |
+                  set -uo pipefail
+                  STATUS=Pending
+                  for i in $(seq 1 90); do
+                    STATUS=$(aws ssm get-command-invocation \
+                      --region "${{ env.AWS_REGION }}" \
+                      --command-id "${{ steps.send.outputs.command_id }}" \
+                      --instance-id "${{ env.INSTANCE_ID }}" \
+                      --query Status --output text 2>/dev/null || echo Pending)
+                    echo "status: $STATUS"
+                    case "$STATUS" in Success|Failed|Cancelled|TimedOut) break ;; esac
                     sleep 10
                   done
 
-                  echo "Final command status: $STATUS"
+                  aws ssm get-command-invocation \
+                    --region "${{ env.AWS_REGION }}" \
+                    --command-id "${{ steps.send.outputs.command_id }}" \
+                    --instance-id "${{ env.INSTANCE_ID }}" \
+                    --query '[StandardOutputContent,StandardErrorContent]' --output text
 
-                  FAILED=0
-                  INSTANCE_IDS=$(aws ssm list-command-invocations --command-id "$COMMAND_ID" \
-                    --query "CommandInvocations[].InstanceId" --output text)
+                  [ "$STATUS" = "Success" ] || { echo "::error::deploy $STATUS"; exit 1; }
 
-                  if [ -z "$INSTANCE_IDS" ]; then
-                    echo "No instances matched tag:${TAG_KEY}=${TAG_VALUE} for this SSM command."
-                    exit 1
-                  fi
-
-                  for INSTANCE_ID in $INSTANCE_IDS; do
-                    echo "::group::Instance $INSTANCE_ID"
-                    aws ssm get-command-invocation \
-                      --command-id "$COMMAND_ID" \
-                      --instance-id "$INSTANCE_ID" \
-                      --query "{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}" \
-                      --output json > invocation.json
-                    cat invocation.json
-                    INV_STATUS=$(jq -r ".Status" invocation.json)
-                    if [ "$INV_STATUS" != "Success" ]; then
-                      FAILED=1
-                    fi
-                    echo "::endgroup::"
+            - name: Smoke test through the CDN
+              run: |
+                  set -uo pipefail
+                  for i in $(seq 1 12); do
+                    CODE=$(curl -s -o /dev/null -m 10 -w '%{http_code}' https://d7dkkpuvg29gt.cloudfront.net/session-id || echo 000)
+                    echo "attempt $i: $CODE"
+                    [ "$CODE" = "200" ] && exit 0
+                    sleep 10
                   done
-
-                  if [ "$FAILED" -ne 0 ]; then
-                    echo "One or more instances failed to deploy."
-                    exit 1
-                  fi
-
-                  echo "Deploy succeeded on: $INSTANCE_IDS"
+                  echo "::error::chat-wonder did not answer through CloudFront after the deploy"
+                  exit 1
