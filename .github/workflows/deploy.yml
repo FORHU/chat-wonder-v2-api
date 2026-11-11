@@ -88,6 +88,8 @@ jobs:
                   cat > resources/functions/user_functions.env << 'FUNCEOF'
                   JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
+                  KOREAN_LAW_MCP_URL=${{ vars.KOREAN_LAW_MCP_URL }}
+                  KOREAN_LAW_MCP_API_KEY=${{ secrets.KOREAN_LAW_MCP_API_KEY }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
                   AWS_REGION=${{ vars.AWS_REGION }}
                   AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -135,6 +137,8 @@ jobs:
                   LEGAL_DECISIONS_PREFETCH=${{ vars.LEGAL_DECISIONS_PREFETCH }}
                   JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
+                  KOREAN_LAW_MCP_URL=${{ vars.KOREAN_LAW_MCP_URL }}
+                  KOREAN_LAW_MCP_API_KEY=${{ secrets.KOREAN_LAW_MCP_API_KEY }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
                   AWS_REGION=${{ vars.AWS_REGION }}
                   AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
