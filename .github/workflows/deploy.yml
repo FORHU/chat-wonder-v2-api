@@ -17,7 +17,15 @@ env:
 
 jobs:
     deploy:
-        runs-on: ubuntu-latest
+        # arm64, built natively. The deploy target forhu-chatwonder-ec2-v3 is a Graviton
+        # t4g box; an x86 runner's docker build produces an amd64-only manifest and the
+        # box's docker pull then refuses it outright:
+        #   no matching manifest for linux/arm64/v8 in the manifest list entries
+        # which is what failed every deploy from 2026-11-10. Native beats cross-building
+        # under QEMU, where a pip install that compiles wheels takes hours and looks hung.
+        # If this image ever needs a second architecture, use buildx with
+        # --platform linux/amd64,linux/arm64 --push rather than reverting this.
+        runs-on: ubuntu-24.04-arm
         environment: staging
         permissions:
             id-token: write
@@ -124,7 +132,6 @@ jobs:
                   LEGAL_REASONING_EFFORT_UK=${{ vars.LEGAL_REASONING_EFFORT_UK }}
                   INTAKE_CHAT_MODEL=${{ vars.INTAKE_CHAT_MODEL }}
                   INTAKE_REASONING_EFFORT=${{ vars.INTAKE_REASONING_EFFORT }}
-                  LEGAL_DECISIONS_PREFETCH=${{ vars.LEGAL_DECISIONS_PREFETCH }}
                   JURIS_MCP_URL=${{ vars.JURIS_MCP_URL }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.LEGAL_S3_BUCKET_NAME }}
@@ -174,7 +181,10 @@ jobs:
 
                   # ── Bootstrap: AWS CLI ────────────────────────────────────────
                   if ! command -v aws &> /dev/null; then
-                    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+                    # Escaped so uname runs on the instance: this heredoc is unquoted, so
+                    # an unescaped $() would be expanded by the runner instead. aarch64 on
+                    # the t4g box; the x86_64 zip installs and then cannot execute.
+                    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-\$(uname -m).zip" -o /tmp/awscliv2.zip
                     unzip -q /tmp/awscliv2.zip -d /tmp
                     sudo /tmp/aws/install
                     rm -rf /tmp/awscliv2.zip /tmp/aws
