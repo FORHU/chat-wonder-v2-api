@@ -72,6 +72,9 @@ SEARCH = {"success": True, "results": [
 
 
 class PrefetchSectionsTests(unittest.TestCase):
+    def setUp(self):
+        dr.clear_toc_cache()
+
     def test_off_by_default(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("LEGAL_DECISIONS_PREFETCH", None)
@@ -101,6 +104,54 @@ class PrefetchSectionsTests(unittest.TestCase):
         self.assertIsNone(dr.prefetch_sections("case_law_search", SEARCH, "q", client, fake_tools([])))
         self.assertIsNone(dr.prefetch_sections("legislation_search", {"results": []}, "q", client, fake_tools([])))
         self.assertEqual(client.requests, [])
+
+
+class TocCacheTests(unittest.TestCase):
+    ACT = {"title": "Employment Rights Act 1996", "type": "ukpga", "year": 1996, "number": 18}
+
+    def setUp(self):
+        dr.clear_toc_cache()
+
+    def toc_calls(self, calls):
+        return sum(1 for name, _ in calls if name == "legislation_get_toc")
+
+    def test_second_lookup_makes_no_tools_call(self):
+        calls = []
+        first, cached1 = dr._toc_sections(self.ACT, fake_tools(calls))
+        second, cached2 = dr._toc_sections(self.ACT, fake_tools(calls))
+        self.assertEqual((cached1, cached2), (False, True))
+        self.assertEqual(self.toc_calls(calls), 1)
+        self.assertEqual([s["section"] for s in second], [s["section"] for s in first])
+
+    def test_cache_hit_reported_in_metrics(self):
+        client = FakeDecisionsClient({0: 0.9}, {"108": 0.9})
+        dr.prefetch_sections("legislation_search", SEARCH, "q", client, fake_tools([]))
+        out = dr.prefetch_sections("legislation_search", SEARCH, "q", client, fake_tools([]))
+        self.assertEqual(out["metrics"]["toc_cached"], 1)
+
+    def test_failed_lookup_is_not_cached(self):
+        calls = []
+        failing = lambda name, args: (calls.append((name, args)) or None)
+        self.assertEqual(dr._toc_sections(self.ACT, failing), ([], False))
+        dr._toc_sections(self.ACT, fake_tools(calls))
+        self.assertEqual(self.toc_calls(calls), 2)  # the failure didn't stick
+
+    def test_expired_entry_is_refetched(self):
+        calls = []
+        with patch.dict(os.environ, {"LEGAL_TOC_CACHE_TTL_S": "60"}):
+            dr._toc_sections(self.ACT, fake_tools(calls))
+            with patch.object(dr.time, "monotonic", return_value=dr.time.monotonic() + 120):
+                _, cached = dr._toc_sections(self.ACT, fake_tools(calls))
+        self.assertFalse(cached)
+        self.assertEqual(self.toc_calls(calls), 2)
+
+    def test_size_limit_drops_the_oldest_act(self):
+        with patch.dict(os.environ, {"LEGAL_TOC_CACHE_MAX": "1"}):
+            other = {**self.ACT, "number": 99, "title": "Other Act"}
+            dr._toc_sections(self.ACT, fake_tools([]))
+            dr._toc_sections(other, fake_tools([]))
+            self.assertIsNone(dr._cached_toc(self.ACT))
+            self.assertIsNotNone(dr._cached_toc(other))
 
 
 class DeliveryTests(unittest.TestCase):

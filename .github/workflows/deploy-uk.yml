@@ -9,20 +9,24 @@ name: Deploy to EC2 (UK)
 #   * both env files travel through Parameter Store, encrypted, instead of being
 #     written over an SSH session.
 #
-# Runs on every push to staging, and on demand. Note that Singapore's pipeline also
-# triggers on push to staging, so one merge deploys both regions from the same
-# commit; the concurrency group below only serialises the UK side.
+# On demand only -- see the note on the trigger below. Singapore's pipeline still runs
+# on every push to staging; the concurrency group below only serialises the UK side.
 #
 # Images are tagged uk-<sha> in the same ap-southeast-1 registry, so Singapore's
 # :latest and :<sha> are never touched.
 
 on:
-    push:
-        branches: [staging]
+    # No push trigger: eu-west-2 is paused. Host i-0c9dd23726b872041 was stopped
+    # 2026-10-29 and the region's RDS and ElastiCache were deleted, so every push to
+    # staging failed SendCommand with
+    #   InvalidInstanceId: Instances not in a valid state for account
+    # -- which is what a stopped, SSM-unregistered instance looks like. That was every
+    # merge from 2026-10-29 to 2026-11-11 reporting red for a region nobody was using.
+    # Restoring UK is more than starting the box: check its datastores first.
     workflow_dispatch:
         inputs:
             ref:
-                description: "Branch, tag, or SHA to deploy (ignored on push)"
+                description: "Branch, tag, or SHA to deploy"
                 required: true
                 default: staging
             image_tag:
@@ -128,6 +132,7 @@ jobs:
                   LEGAL_REASONING_EFFORT_UK=${{ vars.LEGAL_REASONING_EFFORT_UK }}
                   INTAKE_CHAT_MODEL=${{ vars.INTAKE_CHAT_MODEL }}
                   INTAKE_REASONING_EFFORT=${{ vars.INTAKE_REASONING_EFFORT }}
+                  LEGAL_DECISIONS_PREFETCH=${{ vars.LEGAL_DECISIONS_PREFETCH }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
