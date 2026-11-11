@@ -5293,6 +5293,83 @@ async def analyze_legal_document(request: AnalyzeS3DocumentRequest):
                 logging.warning(f"Failed to clean up temp file {local_path}: {cleanup_err}")
 
 
+VISION_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+@app.post("/api/legal/describe-image")
+async def describe_image(request: AnalyzeS3DocumentRequest):
+    """Download an image from S3 and return a plain-text visual description via a vision-capable
+    model — the fallback for a photo Textract found no text in (ilovelawyer-api's
+    document-extraction pipeline calls this only when OCR already came back empty)."""
+    llm_usage.start_turn()
+    s3_key = request.s3_key
+    filename = request.filename or os.path.basename(s3_key)
+    ext = os.path.splitext(filename)[1].lower()
+    session_id = getattr(request, "session_id", None)
+    broadcast_trace("request", f"Describe image — file: {filename}", session_id,
+        summary=f"Starting AI visual description of uploaded photo: '{filename}'")
+
+    tmp_dir = tempfile.gettempdir()
+    local_path = os.path.join(tmp_dir, os.path.basename(s3_key))
+
+    downloaded = s3_storage.download_from_s3(s3_key, local_path)
+    if not downloaded:
+        raise HTTPException(status_code=404, detail="File not found in S3 or download failed.")
+
+    try:
+        with open(local_path, "rb") as f:
+            contents = f.read()
+
+        if len(contents) > VISION_MAX_IMAGE_BYTES:
+            logging.warning(f"[Describe Image] '{filename}' exceeds {VISION_MAX_IMAGE_BYTES} bytes; skipping vision description")
+            broadcast_trace("cognition", f"Image too large to describe — '{filename}'", session_id,
+                summary="The photo is too large for the AI vision description and was skipped.")
+            return {"success": False, "description": None, "usage": llm_usage.current().to_dict()}
+
+        if not _context.openai_api_key:
+            return {"success": False, "description": None, "usage": llm_usage.current().to_dict()}
+
+        try:
+            import base64, mimetypes
+            b64 = base64.b64encode(contents).decode("utf-8")
+            mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext[1:]}"
+            broadcast_trace("action", "Describing image with AI vision...", session_id,
+                summary="The AI is looking at the photo to describe what it shows.")
+            client = make_openai_client(api_key=_context.openai_api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": (
+                        "This photo was uploaded as evidence in a legal case. Describe in detail and "
+                        "factually what it shows: the setting, any people present (without trying to "
+                        "identify who they are), objects, vehicles, visible damage or injuries, signage, "
+                        "and any visible text. Do not offer legal conclusions or speculate about fault. "
+                        "If the image is unclear, say so explicitly."
+                    )},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                ]}],
+                max_tokens=800,
+            )
+            description = (response.choices[0].message.content or "").strip()
+        except Exception as e:
+            logging.warning(f"[Describe Image] vision call failed (non-fatal): {e}")
+            broadcast_trace("cognition", f"Image description failed — {e}", session_id,
+                summary="The AI could not describe the photo due to an error.")
+            return {"success": False, "description": None, "usage": llm_usage.current().to_dict()}
+
+        return {
+            "success": bool(description),
+            "description": description or None,
+            "usage": llm_usage.current().to_dict(),
+        }
+    finally:
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception as cleanup_err:
+                logging.warning(f"Failed to clean up temp file {local_path}: {cleanup_err}")
+
+
 @app.post("/api/legal/upload-and-analyze")
 async def upload_and_analyze(file: UploadFile = File(...)):
     """Upload a document directly and get back an AI legal analysis in one step. Useful for testing."""
