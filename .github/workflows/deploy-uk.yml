@@ -132,6 +132,7 @@ jobs:
                   LEGAL_REASONING_EFFORT_UK=${{ vars.LEGAL_REASONING_EFFORT_UK }}
                   INTAKE_CHAT_MODEL=${{ vars.INTAKE_CHAT_MODEL }}
                   INTAKE_REASONING_EFFORT=${{ vars.INTAKE_REASONING_EFFORT }}
+                  LEGAL_DECISIONS_PREFETCH=${{ vars.LEGAL_DECISIONS_PREFETCH }}
                   UK_LEGAL_MCP_URL=${{ vars.UK_LEGAL_MCP_URL }}
                   LEGAL_LIBRARY_URL=${{ vars.LEGAL_LIBRARY_URL }}
                   LEGAL_S3_BUCKET_NAME=${{ vars.UK_LEGAL_S3_BUCKET_NAME }}
