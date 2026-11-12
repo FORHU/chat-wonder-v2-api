@@ -1451,6 +1451,291 @@ def uk_legal_mcp_read_resource(uri: str = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Korean Law MCP (mcp.gomdori.app/law) — [legal ai kr] persona.
+# ---------------------------------------------------------------------------
+
+def _kr_call(tool_name: str, arguments: dict) -> dict:
+    """Call one Korean Law MCP tool and unwrap its JSON-RPC result."""
+    from korean_law_mcp.client import get_client
+
+    t0 = time.perf_counter()
+    payload = get_client().call_tool(tool_name, arguments)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    _logger.info("korean_law_mcp %s elapsed=%.0fms", tool_name, elapsed_ms)
+    return payload if isinstance(payload, dict) else {"data": payload}
+
+
+def search_law(query: str = None, display: int = None) -> dict:
+    """Search Korean statutes, local ordinances, and administrative rules by name keyword to get a lawId/mst."""
+    query = (str(query).strip() if query is not None else "")
+    if not query:
+        return {"success": False, "error": "query is required"}
+    args = {"query": query}
+    if display is not None:
+        args["display"] = int(display)
+    try:
+        payload = _kr_call("search_law", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"search_law failed: {e}"}
+
+
+def get_law_text(mst: str = None, lawId: str = None, jo: str = None, efYd: str = None) -> dict:
+    """Fetch full article text for a Korean law by mst or lawId. jo narrows to one article (e.g. '제38조'); jo='부칙' returns supplementary provisions. efYd resolves the version in force on that date."""
+    mst = (str(mst).strip() if mst is not None else "")
+    lawId = (str(lawId).strip() if lawId is not None else "")
+    if not mst and not lawId:
+        return {"success": False, "error": "mst or lawId is required"}
+    args = {}
+    if mst:
+        args["mst"] = mst
+    if lawId:
+        args["lawId"] = lawId
+    if jo is not None:
+        args["jo"] = str(jo)
+    if efYd is not None:
+        args["efYd"] = str(efYd)
+    try:
+        payload = _kr_call("get_law_text", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"get_law_text failed: {e}"}
+
+
+def get_annexes(lawName: str = None, knd: str = None, bylSeq: str = None, annexNo: str = None, query: str = None, jo: str = None, date: str = None) -> dict:
+    """Fetch an annex or form (별표/서식) for a Korean law, parsed from HWP/HWPX/PDF/XLSX/DOCX."""
+    lawName = (str(lawName).strip() if lawName is not None else "")
+    if not lawName:
+        return {"success": False, "error": "lawName is required"}
+    args = {"lawName": lawName}
+    if knd is not None:
+        args["knd"] = str(knd)
+    if bylSeq is not None:
+        args["bylSeq"] = str(bylSeq)
+    if annexNo is not None:
+        args["annexNo"] = str(annexNo)
+    if query is not None:
+        args["query"] = str(query)
+    if jo is not None:
+        args["jo"] = str(jo)
+    if date is not None:
+        args["date"] = str(date)
+    try:
+        payload = _kr_call("get_annexes", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"get_annexes failed: {e}"}
+
+
+def ordinance_radar(ordinSeq: str = None, id: str = None, ordinanceName: str = None, query: str = None) -> dict:
+    """Check whether a local Korean ordinance's cited parent statute/decree has since been amended, flagging it for review. Identify the ordinance via ordinSeq/id or ordinanceName/query."""
+    args = {}
+    if ordinSeq is not None:
+        args["ordinSeq"] = str(ordinSeq)
+    if id is not None:
+        args["id"] = str(id)
+    if ordinanceName is not None:
+        args["ordinanceName"] = str(ordinanceName)
+    if query is not None:
+        args["query"] = str(query)
+    if not args:
+        return {"success": False, "error": "ordinSeq, id, ordinanceName, or query is required"}
+    try:
+        payload = _kr_call("ordinance_radar", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"ordinance_radar failed: {e}"}
+
+
+def legal_research(
+    query: str = None,
+    task: str = None,
+    scenario: str = None,
+    domain: str = None,
+    articles: list = None,
+    parentLaw: str = None,
+    mst: str = None,
+    lawId: str = None,
+    fromDate: str = None,
+    toDate: str = None,
+    includeHistory: bool = None,
+    text: str = None,
+    maxClauses: int = None,
+) -> dict:
+    """Multi-step Korean legal research combining several of the MCP's APIs for one complex question.
+
+    task selects the research shape: full_research (default, natural-language fallback),
+    law_system, action_basis, dispute_prep, amendment_track, ordinance_compare,
+    procedure_detail, or document_review (requires text instead of query).
+    """
+    args = {}
+    if query is not None:
+        args["query"] = str(query)
+    if task is not None:
+        args["task"] = str(task)
+    if scenario is not None:
+        args["scenario"] = str(scenario)
+    if domain is not None:
+        args["domain"] = str(domain)
+    if articles is not None:
+        args["articles"] = articles
+    if parentLaw is not None:
+        args["parentLaw"] = str(parentLaw)
+    if mst is not None:
+        args["mst"] = str(mst)
+    if lawId is not None:
+        args["lawId"] = str(lawId)
+    if fromDate is not None:
+        args["fromDate"] = str(fromDate)
+    if toDate is not None:
+        args["toDate"] = str(toDate)
+    if includeHistory is not None:
+        args["includeHistory"] = bool(includeHistory)
+    if text is not None:
+        args["text"] = text
+    if maxClauses is not None:
+        args["maxClauses"] = int(maxClauses)
+    if (task or "full_research") == "document_review" and not text:
+        return {"success": False, "error": "text is required when task='document_review'"}
+    if (task or "full_research") != "document_review" and not query:
+        return {"success": False, "error": "query is required unless task='document_review'"}
+    try:
+        payload = _kr_call("legal_research", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"legal_research failed: {e}"}
+
+
+def legal_analysis(
+    mode: str = None,
+    text: str = None,
+    caseNumber: str = None,
+    lawName: str = None,
+    jo: str = None,
+    date: str = None,
+    maxCitations: int = None,
+    display: int = None,
+    deepScan: bool = None,
+    includeOrdinances: bool = None,
+    includeMermaid: bool = None,
+    amendments: list = None,
+    title: str = None,
+    outputPath: str = None,
+) -> dict:
+    """Verify, analyze, or diff Korean legal citations/provisions.
+
+    mode='verify_citations' (text required) cross-checks statute/case citations in a block of text
+    against the official DB to catch hallucinated citations. mode='cite_check' (caseNumber required)
+    traces whether a judgment has since been overturned/superseded. mode='applicable_law'
+    (lawName+date required) resolves the version of a law in force on a given date.
+    mode='impact_map' (lawName+jo required) builds a reverse citation graph for one article.
+    mode='amendment_table' (lawName+amendments required) builds a statutory amendment comparison table.
+    """
+    mode = (str(mode).strip() if mode is not None else "")
+    if not mode:
+        return {"success": False, "error": "mode is required"}
+    args = {"mode": mode}
+    if text is not None:
+        args["text"] = text
+    if caseNumber is not None:
+        args["caseNumber"] = str(caseNumber)
+    if lawName is not None:
+        args["lawName"] = str(lawName)
+    if jo is not None:
+        args["jo"] = str(jo)
+    if date is not None:
+        args["date"] = str(date)
+    if maxCitations is not None:
+        args["maxCitations"] = int(maxCitations)
+    if display is not None:
+        args["display"] = int(display)
+    if deepScan is not None:
+        args["deepScan"] = bool(deepScan)
+    if includeOrdinances is not None:
+        args["includeOrdinances"] = bool(includeOrdinances)
+    if includeMermaid is not None:
+        args["includeMermaid"] = bool(includeMermaid)
+    if amendments is not None:
+        args["amendments"] = amendments
+    if title is not None:
+        args["title"] = str(title)
+    if outputPath is not None:
+        args["outputPath"] = str(outputPath)
+    try:
+        payload = _kr_call("legal_analysis", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"legal_analysis failed: {e}"}
+
+
+def search_decisions(domain: str = None, query: str = None, display: int = None, page: int = None, sort: str = None, options: dict = None) -> dict:
+    """Search Korean court decisions / administrative interpretations / tribunal rulings across 23 domains (e.g. 'precedent', 'constitutional', 'tax_tribunal', 'ftc')."""
+    domain = (str(domain).strip() if domain is not None else "")
+    if not domain:
+        return {"success": False, "error": "domain is required"}
+    args = {"domain": domain}
+    if query is not None:
+        args["query"] = str(query)
+    if display is not None:
+        args["display"] = int(display)
+    if page is not None:
+        args["page"] = int(page)
+    if sort is not None:
+        args["sort"] = str(sort)
+    if options is not None:
+        args["options"] = options
+    try:
+        payload = _kr_call("search_decisions", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"search_decisions failed: {e}"}
+
+
+def get_decision_text(domain: str = None, id: str = None, full: bool = None, options: dict = None) -> dict:
+    """Fetch the full text of one decision/interpretation/ruling from search_decisions by domain + id."""
+    domain = (str(domain).strip() if domain is not None else "")
+    id = (str(id).strip() if id is not None else "")
+    if not domain or not id:
+        return {"success": False, "error": "domain and id are required"}
+    args = {"domain": domain, "id": id}
+    if full is not None:
+        args["full"] = bool(full)
+    if options is not None:
+        args["options"] = options
+    try:
+        payload = _kr_call("get_decision_text", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"get_decision_text failed: {e}"}
+
+
+def discover_tools_kr(intent: str = None) -> dict:
+    """Discover the Korean Law MCP's 80+ specialized tools (tax tribunal, customs, constitutional court, treaties, etc.) by intent/category keyword."""
+    intent = (str(intent).strip() if intent is not None else "")
+    if not intent:
+        return {"success": False, "error": "intent is required"}
+    args = {"intent": intent}
+    try:
+        payload = _kr_call("discover_tools", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"discover_tools_kr failed: {e}"}
+
+
+def execute_tool_kr(tool_name: str = None, params: dict = None) -> dict:
+    """Run one of the Korean Law MCP's specialized tools (found via discover_tools_kr) by name and arguments."""
+    tool_name = (str(tool_name).strip() if tool_name is not None else "")
+    if not tool_name:
+        return {"success": False, "error": "tool_name is required"}
+    args = {"tool_name": tool_name, "params": params or {}}
+    try:
+        payload = _kr_call("execute_tool", args)
+        return {"success": True, **payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"execute_tool_kr failed: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # UK (England & Wales) document drafting — the UK sibling of generate_legal_document,
 # which is Philippine-only. Layouts follow the Practice Direction on Pre-Action Conduct (para 6),
 # CPR PD 32 (paras 17-20, witness statements), the Statutory Declarations Act 1835 and the Powers

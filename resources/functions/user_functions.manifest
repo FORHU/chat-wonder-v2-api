@@ -2047,5 +2047,450 @@
         }
       }
     }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "search_law",
+      "description": "Search Korean statutes, local ordinances (자치법규), and administrative rules (행정규칙) by name keyword via the Korean Law MCP to obtain a lawId/mst for get_law_text/get_annexes/ordinance_radar. Falls back to ordinance/rule search automatically on zero hits for a statute-style query.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Law/ordinance/rule name to search, e.g. '관세법' (Customs Act)"
+          },
+          "display": {
+            "type": "integer",
+            "description": "Max results (default 50)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "get_law_text",
+      "description": "Fetch the full article text of a Korean law via the Korean Law MCP. Requires mst or lawId from search_law. Use jo to narrow to one article (e.g. '제38조', '제148조의2'); jo='부칙' returns the supplementary provisions. Required before stating what a provision says — search_law alone is not enough.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mst": {
+            "type": "string",
+            "description": "Law serial number (MST) from a search_law result"
+          },
+          "lawId": {
+            "type": "string",
+            "description": "Law ID from a search_law result"
+          },
+          "jo": {
+            "type": "string",
+            "description": "Article number in natural form, e.g. '제38조', '제148조의2', or '부칙' for supplementary provisions"
+          },
+          "efYd": {
+            "type": "string",
+            "description": "Reference or effective date (YYYYMMDD). Resolves to whichever version was in force on that date, including under an earlier name of the law. Omit for the current text."
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "get_annexes",
+      "description": "Fetch an annex table or form (별표/서식) for a Korean law via the Korean Law MCP, parsed from HWP/HWPX/PDF/XLSX/DOCX. Fee schedules, fine tables, and technical standards are frequently in annexes rather than the article text itself.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lawName": {
+            "type": "string",
+            "description": "Law name, e.g. '관세법'. May include the annex directly, e.g. '... 별표4'"
+          },
+          "knd": {
+            "type": "string",
+            "enum": ["1", "2", "3", "4", "5"],
+            "description": "Kind filter: 1=annex table, 2=form, 3=supplementary-provision annex, 4=supplementary-provision form, 5=all"
+          },
+          "bylSeq": {
+            "type": "string",
+            "description": "Annex serial number if already known, e.g. '000300'"
+          },
+          "annexNo": {
+            "type": "string",
+            "description": "Annex number in natural form, e.g. '4', '별표4', '제4호'"
+          },
+          "query": {
+            "type": "string",
+            "description": "Narrow by annex title when the number is unknown, e.g. '과태료'"
+          },
+          "jo": {
+            "type": "string",
+            "description": "The article the annex is delegated from, e.g. '제38조', used to narrow when both are known"
+          },
+          "date": {
+            "type": "string",
+            "description": "Reference date (YYYY-MM-DD). Fetches the annex version in force on that date rather than the current one."
+          }
+        },
+        "required": [
+          "lawName"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "ordinance_radar",
+      "description": "Check a Korean local ordinance against amendments to the parent statute/decree it cites via the Korean Law MCP: extracts the cited parent law from the ordinance text, compares effective dates, and flags the ordinance for review if its parent law was amended after the ordinance took effect. Identify the ordinance by ordinSeq/id or by ordinanceName/query.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ordinSeq": {
+            "type": "string",
+            "description": "Local ordinance serial number"
+          },
+          "id": {
+            "type": "string",
+            "description": "Alias for ordinSeq"
+          },
+          "ordinanceName": {
+            "type": "string",
+            "description": "Ordinance name to search for and use the first match, e.g. '서울특별시 광진구 주차장 설치 및 관리 조례'"
+          },
+          "query": {
+            "type": "string",
+            "description": "Alias for ordinanceName — natural-language ordinance name search"
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "legal_research",
+      "description": "Multi-step Korean legal research via the Korean Law MCP, combining several of its APIs in parallel for one complex question. task selects the shape: full_research (default fallback for an unclear natural-language question), law_system (statute+decree+rule 3-tier structure with delegations and annexes), action_basis (legal basis for an administrative action/permit, with interpretations/precedents/tribunal rulings), dispute_prep (appeal/litigation prep across precedents and tribunal decisions), amendment_track (amendment history / old-vs-new comparison), ordinance_compare (nationwide ordinance comparison + parent-law conformity), procedure_detail (procedure/fees/forms), or document_review (contract/clause risk review against applicable law — requires text instead of query).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Natural-language question, law name, or keyword. Required for every task except document_review."
+          },
+          "task": {
+            "type": "string",
+            "enum": [
+              "full_research",
+              "law_system",
+              "action_basis",
+              "dispute_prep",
+              "amendment_track",
+              "ordinance_compare",
+              "procedure_detail",
+              "document_review"
+            ],
+            "description": "Research type. Defaults to full_research when omitted."
+          },
+          "scenario": {
+            "type": "string",
+            "enum": [
+              "delegation",
+              "impact",
+              "penalty",
+              "timeline",
+              "time_travel",
+              "compliance",
+              "customs",
+              "action_plan",
+              "manual"
+            ],
+            "description": "Extended scenario; auto-detected from the query when omitted. Only certain scenarios are valid for a given task."
+          },
+          "domain": {
+            "type": "string",
+            "enum": ["tax", "labor", "privacy", "competition", "general"],
+            "description": "dispute_prep only: specialist tribunal domain. Auto-detected when omitted."
+          },
+          "articles": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "law_system only: specific article numbers to include, e.g. ['제38조']"
+          },
+          "parentLaw": {
+            "type": "string",
+            "description": "ordinance_compare only: the parent statute name. Auto-searched when omitted."
+          },
+          "mst": {
+            "type": "string",
+            "description": "amendment_track only: law serial number, if already known"
+          },
+          "lawId": {
+            "type": "string",
+            "description": "amendment_track only: law ID, if already known"
+          },
+          "fromDate": {
+            "type": "string",
+            "description": "time_travel scenario: comparison start date, YYYYMMDD"
+          },
+          "toDate": {
+            "type": "string",
+            "description": "time_travel scenario: comparison end date, YYYYMMDD"
+          },
+          "includeHistory": {
+            "type": "boolean",
+            "description": "amendment_track only: include the full per-article amendment history since enactment. Default false — this section can consume the whole response budget and truncate the old-vs-new comparison table."
+          },
+          "text": {
+            "type": "string",
+            "description": "document_review only, required: the full contract/terms text to review"
+          },
+          "maxClauses": {
+            "type": "integer",
+            "description": "document_review only: max clauses to analyze (default 15)"
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "legal_analysis",
+      "description": "Verify, analyze, or diff Korean legal citations and provisions via the Korean Law MCP. mode='verify_citations' (text required) cross-checks statute/case citations found in a block of text against the official database — use this to catch hallucinated citations before they reach the user. mode='cite_check' (caseNumber required) traces whether a judgment has since been overturned or superseded. mode='applicable_law' (lawName+date required) resolves the exact version of a law in force on a given date, including under an earlier name. mode='impact_map' (lawName+jo required) builds a reverse citation graph of everything that cites one article. mode='amendment_table' (lawName+amendments required) builds a statutory new-vs-old amendment comparison table.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "verify_citations",
+              "cite_check",
+              "applicable_law",
+              "impact_map",
+              "amendment_table"
+            ],
+            "description": "Analysis type"
+          },
+          "text": {
+            "type": "string",
+            "description": "verify_citations only, required: text containing citations to verify"
+          },
+          "caseNumber": {
+            "type": "string",
+            "description": "cite_check only, required: case number, e.g. '2013다61381'"
+          },
+          "lawName": {
+            "type": "string",
+            "description": "applicable_law / impact_map / amendment_table: law name, e.g. '민법'. Accepts abbreviations and former names."
+          },
+          "jo": {
+            "type": "string",
+            "description": "impact_map required, applicable_law optional: article number, natural form (e.g. '제103조') or 6-digit JO code"
+          },
+          "date": {
+            "type": "string",
+            "description": "applicable_law only, required: the reference date (e.g. '2023-05-10')"
+          },
+          "maxCitations": {
+            "type": "integer",
+            "description": "verify_citations only: max citations to verify (default 15)"
+          },
+          "display": {
+            "type": "integer",
+            "description": "cite_check only: max follow-on cases to show (default 20)"
+          },
+          "deepScan": {
+            "type": "boolean",
+            "description": "cite_check only: deep-scan top follow-on judgments for reversal/overrule signals (default true)"
+          },
+          "includeOrdinances": {
+            "type": "boolean",
+            "description": "impact_map only: include nationwide ordinance citations in the fan-out (default true)"
+          },
+          "includeMermaid": {
+            "type": "boolean",
+            "description": "impact_map only: include a Mermaid graph of the citation network (default true)"
+          },
+          "amendments": {
+            "type": "array",
+            "description": "amendment_table only, required: the amended articles to build the comparison table from",
+            "items": {
+              "type": "object",
+              "properties": {
+                "jo": {
+                  "type": "string",
+                  "description": "Article number, e.g. '제22조'"
+                },
+                "text": {
+                  "type": "string",
+                  "description": "The article's post-amendment text"
+                },
+                "currentText": {
+                  "type": "string",
+                  "description": "The article's current text, for an ordinance/rule/unpublished bill not already in the database"
+                }
+              },
+              "required": ["text"]
+            }
+          },
+          "title": {
+            "type": "string",
+            "description": "amendment_table only: table title. Defaults to the law name."
+          },
+          "outputPath": {
+            "type": "string",
+            "description": "amendment_table only, local/self-hosted runs only: path to save a .hwpx file"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "search_decisions",
+      "description": "Search Korean court decisions, administrative interpretations, and tribunal rulings via the Korean Law MCP across 23 domains (court precedent, constitutional court, tax tribunal, customs, National Tax Service, Ministry of Employment and Labor, Ministry of the Interior, other ministries, Fair Trade Commission, Personal Information Protection Commission, National Labor Relations Commission, industrial-accident and employment-insurance appeal boards, Anti-Corruption Commission, school/public-corp/public-institution rules, treaties, and English translations of Korean law).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "enum": [
+              "precedent", "interpretation", "tax_tribunal", "customs", "nts", "moel", "mois",
+              "ministry", "constitutional", "admin_appeal", "ftc", "pipc", "nlrc", "iaciac",
+              "eiac", "acr", "appeal_review", "acr_special", "school", "public_corp",
+              "public_inst", "treaty", "english_law"
+            ],
+            "description": "Which domain to search"
+          },
+          "query": {
+            "type": "string",
+            "description": "Search keyword. For domain='precedent', this matches the case name by default — set options.search='both' to also match the judgment body."
+          },
+          "display": {
+            "type": "integer",
+            "description": "Results per page (default 20, max 100)"
+          },
+          "page": {
+            "type": "integer",
+            "description": "Page number (default 1)"
+          },
+          "sort": {
+            "type": "string",
+            "description": "Sort order: lasc/ldes/dasc/ddes/nasc/ndes"
+          },
+          "options": {
+            "type": "object",
+            "description": "Domain-specific filters, e.g. for precedent: {court, caseNumber, fromDate, toDate, search}; for ministry: {ministry (required, e.g. 'molit' or '국토교통부'), search, explYd}; for treaty: {cls, natCd, eftYd, concYd}. See the domain description for the right shape."
+          }
+        },
+        "required": [
+          "domain"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "get_decision_text",
+      "description": "Fetch the full text of one decision/interpretation/ruling from a search_decisions result via the Korean Law MCP, by domain and id. full=false (default) returns a progressively condensed body (holding/summary sections are always returned in full); full=true returns the complete text.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "enum": [
+              "precedent", "interpretation", "tax_tribunal", "customs", "nts", "moel", "mois",
+              "ministry", "constitutional", "admin_appeal", "ftc", "pipc", "nlrc", "iaciac",
+              "eiac", "acr", "appeal_review", "acr_special", "school", "public_corp",
+              "public_inst", "treaty", "english_law"
+            ],
+            "description": "Which domain the id came from"
+          },
+          "id": {
+            "type": "string",
+            "description": "Serial number/id from the matching search_decisions result"
+          },
+          "full": {
+            "type": "boolean",
+            "description": "Return the complete text instead of the condensed body. Default false."
+          },
+          "options": {
+            "type": "object",
+            "description": "Domain-specific options, e.g. treaty: {chrClsCd}, english_law: {mst, lawName}, ministry: {ministry}"
+          }
+        },
+        "required": [
+          "domain",
+          "id"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "discover_tools_kr",
+      "description": "Discover the Korean Law MCP's 80+ specialized tools (tax tribunal, customs, constitutional court, treaties, terminology, and more) by intent or category keyword. Use before execute_tool_kr when none of the core tools cover what's needed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "intent": {
+            "type": "string",
+            "description": "What you're looking for, e.g. '공정위' (Fair Trade Commission), '조약' (treaty), '용어' (terminology)"
+          }
+        },
+        "required": [
+          "intent"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "persona": "legal_kr",
+    "function": {
+      "name": "execute_tool_kr",
+      "description": "Run one of the Korean Law MCP's specialized tools (found via discover_tools_kr) by exact name and a params object.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tool_name": {
+            "type": "string",
+            "description": "Exact specialized tool name, as returned by discover_tools_kr"
+          },
+          "params": {
+            "type": "object",
+            "description": "Arguments to pass to that specialized tool, per its own schema"
+          }
+        },
+        "required": [
+          "tool_name",
+          "params"
+        ]
+      }
+    }
   }
 ]

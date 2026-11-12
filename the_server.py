@@ -44,6 +44,7 @@ from juris_mcp.client import get_client as get_juris_mcp_client
 from uk_legal_mcp.client import get_client as get_uk_legal_mcp_client
 from uk_legal_mcp import urls as uk_urls
 from uk_legal_mcp.authorities import authorities_from_pool as uk_authorities_from_pool
+from korean_law_mcp.client import get_client as get_korean_law_mcp_client
 from legal_citations import apply_legal_citation_pipeline, collect_tool_result_text_corpus, select_related_cases
 from attribution_check import attribution_check_enabled
 from exhibit_quotes import exhibit_texts, unquote_exhibit_misquotes
@@ -99,6 +100,7 @@ _context.legal_library_url: str = os.getenv("LEGAL_LIBRARY_URL", "").rstrip("/")
 # display-only field doesn't show blank while the actual client is happily using the default.
 _context.juris_mcp_url: str = (os.getenv("JURIS_MCP_URL") or "https://juris.ph/mcp").rstrip("/")
 _context.uk_legal_mcp_url: str = (os.getenv("UK_LEGAL_MCP_URL") or "https://uk-legal-mcp.fly.dev/mcp").rstrip("/")
+_context.korean_law_mcp_url: str = (os.getenv("KOREAN_LAW_MCP_URL") or "https://mcp.gomdori.app/law").rstrip("/")
 _context.temperature: float = 1.0
 _context.informed: bool = True
 _context.show_clues: list = []
@@ -612,9 +614,34 @@ def process_persona(user_input: str, jurisdiction: str = None):
     filtered_tools = None
     addendum_override = None
     _uk_jurisdiction = (jurisdiction or "").strip().upper() == "UK"
+    _kr_jurisdiction = (jurisdiction or "").strip().upper() == "KR"
+
+    _explicit_kr_tag = user_input.lower().startswith("[legal ai kr]")
+    if _explicit_kr_tag or (user_input.lower().startswith("[legal ai]") and _kr_jurisdiction):
+        persona = "legal_kr"
+        user_input = user_input[13:].strip() if _explicit_kr_tag else user_input[10:].strip()
+        legal_kr_whitelist = [
+            "search_law",
+            "get_law_text",
+            "get_annexes",
+            "ordinance_radar",
+            "legal_research",
+            "legal_analysis",
+            "search_decisions",
+            "get_decision_text",
+            "discover_tools_kr",
+            "execute_tool_kr",
+            "get_case_document",
+        ]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in legal_kr_whitelist]
+        try:
+            with open("resources/prompts/legal_prompt_kr.txt", "r", encoding="utf-8") as f:
+                addendum_override = f.read()
+        except Exception as e:
+            logging.error(f"Failed to load legal_prompt_kr.txt: {e}")
 
     _explicit_uk_tag = user_input.lower().startswith("[legal ai uk]")
-    if _explicit_uk_tag or (user_input.lower().startswith("[legal ai]") and _uk_jurisdiction):
+    if persona != "legal_kr" and (_explicit_uk_tag or (user_input.lower().startswith("[legal ai]") and _uk_jurisdiction)):
         persona = "legal_uk"
         user_input = user_input[13:].strip() if _explicit_uk_tag else user_input[10:].strip()
         legal_uk_whitelist = [
@@ -883,7 +910,7 @@ def process_persona(user_input: str, jurisdiction: str = None):
         # solicitor and, as of the advice refinement, may explain the client's general UK rights
         # with real citations — but never assesses THEIR case, predicts an outcome, or tells them
         # what to do (that stays legal_uk-only). Deliberately outside every
-        # `persona in ("legal", "legal_uk")` guardrail gate: no verifier/refine loop, no doctrine
+        # `persona in ("legal", "legal_uk", "legal_kr")` guardrail gate: no verifier/refine loop, no doctrine
         # guards, no mind map, no model override from that gate — those exist to police *applied*
         # legal argument, which intake doesn't do. The citation gate is reused directly as a pure
         # function (see _finalize_intake_citations), not via that gate.
@@ -1418,6 +1445,18 @@ def _redact_document_ids(text: str, state) -> str:
     return text
 
 
+def _legal_jurisdiction_for_addendum(addendum_override) -> str:
+    """Which jurisdiction's addendum is active, from its distinguishing header line.
+
+    Used everywhere a call site only has the addendum text in hand (not the persona string)
+    to pick the right _finalize_legal_response(jurisdiction=...) branch."""
+    if addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override:
+        return "UK"
+    if addendum_override and "KOREAN LEGAL ASSISTANT MODE" in addendum_override:
+        return "KR"
+    return "PH"
+
+
 def _finalize_legal_response(
     text: str,
     search_results,
@@ -1445,8 +1484,12 @@ def _finalize_legal_response(
         out = append_missing_prefetched_mentions(out, search_results)
         if jurisdiction == "UK":
             out = append_uk_doctrine_guards(out, user_input, case_forum_text(state))
-        else:
+        elif jurisdiction == "PH":
             out = append_critical_doctrine_guards(out, user_input)
+        # KR: no Korea-specific doctrine guards exist yet — neither the PH nor UK guard set
+        # applies (a Korean-law answer picking up a Civil Code Art. 33 or PACE 1984 reminder
+        # would be the same class of bug CONTEXT.md's "UK Doctrine Guards" note already fixed
+        # for UK). Add Korean guards here if/when they're written.
         from legal_citations import (
             dedupe_repeated_citation_links as _dedupe_repeated_citation_links,
             format_legal_citation_links as _format_legal_citation_links,
@@ -1756,7 +1799,7 @@ def _document_context_injection(persona: str, document_context: str) -> str:
     should ignore for unrelated requests); ilovelawyer-api's legal/legal_uk personas reuse this
     same generic field for case summaries, ranked document excerpts, transcript context, and
     triage notes — none of that should be labeled or gated as a cosmetics catalog."""
-    if persona in ("legal", "legal_uk"):
+    if persona in ("legal", "legal_uk", "legal_kr"):
         label = (
             "\n\n[CASE CONTEXT — background for this legal consultation: case summary, "
             "relevant document excerpts, and any triage notes]\n"
@@ -1997,14 +2040,45 @@ def execute_function_call(function_call: dict, session_id: str = None):
                 _cached = _cd_state.case_document_cache[_cd_id]
                 if not _cached.get("partial"):
                     _cached_case_document = _cached
+        # Same-turn dedup for Korean Law MCP calls: the model has been observed calling
+        # legal_research twice with the identical query in one turn (confirmed live,
+        # 2026-11-11). Unlike juris.ph/the UK MCP there's no per-row id to dedupe the pool by
+        # after the fact, and every call burns against the server's shared public quota (see
+        # korean-mcp-limitations-briefing), so an identical (tool, args) pair this turn is
+        # served from cache instead of re-calling the MCP. state.turn_kr_call_cache is reset
+        # per turn (reason_loop/streaming_reason_loop), so a later turn still calls fresh.
+        _KR_DEDUP_TOOLS = {
+            "search_law", "get_law_text", "get_annexes", "ordinance_radar",
+            "legal_research", "legal_analysis", "search_decisions", "get_decision_text",
+            "discover_tools_kr", "execute_tool_kr",
+        }
+        _kr_cache = None
+        _kr_dedup_key = None
+        _kr_cached_result = None
+        if func_name in _KR_DEDUP_TOOLS and session_id:
+            _kr_state = _context.sessions.get(session_id)
+            _kr_cache = getattr(_kr_state, "turn_kr_call_cache", None) if _kr_state is not None else None
+            if _kr_cache is not None:
+                try:
+                    _kr_dedup_key = (func_name, json.dumps(func_args, sort_keys=True, ensure_ascii=False))
+                except TypeError:
+                    _kr_dedup_key = None
+                if _kr_dedup_key is not None and _kr_dedup_key in _kr_cache:
+                    _kr_cached_result = _kr_cache[_kr_dedup_key]
+                    logging.info("korean_law_mcp %s deduped (identical call already made this turn)", func_name)
+
         if _cached_case_document is not None:
             result = {"success": True, "partial": False, **_cached_case_document}
+        elif _kr_cached_result is not None:
+            result = _kr_cached_result
         else:
             if func_name == "draft_pleading_uk" and session_id and not func_args.get("authorities"):
                 _derived = _derive_uk_pleading_authorities(session_id)
                 if _derived:
                     func_args["authorities"] = _derived
             result = globals()[func_name](**func_args)
+            if _kr_dedup_key is not None and _kr_cache is not None:
+                _kr_cache[_kr_dedup_key] = result
         _LEGAL_RESULT_TOOLS = {
             "search_jurisprudence",
             "search_republic_acts",
@@ -2114,6 +2188,44 @@ def execute_function_call(function_call: dict, session_id: str = None):
                     uk_urls.enrich_resolve_result(result, state.last_search_legal_results or [])
                 entry = {k: v for k, v in result.items() if k != "success"}
                 if entry:
+                    existing = list(state.last_search_legal_results or [])
+                    existing.append(entry)
+                    state.last_search_legal_results = existing
+        _KR_LEGAL_RESULT_TOOLS = {
+            "search_law",
+            "get_law_text",
+            "get_annexes",
+            "ordinance_radar",
+            "legal_research",
+            "legal_analysis",
+            "search_decisions",
+            "get_decision_text",
+        }
+        if func_name in _KR_LEGAL_RESULT_TOOLS and session_id and isinstance(result, dict) and result.get("success") and _kr_cached_result is None:
+            # _kr_cached_result is None here means this was a fresh call, not a same-turn dedup
+            # hit — a deduped call's result is already in the pool from its first call, so
+            # pooling it again would just show the identical source twice in the Sources panel.
+            # Korean Law MCP result shapes vary by tool just as much as the UK MCP's do
+            # (law text, annex extracts, decision bodies, research composites) — same posture
+            # as the UK pool above: keep the whole per-call payload as one pool entry and let
+            # collect_tool_result_urls()/the quote corpus walk it recursively, always
+            # accumulating rather than overwriting.
+            #
+            # Unlike juris.ph and the UK MCP, this server returns plain formatted text for every
+            # tool, not structured JSON (confirmed live) -- so there is no "title"/"url" key for
+            # _search_results_to_source_metadata to read, and every entry showed up in the chat
+            # UI's Sources panel as "Untitled (no url)" despite real retrieval happening. There is
+            # also no stable per-article/per-case public URL to attach (law.go.kr has no
+            # documented deep-link scheme) -- see legal_prompt_kr.txt's citation convention, which
+            # cites by name/number instead of a link. korean_law_mcp.labels derives a display
+            # title only; "url" is deliberately left unset.
+            state = _context.sessions.get(session_id)
+            if state is not None:
+                entry = {k: v for k, v in result.items() if k != "success"}
+                if entry:
+                    from korean_law_mcp.labels import title_for as _kr_title_for
+
+                    entry["title"] = _kr_title_for(func_name, func_args if isinstance(func_args, dict) else {}, result.get("text") or "")
                     existing = list(state.last_search_legal_results or [])
                     existing.append(entry)
                     state.last_search_legal_results = existing
@@ -2786,6 +2898,32 @@ def _trace_label_for_call(tool_name: str, args: dict) -> str:
             return f"HMRC Guidance Search: {q}" if q else "HMRC Guidance Search"
         if tool_name.startswith("uk_legal_mcp_"):
             return "Checking legal reference tools"
+        if tool_name == "search_law":
+            q = args.get("query", "")
+            return f"Korean Law Search: {q}" if q else "Korean Law Search"
+        if tool_name == "get_law_text":
+            jo = args.get("jo", "")
+            return f"Reading law text: {jo}" if jo else "Reading law text"
+        if tool_name == "get_annexes":
+            law_name = args.get("lawName", "")
+            return f"Fetching annex: {law_name}" if law_name else "Fetching annex"
+        if tool_name == "ordinance_radar":
+            name = args.get("ordinanceName") or args.get("query", "")
+            return f"Ordinance Radar: {name}" if name else "Ordinance Radar"
+        if tool_name == "legal_research":
+            q = args.get("query", "")
+            return f"Korean Legal Research: {q}" if q else "Korean Legal Research"
+        if tool_name == "legal_analysis":
+            mode = args.get("mode", "")
+            return f"Verifying citations ({mode})" if mode else "Verifying citations"
+        if tool_name == "search_decisions":
+            q = args.get("query", "")
+            return f"Decision Search: {q}" if q else "Decision Search"
+        if tool_name == "get_decision_text":
+            did = args.get("id", "")
+            return f"Fetching decision: {did}" if did else "Fetching decision"
+        if tool_name in ("discover_tools_kr", "execute_tool_kr"):
+            return "Checking specialized legal tools"
     except Exception:
         pass
     # Last-resort fallback for any tool not mapped above — still readable
@@ -2851,7 +2989,7 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
             )
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
             summary=_no_rag_summary)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
     _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
@@ -2962,7 +3100,7 @@ def _confidence_sources(persona: str, state) -> list:
     (there is no citation/search infrastructure on this persona to reuse, but the formula
     doesn't need one — "sourced" here means "echoes something the client themselves said")."""
     sources: list = []
-    if persona in ("legal", "legal_uk"):
+    if persona in ("legal", "legal_uk", "legal_kr"):
         # Everything the pool holds for each row, not just title+snippet: UK entries keep the
         # whole tool payload (legislation_get_section's full section text, judgment paragraphs)
         # and PH get_* entries keep court_reasoning/full_text. Title+snippet alone left 67 of 71
@@ -2999,11 +3137,11 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
     supported with this model."). LEGAL_TEMPERATURE only applies on the Chat
     Completions fallback path (LEGAL_USE_RESPONSES_API=false), read directly there.
     """
-    if persona not in ("legal", "legal_uk"):
+    if persona not in ("legal", "legal_uk", "legal_kr"):
         return None, None, None, None
     use_responses = _legal_use_responses_api()
-    suffix = "UK" if persona == "legal_uk" else "PH"
-    # PH and UK are configured independently via *_PH / *_UK env vars (empty counts as unset).
+    suffix = "UK" if persona == "legal_uk" else ("KR" if persona == "legal_kr" else "PH")
+    # PH, UK, and KR are configured independently via *_PH / *_UK / *_KR env vars (empty counts as unset).
     reasoning_effort = (
         os.getenv(f"LEGAL_REASONING_EFFORT_{suffix}")
         or ("low" if use_responses else "none")
@@ -3099,6 +3237,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     messages = prepare_chat_messages(state, query, addendum_override=addendum_override, persona=persona)
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
+    state.turn_kr_call_cache = {}
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
     if persona == "intake":
         _model, _reasoning_effort = _intake_model_override(persona)
@@ -3107,11 +3246,11 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     # auto-approves function calls, so /chat and the websocket path never
     # surface a pending_approval response.
     _auto_approval = True
-    if persona in ("legal", "legal_uk"):
+    if persona in ("legal", "legal_uk", "legal_kr"):
         _chain_kwargs["verify"] = make_legal_verifier(
             state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
         )
-    if persona in ("legal", "legal_uk") and _legal_use_responses_api():
+    if persona in ("legal", "legal_uk", "legal_kr") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
@@ -3478,6 +3617,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
+    state.turn_kr_call_cache = {}
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
     if persona == "intake":
         _model, _reasoning_effort = _intake_model_override(persona)
@@ -3486,11 +3626,11 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     # auto-approves function calls, so /chat and the websocket path never
     # surface a pending_approval response.
     _auto_approval = True
-    if persona in ("legal", "legal_uk") and not getattr(state, "skip_legal_verify", False):
+    if persona in ("legal", "legal_uk", "legal_kr") and not getattr(state, "skip_legal_verify", False):
         _chain_kwargs["verify"] = make_legal_verifier(
             state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
         )
-    if persona in ("legal", "legal_uk") and _legal_use_responses_api():
+    if persona in ("legal", "legal_uk", "legal_kr") and _legal_use_responses_api():
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
@@ -3571,6 +3711,28 @@ async def health_check():
         }
         overall = "degraded"
 
+    # Korean Law MCP (live legal source for the [legal ai kr] persona)
+    try:
+        t0 = time.monotonic()
+        probe = get_korean_law_mcp_client().call_tool(
+            "search_law", {"query": "민법", "display": 1}
+        )
+        ok = isinstance(probe, dict)
+        checks["korean_law_mcp"] = {
+            "status": "ok" if ok else "error",
+            "url": _context.korean_law_mcp_url,
+            "latency_ms": round((time.monotonic() - t0) * 1000),
+        }
+        if not ok:
+            overall = "degraded"
+    except Exception as e:
+        checks["korean_law_mcp"] = {
+            "status": "error",
+            "url": _context.korean_law_mcp_url,
+            "detail": str(e),
+        }
+        overall = "degraded"
+
     # S3 (document uploads — optional)
     try:
         legal_bucket = os.getenv("LEGAL_S3_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME")
@@ -3638,6 +3800,7 @@ async def get_config():
         "legal_library_url": _context.legal_library_url,
         "juris_mcp_url": _context.juris_mcp_url,
         "uk_legal_mcp_url": _context.uk_legal_mcp_url,
+        "korean_law_mcp_url": _context.korean_law_mcp_url,
     }
 
 
@@ -3662,7 +3825,7 @@ async def get_version():
             "enabled": confidence.confidence_enabled(),
             "schema_version": confidence.SCHEMA_VERSION,
             "entropy_models": list(model_registry.logprob_capable_prefixes()),
-            "verification_personas": ["legal", "legal_uk"],
+            "verification_personas": ["legal", "legal_uk", "legal_kr"],
         },
     }
 
@@ -3694,7 +3857,7 @@ def chat(request: ChatRequest):
     if session_id and session_id in _context.sessions:
         # See the websocket path: prepare_chat_messages reads this off `state`.
         _context.sessions[session_id].reply_language = request.reply_language
-    if persona in ("legal", "legal_uk") and session_id and session_id in _context.sessions:
+    if persona in ("legal", "legal_uk", "legal_kr") and session_id and session_id in _context.sessions:
         # Plain `def chat` runs in Starlette's threadpool, not the main event loop, so this
         # thread has none of its own to await onto — asyncio.run gives sync_active_case_documents
         # a loop to offload get_case_document's blocking HTTP calls onto (see its docstring).
@@ -3795,9 +3958,9 @@ def chat(request: ChatRequest):
     if request.user_id:
         state.user_id = request.user_id
 
-    if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
+    if persona in ("legal", "legal_uk", "legal_kr") and (state.active_case_documents or state.case_document_manifest):
         addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
-    if persona in ("legal", "legal_uk") and getattr(state, "case_damages", None):
+    if persona in ("legal", "legal_uk", "legal_kr") and getattr(state, "case_damages", None):
         addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_damages_injection(state.case_damages)
 
     if not _context.openai_api_key:
@@ -3805,7 +3968,7 @@ def chat(request: ChatRequest):
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -3980,11 +4143,11 @@ def chat(request: ChatRequest):
             state.last_search_legal_results,
             legal_mode=_legal_mode,
             user_input=user_input,
-            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+            jurisdiction=_legal_jurisdiction_for_addendum(addendum_override),
             state=state,
         )
     related_cases: list = []
-    if persona in ("legal", "legal_uk", "intake") and state.last_search_legal_results:
+    if persona in ("legal", "legal_uk", "legal_kr", "intake") and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
         related_cases = select_related_cases(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
@@ -4009,7 +4172,7 @@ def chat(request: ChatRequest):
 
     reasoning = None
     decisions = None
-    if persona in ("legal", "legal_uk") and final_text:
+    if persona in ("legal", "legal_uk", "legal_kr") and final_text:
         reasoning = _generate_reasoning_explanation(
             user_input, final_text, state.last_search_legal_results, state.last_turn_tool_log, state,
         )
@@ -4033,7 +4196,7 @@ def chat(request: ChatRequest):
         "places_results": state.last_maps_result if persona == "maps" and state.last_maps_result else None,
         "nav_result": state.last_nav_result if persona == "nav" and state.last_nav_result else None,
         "tailor_result": state.last_tailor_result if persona == "tailor" and state.last_tailor_result else None,
-        "generated_file": state.last_generated_file_result if persona in ("legal", "legal_uk") and state.last_generated_file_result else None,
+        "generated_file": state.last_generated_file_result if persona in ("legal", "legal_uk", "legal_kr") and state.last_generated_file_result else None,
     }
 
 
@@ -4151,7 +4314,7 @@ def approve(request: ApproveRequest):
             state.last_search_legal_results,
             legal_mode=_legal_mode,
             user_input=state.prompt[-1] if state.prompt else "",
-            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+            jurisdiction=_legal_jurisdiction_for_addendum(addendum_override),
             state=state,
         )
     state.generated.append(final_text)
@@ -4326,7 +4489,7 @@ async def chat_stream(websocket: WebSocket):
                             state.last_search_legal_results,
                             legal_mode=_legal_mode,
                             user_input=user_input,
-                            jurisdiction="UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH",
+                            jurisdiction=_legal_jurisdiction_for_addendum(addendum_override),
                             state=state,
                         )
                     if _legal_mode or _is_intake_resume:
@@ -4385,7 +4548,7 @@ async def chat_stream(websocket: WebSocket):
             # through both reason loops would touch far more code than this.
             if session_id and session_id in _context.sessions:
                 _context.sessions[session_id].reply_language = request.reply_language
-            if persona in ("legal", "legal_uk"):
+            if persona in ("legal", "legal_uk", "legal_kr"):
                 await sync_active_case_documents(
                     session_id,
                     request.case_document_ids,
@@ -4494,13 +4657,13 @@ async def chat_stream(websocket: WebSocket):
                     persona, request.document_context
                 )
 
-            if persona in ("legal", "legal_uk") and (state.active_case_documents or state.case_document_manifest):
+            if persona in ("legal", "legal_uk", "legal_kr") and (state.active_case_documents or state.case_document_manifest):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_document_injection(state)
-            if persona in ("legal", "legal_uk") and getattr(state, "case_damages", None):
+            if persona in ("legal", "legal_uk", "legal_kr") and getattr(state, "case_damages", None):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_damages_injection(state.case_damages)
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -4591,7 +4754,7 @@ async def chat_stream(websocket: WebSocket):
                     # Legal and intake answers must pass through citation gating (legal also
                     # gets doctrine guards) before the client sees them, so raw chunks are
                     # buffered instead of streamed live for these personas.
-                    if persona not in ("legal", "legal_uk", "intake"):
+                    if persona not in ("legal", "legal_uk", "legal_kr", "intake"):
                         await websocket.send_text(chunk)
                     full_response += chunk
 
@@ -4602,7 +4765,7 @@ async def chat_stream(websocket: WebSocket):
                         final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
                     else:
                         _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
-                        _jurisdiction = "UK" if (addendum_override and "UK LEGAL ASSISTANT MODE" in addendum_override) else "PH"
+                        _jurisdiction = _legal_jurisdiction_for_addendum(addendum_override)
                         final_text = _finalize_legal_response(
                             final_text,
                             state.last_search_legal_results,
@@ -4611,9 +4774,9 @@ async def chat_stream(websocket: WebSocket):
                             jurisdiction=_jurisdiction,
                             state=state,
                         )
-                    if persona in ("legal", "legal_uk", "intake"):
+                    if persona in ("legal", "legal_uk", "legal_kr", "intake"):
                         await websocket.send_text(final_text)
-                    if persona in ("legal", "legal_uk", "intake") and state.last_search_legal_results:
+                    if persona in ("legal", "legal_uk", "legal_kr", "intake") and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                         related_cases = select_related_cases(state.last_search_legal_results)
@@ -4655,7 +4818,7 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[MAPS_DATA]{json.dumps(state.last_maps_result)}")
                 if persona == "tailor" and state.last_tailor_result:
                     await websocket.send_text(f"[TAILOR_DATA]{json.dumps(state.last_tailor_result)}")
-                if persona in ("legal", "legal_uk") and state.last_generated_file_result:
+                if persona in ("legal", "legal_uk", "legal_kr") and state.last_generated_file_result:
                     await websocket.send_text(f"[GENERATED_FILE_DATA]{json.dumps(state.last_generated_file_result)}")
                 # nav emission disabled for stylist — front end handles navigation
                 _ws_t_end = time.time()
@@ -4685,7 +4848,7 @@ async def chat_stream(websocket: WebSocket):
                 # text the reader actually received. Isolated in its own try/except, same
                 # reasoning as above — a telemetry failure must never look like a failed turn to
                 # ilovelawyer-api.
-                if confidence.confidence_enabled() and persona in ("legal", "legal_uk", "intake") and full_response:
+                if confidence.confidence_enabled() and persona in ("legal", "legal_uk", "legal_kr", "intake") and full_response:
                     # confidence.provenance_spans classifies every sentence by FORMULA (lexical
                     # overlap against the sources actually available this turn), not a judge
                     # call — see confidence.py's module docstring for why this replaced two
@@ -4696,7 +4859,7 @@ async def chat_stream(websocket: WebSocket):
                     try:
                         _sources = _confidence_sources(persona, state)
                         _spans = confidence.provenance_spans(final_text, _sources)
-                        if persona in ("legal", "legal_uk"):
+                        if persona in ("legal", "legal_uk", "legal_kr"):
                             _quoted = confidence.quoted_citation_spans(final_text, state.last_search_legal_results)
                             # An href-resolved citation link is a more precise QUOTED signal
                             # than the formula's own lexical-overlap read of the same text, so
@@ -4720,7 +4883,7 @@ async def chat_stream(websocket: WebSocket):
                         )
                 mind_map_task = None
                 try:
-                    if persona in ("legal", "legal_uk") and full_response:
+                    if persona in ("legal", "legal_uk", "legal_kr") and full_response:
                         # Only on a map request (see ChatRequest.mind_map_requested). Started first and
                         # run alongside the other extras, not after them: ilovelawyer-api waits at
                         # most 60s after __END__ for everything below, and this is the biggest call.

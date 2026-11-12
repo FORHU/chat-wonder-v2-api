@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Legal AI Chat — Korean Law MCP routing check</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="confidence-render.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f11;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 14px 20px;
+      background: #16161a;
+      border-bottom: 1px solid #2d2d3a;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-weight: 600;
+      letter-spacing: .4px;
+    }
+    .badge-kr { background: #1a3a2e; color: #34d399; }
+    .badge-mcp { background: #1a2e1a; color: #86efac; }
+    .confidence-toggle {
+      font-size: 11px; padding: 3px 10px; border-radius: 99px; font-weight: 600;
+      background: #1e2430; color: #94a3b8; border: 1px solid #334155; cursor: pointer;
+    }
+    .confidence-toggle.active { background: #1a3a2e; color: #34d399; border-color: #34d399; }
+    .confidence-legend {
+      font-size: 11px; color: #94a3b8; padding: 6px 10px; border-bottom: 1px solid #1e293b;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    }
+    .confidence-legend.confidence-unavailable { color: #64748b; font-style: italic; }
+    .legend-chip { font-size: 10px; padding: 1px 7px; border-radius: 99px; font-weight: 600; }
+    .conf-span, .conf-word { border-radius: 3px; padding: 0 1px; }
+    .confidence-clean-note { font-style: italic; color: #64748b; }
+
+    #status {
+      margin-left: auto;
+      font-size: 12px;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #ef4444;
+      transition: background .3s;
+    }
+    #status-dot.ok { background: #22c55e; }
+
+    .config-bar {
+      padding: 8px 20px;
+      background: #12121a;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: #94a3b8;
+      flex-wrap: wrap;
+    }
+    .config-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .config-bar input[type=text] {
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      color: #e2e8f0;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 13px;
+      width: 220px;
+    }
+    .config-bar input[type=text]:focus { outline: none; border-color: #34d399; }
+    #mcp-url {
+      font-size: 11px;
+      color: #64748b;
+      font-family: ui-monospace, monospace;
+    }
+    #tag-preview {
+      font-size: 11px;
+      color: #64748b;
+      font-family: ui-monospace, monospace;
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      border-radius: 6px;
+      padding: 3px 8px;
+    }
+
+    .samples {
+      padding: 10px 20px;
+      background: #0f0f14;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .samples span.label {
+      font-size: 11px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      font-weight: 700;
+      margin-right: 4px;
+    }
+    .chip {
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      color: #cbd5e1;
+      border-radius: 99px;
+      padding: 5px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .chip:hover { border-color: #34d399; background: #16261f; }
+
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #2d2d3a; border-radius: 99px; }
+
+    .msg { display: flex; flex-direction: column; gap: 6px; max-width: 820px; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+    .translate-btn {
+      background: #16261f;
+      border: 1px solid #1a3a2e;
+      color: #34d399;
+      border-radius: 8px;
+      padding: 3px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .translate-btn:hover { background: #1a3a2e; }
+    .translate-btn:disabled { opacity: .6; cursor: wait; }
+    #translate-input-btn { padding: 10px 14px; font-size: 13px; white-space: nowrap; }
+    .translation {
+      font-size: 13px;
+      color: #a7f3d0;
+      background: #0f1f18;
+      border: 1px solid #1a3a2e;
+      border-radius: 8px;
+      padding: 8px 12px;
+      max-width: 100%;
+      white-space: pre-wrap;
+      display: none;
+    }
+
+    .msg-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      color: #475569;
+    }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.65;
+      font-size: 14px;
+      max-width: 100%;
+      white-space: pre-wrap;
+    }
+    .msg.user .bubble {
+      background: #1a3a2e;
+      color: #a7f3d0;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.assistant .bubble {
+      background: #1a1a24;
+      color: #e2e8f0;
+      border-bottom-left-radius: 4px;
+      border: 1px solid #2d2d3a;
+    }
+
+    .bubble h2 { font-size: 15px; margin: 16px 0 6px; color: #f1f5f9; }
+    .bubble h3 { font-size: 13px; margin: 12px 0 4px; color: #cbd5e1; }
+    .bubble p { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0 6px 20px; }
+    .bubble li { margin: 3px 0; }
+    .bubble strong { color: #f1f5f9; }
+    .bubble code {
+      background: #0f172a;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: "Fira Code", monospace;
+      font-size: 12px;
+      color: #7dd3fc;
+    }
+    .bubble pre { background: #0f172a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+    .bubble pre code { background: none; padding: 0; }
+    .bubble a { color: #34d399; }
+
+    .typing { display: flex; align-items: center; gap: 4px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px;
+      background: #475569;
+      border-radius: 50%;
+      animation: bounce .8s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: .15s; }
+    .typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-6px); }
+    }
+
+    #sources-panel {
+      width: 320px;
+      border-left: 1px solid #1e1e2e;
+      overflow-y: auto;
+      background: #12121a;
+      display: flex;
+      flex-direction: column;
+    }
+    #sources-panel::-webkit-scrollbar { width: 4px; }
+    #sources-panel::-webkit-scrollbar-thumb { background: #2d2d3a; }
+    .sources-header {
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .6px;
+      text-transform: uppercase;
+      color: #475569;
+      border-bottom: 1px solid #1e1e2e;
+      position: sticky; top: 0;
+      background: #12121a;
+    }
+    #sources-list { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .source-card {
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .source-card .s-title { color: #e2e8f0; font-weight: 600; margin-bottom: 3px; }
+    .source-card .s-url {
+      color: #64748b;
+      font-size: 11px;
+      font-family: ui-monospace, monospace;
+      word-break: break-all;
+      margin-top: 4px;
+    }
+    .source-card .s-url.kr-domain { color: #34d399; }
+    .source-card a { color: #34d399; font-size: 11px; text-decoration: none; }
+    .source-card a:hover { text-decoration: underline; }
+    #sources-empty {
+      padding: 24px 16px;
+      color: #475569;
+      font-size: 12px;
+      text-align: center;
+    }
+    #raw-toggle {
+      margin: 0 12px 12px;
+      background: #1a1a24;
+      border: 1px solid #2d2d3a;
+      color: #94a3b8;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    #raw-json {
+      margin: 0 12px 12px;
+      background: #0f172a;
+      border: 1px solid #2d2d3a;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 10px;
+      font-family: ui-monospace, monospace;
+      color: #94a3b8;
+      white-space: pre-wrap;
+      word-break: break-all;
+      display: none;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    .input-area {
+      padding: 16px 20px;
+      border-top: 1px solid #1e1e2e;
+      background: #12121a;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    #input {
+      flex: 1;
+      background: #1e1e2e;
+      border: 1px solid #2d2d3a;
+      color: #e2e8f0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      resize: none;
+      min-height: 42px;
+      max-height: 160px;
+      line-height: 1.5;
+      font-family: inherit;
+    }
+    #input:focus { outline: none; border-color: #34d399; }
+    #input::placeholder { color: #475569; }
+    #send-btn {
+      background: #059669;
+      border: none;
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+      white-space: nowrap;
+    }
+    #send-btn:hover { background: #047857; }
+    #send-btn:disabled { background: #1e2a40; color: #475569; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Legal AI Chat</h1>
+  <span class="badge badge-kr" id="persona-badge">Korean Legal Mode</span>
+  <span class="badge badge-mcp" id="mcp-badge">MCP: …</span>
+  <span id="confidence-toggle-container"></span>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</header>
+<div id="confidence-legend-container"></div>
+
+<div class="config-bar">
+  <label>
+    Server:
+    <input type="text" id="server-url" value="localhost:8000" placeholder="host:port" />
+  </label>
+  <span id="tag-preview">tag: [legal ai kr]</span>
+  <span id="mcp-url">MCP: …</span>
+</div>
+
+<div class="samples">
+  <span class="label">Try (KR)</span>
+  <button type="button" class="chip" data-q="What does Article 750 of the Korean Civil Code (민법 제750조) say about tort liability?">Civil Code art. 750</button>
+  <button type="button" class="chip" data-q="Check whether the Seoul Gwangjin-gu parking ordinance still conforms to its parent statute.">Ordinance conformity</button>
+  <button type="button" class="chip" data-q="What are the penalties for drunk driving under Korean law?">DUI penalties</button>
+  <button type="button" class="chip" data-q="What are the VAT-equivalent (부가가치세) rules for small businesses in Korea?">VAT rules</button>
+</div>
+
+<div class="main">
+  <div id="messages">
+    <div class="msg assistant">
+      <span class="msg-label">Legal AI</span>
+      <div class="bubble" id="intro-bubble">
+        This demo checks whether <code>[legal ai kr]</code> actually routes to the <strong>Korean Law MCP</strong>
+        (mcp.gomdori.app/law) instead of falling back to juris.ph, the UK Legal MCP, or a general chat answer.<br><br>
+        The <strong>MCP badge</strong> in the header and the <strong>Sources</strong> panel on the right show which
+        backend actually answered (KR domains like <code>law.go.kr</code> and article citations like
+        <code>민법 제750조</code>). Use "Show raw source JSON" to inspect the exact payload.
+      </div>
+    </div>
+  </div>
+
+  <div id="sources-panel">
+    <div class="sources-header">Sources</div>
+    <button id="raw-toggle" type="button">Show raw source JSON</button>
+    <pre id="raw-json"></pre>
+    <div id="sources-list">
+      <div id="sources-empty">Sources from MCP searches will appear here.</div>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <textarea id="input" placeholder="Ask a Korean legal question…" rows="1"></textarea>
+  <button id="translate-input-btn" type="button" class="translate-btn" title="Translate the draft in place (KO↔EN)">🌐 Translate</button>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let sessionId = null;
+  let ws = null;
+  let currentBubble = null;
+  let currentRaw = "";
+  let lastBubble = null; // the most recently finished turn's bubble — see finishAssistantTurn
+  let lastRaw = "";
+  let isStreaming = false;
+  let koreanLawMcpUrl = "";
+  let lastRawSources = null;
+  ConfidenceRender.renderToggle($("confidence-toggle-container"), function () {
+    const bubble = currentBubble || lastBubble;
+    const raw = currentBubble ? currentRaw : lastRaw;
+    if (bubble) ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+  });
+
+  function tagFor(text) {
+    return `[legal ai kr] ${text}`;
+  }
+
+  // Free, no-key MyMemory translation API -- unlike Google's unofficial translate_a/single
+  // endpoint (tried first, confirmed live it sends no CORS header and fails with "Failed to
+  // fetch" from a browser page), MyMemory responds with Access-Control-Allow-Origin: * and
+  // actually works from client-side JS. Anonymous use caps each request around ~500 characters,
+  // so long legal replies are split into chunks and translated sequentially, then rejoined.
+  // Auto-detects direction: Hangul present -> KO to EN, otherwise EN to KO.
+  function splitForTranslation(text, maxLen = 450) {
+    const chunks = [];
+    let remaining = text;
+    while (remaining.length > maxLen) {
+      let cut = remaining.lastIndexOf("\n\n", maxLen);
+      if (cut < maxLen * 0.4) cut = remaining.lastIndexOf(". ", maxLen);
+      if (cut < maxLen * 0.4) cut = maxLen;
+      chunks.push(remaining.slice(0, cut + 1));
+      remaining = remaining.slice(cut + 1);
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks;
+  }
+
+  async function translateChunk(text, source, target) {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${source}|${target}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`translate HTTP ${res.status}`);
+    const data = await res.json();
+    const translated = data && data.responseData && data.responseData.translatedText;
+    if (!translated) throw new Error("empty translation response");
+    return translated;
+  }
+
+  async function translateText(text) {
+    const hasHangul = /[가-힣]/.test(text);
+    const source = hasHangul ? "ko" : "en";
+    const target = hasHangul ? "en" : "ko";
+    const chunks = splitForTranslation(text);
+    const out = [];
+    for (const chunk of chunks) {
+      out.push(await translateChunk(chunk, source, target));
+    }
+    return out.join(" ");
+  }
+
+  function addTranslateButton(container, getText) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "translate-btn";
+    btn.textContent = "🌐 Translate";
+
+    const transDiv = document.createElement("div");
+    transDiv.className = "translation";
+
+    let translated = null;
+    btn.addEventListener("click", async () => {
+      const showing = transDiv.style.display === "block";
+      if (showing) {
+        transDiv.style.display = "none";
+        btn.textContent = "🌐 Translate";
+        return;
+      }
+      if (translated === null) {
+        btn.textContent = "Translating…";
+        btn.disabled = true;
+        try {
+          translated = await translateText(getText());
+        } catch (e) {
+          translated = `(translation failed: ${e.message})`;
+        }
+        btn.disabled = false;
+      }
+      transDiv.textContent = translated;
+      transDiv.style.display = "block";
+      btn.textContent = "🌐 Hide translation";
+      scrollBottom();
+    });
+
+    container.appendChild(btn);
+    container.appendChild(transDiv);
+  }
+
+  function updateMcpUrl() {
+    $("mcp-url").textContent = `MCP: ${koreanLawMcpUrl || "…"}`;
+  }
+
+  $("input").addEventListener("input", () => {
+    const el = $("input");
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  });
+
+  $("server-url").addEventListener("change", connect);
+
+  $("raw-toggle").addEventListener("click", () => {
+    const el = $("raw-json");
+    const showing = el.style.display === "block";
+    el.style.display = showing ? "none" : "block";
+    $("raw-toggle").textContent = showing ? "Show raw source JSON" : "Hide raw source JSON";
+    if (!showing) el.textContent = lastRawSources ? JSON.stringify(lastRawSources, null, 2) : "(none yet)";
+  });
+
+  async function connect() {
+    const host = $("server-url").value.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    $("server-url").value = host;
+    const base = `http://${host}`;
+    setStatus("connecting");
+
+    try {
+      const [sessionRes, configRes] = await Promise.all([
+        fetch(`${base}/session-id`),
+        fetch(`${base}/config`),
+      ]);
+      sessionId = (await sessionRes.json()).session_id;
+      const config = await configRes.json();
+      koreanLawMcpUrl = config.korean_law_mcp_url || "";
+      updateMcpUrl();
+    } catch (e) {
+      setStatus("error", "Cannot reach server");
+      return;
+    }
+
+    const wsUrl = `ws://${host}/chat-stream`;
+    if (ws) ws.close();
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setStatus("ok", "Connected");
+      $("send-btn").disabled = false;
+    };
+
+    ws.onclose = () => {
+      setStatus("error", "Disconnected");
+      $("send-btn").disabled = true;
+    };
+
+    ws.onerror = () => setStatus("error", "WebSocket error");
+
+    ws.onmessage = ({ data }) => handleChunk(data);
+  }
+
+  function handleChunk(chunk) {
+    if (chunk === "__END__") {
+      finishAssistantTurn();
+      return;
+    }
+
+    if (chunk.startsWith("[Sources] ")) {
+      try {
+        const sources = JSON.parse(chunk.slice(10));
+        lastRawSources = sources;
+        renderSources(sources);
+        if ($("raw-json").style.display === "block") {
+          $("raw-json").textContent = JSON.stringify(sources, null, 2);
+        }
+      } catch {}
+      return;
+    }
+
+    if (chunk.startsWith("[RELATED_CASES]")) return;
+
+    // [STRUCTURED_DATA] and [DONE] fire in the post-__END__ extras phase, same phase the
+    // confidence envelope now arrives in — no branch for either would make them fall into the
+    // bubble's text accumulation below and render as a second, garbled "message" after the
+    // real answer (same gap legal_uk_chat_demo.html had to fix).
+    if (chunk.startsWith("[STRUCTURED_DATA]")) return;
+    if (chunk === "[DONE]") return;
+
+    // Glass-box research steps bypass this persona's buffering, same as the production
+    // websocket handler.
+    if (chunk.startsWith("[TRACE]")) return;
+
+    // Live per-token confidence telemetry — guard kept for parity with model_tester_demo.html
+    // even though this persona only ever gets the post-__END__ envelope in production.
+    if (ConfidenceRender.handleLiveFrame(chunk)) return;
+
+    if (chunk.startsWith("{") && chunk.includes("pending_approval")) {
+      try {
+        const ev = JSON.parse(chunk);
+        if (ev.status === "pending_approval") {
+          appendSystem(`Tool <strong>${escHtml(ev.tool_name)}</strong> needs approval (unexpected — HITL should be auto-approved).`);
+          return;
+        }
+      } catch {}
+    }
+
+    // The post-__END__ { "type": "confidence", ... } envelope, plus a defensive catch-all for
+    // any other JSON-shaped frame — without this, an unrecognized envelope falls into the
+    // bubble's text accumulation below and corrupts it.
+    if (chunk.startsWith("{")) {
+      try {
+        const obj = JSON.parse(chunk);
+        if (obj && obj.type) {
+          const bubble = currentBubble || lastBubble;
+          const raw = currentBubble ? currentRaw : lastRaw;
+          if (ConfidenceRender.handleEnvelope(obj) && bubble) {
+            ConfidenceRender.render(bubble, raw, $("confidence-legend-container"), marked.parse);
+          }
+          return;
+        }
+      } catch (e) {
+        // Not JSON after all — fall through to plain-text handling below.
+      }
+    }
+
+    if (chunk.startsWith("[Tool]")) {
+      appendSystem(escHtml(chunk));
+      return;
+    }
+
+    if (chunk.startsWith("[Error]")) {
+      appendSystem(`<span style="color:#f87171">${escHtml(chunk)}</span>`);
+      isStreaming = false;
+      $("send-btn").disabled = false;
+      removeTyping();
+      return;
+    }
+
+    if (!currentBubble) {
+      currentBubble = createAssistantBubble();
+    }
+    removeTyping();
+    currentRaw += chunk;
+    currentBubble.textContent = currentRaw;
+    scrollBottom();
+  }
+
+  function finishAssistantTurn() {
+    // The confidence envelope arrives after __END__ (post-__END__ extras phase), so keep a
+    // reference to the just-finished bubble/text for handleChunk's envelope branch above.
+    lastBubble = currentBubble;
+    lastRaw = currentRaw;
+    if (currentBubble && currentRaw) {
+      if (ConfidenceRender.on) {
+        ConfidenceRender.render(currentBubble, currentRaw, $("confidence-legend-container"), marked.parse);
+      } else {
+        try {
+          currentBubble.innerHTML = marked.parse(currentRaw);
+        } catch (e) {
+          currentBubble.textContent = currentRaw;
+        }
+      }
+      const finishedRaw = currentRaw;
+      const wrap = currentBubble.parentElement;
+      if (wrap) addTranslateButton(wrap, () => finishedRaw);
+    }
+    currentBubble = null;
+    currentRaw = "";
+    isStreaming = false;
+    $("send-btn").disabled = false;
+    removeTyping();
+  }
+
+  function send() {
+    const text = $("input").value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+    const userInput = tagFor(text);
+
+    appendUserMsg(text);
+    clearSources();
+    ConfidenceRender.resetTurn();
+    $("input").value = "";
+    $("input").style.height = "auto";
+    $("send-btn").disabled = true;
+    isStreaming = true;
+    appendTyping();
+
+    ws.send(JSON.stringify({ type: "chat", session_id: sessionId, user_input: userInput }));
+  }
+
+  $("send-btn").addEventListener("click", send);
+  $("input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  $("translate-input-btn").addEventListener("click", async () => {
+    const el = $("input");
+    const text = el.value.trim();
+    if (!text) return;
+    const btn = $("translate-input-btn");
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Translating…";
+    try {
+      el.value = await translateText(text);
+      el.dispatchEvent(new Event("input")); // re-run the auto-resize handler
+    } catch (e) {
+      appendSystem(`<span style="color:#f87171">Translation failed: ${escHtml(e.message)}</span>`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+
+  document.querySelectorAll(".samples .chip").forEach(btn => {
+    btn.addEventListener("click", () => {
+      $("input").value = btn.dataset.q || "";
+      $("input").dispatchEvent(new Event("input"));
+      send();
+    });
+  });
+
+  function appendUserMsg(text) {
+    const div = document.createElement("div");
+    div.className = "msg user";
+    div.innerHTML = `<span class="msg-label">You</span><div class="bubble"><span style="opacity:.55">${escHtml("[legal ai kr] ")}</span>${escHtml(text)}</div>`;
+    $("messages").appendChild(div);
+    addTranslateButton(div, () => text);
+    scrollBottom();
+  }
+
+  function createAssistantBubble() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.innerHTML = `<span class="msg-label">Legal AI</span><div class="bubble"></div>`;
+    $("messages").appendChild(wrap);
+    scrollBottom();
+    return wrap.querySelector(".bubble");
+  }
+
+  function appendTyping() {
+    removeTyping();
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.id = "typing-wrap";
+    wrap.innerHTML = `<span class="msg-label">Legal AI</span>
+      <div class="bubble typing"><span></span><span></span><span></span></div>`;
+    $("messages").appendChild(wrap);
+    scrollBottom();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing-wrap");
+    if (t) t.remove();
+  }
+
+  function appendSystem(html) {
+    const div = document.createElement("div");
+    div.style.cssText = "font-size:12px;color:#64748b;padding:4px 8px;align-self:center;";
+    div.innerHTML = html;
+    $("messages").appendChild(div);
+    scrollBottom();
+  }
+
+  function scrollBottom() {
+    const el = $("messages");
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  function domainClass(url) {
+    if (!url) return "";
+    if (/law\.go\.kr|scourt\.go\.kr|gomdori/i.test(url)) return "kr-domain";
+    return "";
+  }
+
+  function renderSources(sources) {
+    const list = $("sources-list");
+    list.innerHTML = "";
+    if (!sources || !sources.length) {
+      list.innerHTML = '<div id="sources-empty">No sources found.</div>';
+      return;
+    }
+    sources.forEach(s => {
+      const href = s.source_url || s.url || "";
+      const link = href
+        ? `<a href="${escHtml(href)}" target="_blank" rel="noopener noreferrer">Open ↗</a>`
+        : "";
+      const card = document.createElement("div");
+      card.className = "source-card";
+      card.innerHTML = `
+        <div class="s-title">${escHtml(s.title || "Untitled")}</div>
+        <div class="s-url ${domainClass(href)}">${escHtml(href || "(no url)")}</div>
+        ${link}
+      `;
+      list.appendChild(card);
+    });
+  }
+
+  function clearSources() {
+    $("sources-list").innerHTML = '<div id="sources-empty">Searching…</div>';
+  }
+
+  function setStatus(state, label) {
+    $("status-dot").className = state === "ok" ? "ok" : "";
+    $("status-text").textContent = label || (state === "ok" ? "Connected" : state);
+  }
+
+  connect();
+</script>
+</body>
+</html>
