@@ -157,6 +157,15 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("never a formula you repeat identically every time", flat)
         self.assertIn("never stack more than one of these in a single message", flat)
 
+    def test_the_prompt_requires_answering_what_the_user_actually_asked(self):
+        # Regression for a live bug (2026-11-12): user attached a file and asked "what is in the
+        # picture?"; intake ignored the question entirely and opened with the forced jurisdiction
+        # question instead, with no acknowledgment at all that the user had asked anything.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("answer it, or say plainly that you don't have enough yet", flat)
+        self.assertIn("Never respond to a direct question with an unrelated", flat)
+
     def test_the_prompt_lets_jurisdiction_be_worked_out_from_an_unambiguous_town(self):
         # Regression for a live bug (2026-11-03): told "I'm in Manchester", the model still asked
         # "Which UK jurisdiction does this concern?" as a blocking question, even though the
