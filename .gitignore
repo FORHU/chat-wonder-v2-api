@@ -799,3 +799,6 @@ venv
 # Local virtualenv and stray SSM command payloads (accidentally committed in de97e55)
 .venv/
 ssm-params.json
+
+# Local scratch git worktrees (superpowers subagent-driven-development)
+.worktrees/
