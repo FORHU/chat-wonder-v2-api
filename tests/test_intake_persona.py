@@ -167,6 +167,34 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("unambiguously sits in", flat)
         self.assertIn("not having listened", flat)
 
+    def test_the_prompt_creates_the_case_on_the_first_reply_even_from_one_sentence(self):
+        # Regression for #973: "I lost my job and I am from Manchester" left the placeholder case
+        # untouched (raw title, area Other, no part of the UK) — the prompt only asked for a first-
+        # reply write after "a full account", which one sentence never looked like.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("The case starts as a placeholder", flat)
+        self.assertIn("even if it's a single sentence", flat)
+        self.assertNotIn("If they opened with a full account", flat)
+
+    def test_the_prompt_never_reads_an_unset_part_of_the_uk_as_outside_the_uk(self):
+        # #973: ilovelawyer-api now tells "not set" apart from "outside the UK (the client said
+        # so)". The AI must ask once for the first and only record the second with outside_uk.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("it never means outside the UK", flat)
+        self.assertIn("once, as the one question of an early reply", flat)
+        self.assertIn("`outside_uk` set to true only if they've plainly said", flat)
+        self.assertIn("A nationality or an adjective", flat)
+
+    def test_the_create_case_tool_offers_outside_uk_as_a_boolean(self):
+        _persona, _cleaned, tools, _addendum = srv.process_persona("[intake] hello")
+        create_case = next(t for t in tools if t["function"]["name"] == "create_case")
+        props = create_case["function"]["parameters"]["properties"]
+        self.assertEqual(props["outside_uk"]["type"], "boolean")
+        self.assertIn("not known yet", props["outside_uk"]["description"])
+        self.assertIn("send outside_uk instead", props["uk_jurisdiction"]["description"])
+
     def test_the_prompt_lets_side_be_worked_out_when_the_story_makes_it_obvious(self):
         # Regression for a live bug (2026-11-03): told "my landlord hasn't fixed my boiler... I
         # want him to fix it", the model still asked "Are you the tenant bringing the complaint
@@ -410,6 +438,33 @@ class CreateCaseTests(unittest.TestCase):
             result = self.create_case(title="x", uk_jurisdiction="Manchester", case_id="c1", user_id="u1")
         self.assertEqual(result["success"], True)
         self.assertNotIn("ukJurisdiction", captured["body"])
+
+    def _body_for(self, **kwargs):
+        captured = {}
+        self._patch_http_patch_json(lambda url, body, headers: captured.update(body=body) or {"id": "c1"})
+        with patch.dict(os.environ, {"ILOVELAWYER_API_BASE": "http://localhost:3001", "CHAT_WONDER_API_KEY": "test-key"}):
+            result = self.create_case(case_id="c1", user_id="u1", **kwargs)
+        self.assertEqual(result["success"], True)
+        return captured["body"]
+
+    def test_sends_outside_the_uk_only_when_the_model_says_so(self):
+        # #973: leaving ukJurisdiction out means "not known yet" to ilovelawyer-api, so outside
+        # the UK has to be said outright.
+        self.assertEqual(self._body_for(outside_uk=True), {"userId": "u1", "outsideUk": True})
+        self.assertEqual(self._body_for(outside_uk="true", title="x")["outsideUk"], True)
+        for not_outside in (False, None, "false"):
+            self.assertNotIn("outsideUk", self._body_for(title="x", outside_uk=not_outside))
+
+    def test_a_uk_jurisdiction_wins_over_outside_uk(self):
+        # ilovelawyer-api 400s the pair, which would lose every other field in the same write.
+        body = self._body_for(title="x", uk_jurisdiction="Scotland", outside_uk=True)
+        self.assertEqual(body["ukJurisdiction"], "Scotland")
+        self.assertNotIn("outsideUk", body)
+
+    def test_never_sends_a_null_uk_jurisdiction(self):
+        # A null would have read as "outside the UK" before #973; the API now ignores it, but
+        # it's never sent at all.
+        self.assertNotIn("ukJurisdiction", self._body_for(title="x"))
 
     def test_normalizes_an_invalid_party_role_instead_of_failing_the_whole_write(self):
         # Regression for a live bug (2026-11-03): the model described the other co-heir with

@@ -1999,7 +1999,7 @@
     "persona": "intake",
     "function": {
       "name": "create_case",
-      "description": "Write the case details you've drafted from the conversation onto the real case record. Call it as soon as you have enough from what the client described to write something real — often on the very first reply, if they opened with a full account of what happened. Don't wait for the whole checklist to be complete. It's fine, and expected, to call it again later once you learn something that corrects or fills in what you first wrote; each call only updates the fields you pass. Never invent a value you weren't told — leave a field out rather than guess it.",
+      "description": "Write the case details you've drafted from the conversation onto the real case record. The case starts as a placeholder (its title is the client's first message, its area 'Other', its part of the UK not set), so call it on your very first reply whenever the client's message gives you anything real to write — a title, an area, or a place — even from a single sentence. Don't wait for the whole checklist to be complete. It's fine, and expected, to call it again later once you learn something that corrects or fills in what you first wrote; each call only updates the fields you pass. Never invent a value you weren't told — leave a field out rather than guess it.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -2018,7 +2018,11 @@
               "Scotland",
               "Northern Ireland"
             ],
-            "description": "Which of these three the case falls under — not the town or city (that's `where`). Work it out from wherever the client is/the matter happened: England or Wales both map to \"England and Wales\". Omit entirely if the client said it happened outside the UK or you don't yet know — never send any other string, the backend rejects anything not in this exact list."
+            "description": "Which of these three the case falls under — not the town or city (that's `where`). Work it out from wherever the client is/the matter happened: England or Wales both map to \"England and Wales\". Omit entirely if you don't yet know, or if the client said it happened outside the UK (send outside_uk instead) — never send any other string, the backend rejects anything not in this exact list."
+          },
+          "outside_uk": {
+            "type": "boolean",
+            "description": "Send true only when the client has plainly said the matter is outside the UK (e.g. it happened in France and they live there). Leaving uk_jurisdiction out does NOT mean outside the UK — it means not known yet — so this is the only way to record it. Never send it with uk_jurisdiction, and never send it because you don't know where the case is: omit both and ask instead."
           },
           "where": {
             "type": "string",

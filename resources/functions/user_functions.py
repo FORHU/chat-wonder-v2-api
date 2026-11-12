@@ -3414,13 +3414,17 @@ def create_case(
     side: str = None,
     others_json: str = None,
     notes: str = None,
+    outside_uk: bool = None,
     case_id: str = None,
     user_id: str = None,
 ) -> dict:
     """Write the case details drafted so far from the conversation onto the real case record in
     ilovelawyer-api. `case_id`/`user_id` are injected from the session, never supplied by the
     model — a missing one here means the injection didn't happen, not that the client left
-    something out, so it's reported as a defensive guard rather than a user-facing failure."""
+    something out, so it's reported as a defensive guard rather than a user-facing failure.
+
+    `outside_uk` is the only way to record "outside the UK": a case with no uk_jurisdiction is
+    "not known yet" to ilovelawyer-api (#973), so leaving uk_jurisdiction out never says it."""
     if not case_id or not user_id:
         return {"success": False, "error": "missing_session_context", "message": "create_case requires case_id and user_id from the session; neither is a model-supplied parameter."}
 
@@ -3458,6 +3462,15 @@ def create_case(
         _logger.warning("create_case dropped invalid uk_jurisdiction=%r (not in %s)", uk_jurisdiction, sorted(_VALID_UK_JURISDICTIONS))
         uk_jurisdiction = None
 
+    # Only ever sent as true: the AI has no business clearing "outside the UK" on its own, and a
+    # real jurisdiction clears it server-side anyway. A jurisdiction wins over it — the API rejects
+    # the pair outright, which would lose every other field in the same write. Models sometimes
+    # send booleans as strings, so "true" counts too.
+    outside_uk = outside_uk is True or (isinstance(outside_uk, str) and outside_uk.strip().lower() == "true")
+    if outside_uk and uk_jurisdiction is not None:
+        _logger.warning("create_case dropped outside_uk=true alongside uk_jurisdiction=%r", uk_jurisdiction)
+        outside_uk = False
+
     base = (os.getenv("ILOVELAWYER_API_BASE") or "").rstrip("/")
     api_key = os.getenv("CHAT_WONDER_API_KEY", "")
     if not base:
@@ -3471,6 +3484,7 @@ def create_case(
         "title": title,
         "areas": case_areas,
         "ukJurisdiction": uk_jurisdiction,
+        "outsideUk": True if outside_uk else None,
         "where": where,
         "side": side,
         "others": others,
