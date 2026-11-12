@@ -163,8 +163,13 @@ class IntakeWiringTests(unittest.TestCase):
         # question instead, with no acknowledgment at all that the user had asked anything.
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
         flat = addendum.replace("\n", " ")
-        self.assertIn("answer it, or say plainly that you don't have enough yet", flat)
+        self.assertIn("answer it first, or say plainly that you don't have enough", flat)
         self.assertIn("Never respond to a direct question with an unrelated", flat)
+        # 2026-11-12 follow-up: answering the question must not mean dropping the interview —
+        # intake should still softly carry it toward what's still needed, just never instead of
+        # answering, and never as a demand that crowds out the answer.
+        self.assertIn("gently carry the conversation toward whatever you still", flat)
+        self.assertIn("not a demand that crowds out what they asked", flat)
 
     def test_the_prompt_lets_jurisdiction_be_worked_out_from_an_unambiguous_town(self):
         # Regression for a live bug (2026-11-03): told "I'm in Manchester", the model still asked
