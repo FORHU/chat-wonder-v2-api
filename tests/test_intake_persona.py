@@ -184,8 +184,17 @@ class IntakeWiringTests(unittest.TestCase):
         flat = addendum.replace("\n", " ")
         self.assertIn("it never means outside the UK", flat)
         self.assertIn("once, as the one question of an early reply", flat)
-        self.assertIn("`outside_uk` set to true only if they've plainly said", flat)
+        self.assertIn("only if they've plainly said it's outside the UK", flat)
         self.assertIn("A nationality or an adjective", flat)
+
+    def test_the_prompt_never_offers_outside_the_uk_as_an_option(self):
+        # There are no lawyers outside the UK, so the AI's question offers the three UK
+        # jurisdictions only; the client app's region buttons match.
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn('never "outside the UK" as an option', flat)
+        self.assertNotIn("Northern Ireland, or outside the UK", flat)
+        self.assertNotIn("Northern  Ireland, or outside the UK", flat)
 
     def test_the_create_case_tool_offers_outside_uk_as_a_boolean(self):
         _persona, _cleaned, tools, _addendum = srv.process_persona("[intake] hello")
