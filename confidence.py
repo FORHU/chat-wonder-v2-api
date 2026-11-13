@@ -331,6 +331,95 @@ def _toks(text: str) -> Set[str]:
 
 
 # ---------------------------------------------------------------------------
+# Claim-unit splitting -- breaks a compound sentence into atomic units at connectives
+# before scoring, so a QUOTED clause trailing (or leading) an UNSOURCED one is never hidden
+# behind a single whole-sentence verdict (found live: the masking case in provenance_spans'
+# own docstring history). Validated as a branch prototype (prototypes/claim_split_batch.py)
+# against 10 realistic + 14 adversarial cases -- see prototypes/NOTES.md for the full verdict
+# -- before being folded in here.
+# ---------------------------------------------------------------------------
+
+# English connectives plausible in UK/legal prose. Sorted longest-first below so
+# "provided that" matches before a bare "that" could ever be considered.
+_CONNECTIVES = [
+    "provided that", "except that", "on the other hand", "notwithstanding",
+    "subject to", "save that", "nevertheless", "nonetheless", "accordingly",
+    "however", "although", "therefore", "whereas", "meanwhile", "though",
+    "unless", "hence", "thus", "while", "but", "yet",
+]
+
+# A connective only marks a genuine clause boundary when it follows a comma/semicolon --
+# "but" mid-noun-phrase ("nothing but the truth") never does.
+_CONN_RE = re.compile(
+    r"[,;]\s+(" + "|".join(re.escape(c) for c in sorted(_CONNECTIVES, key=len, reverse=True)) + r")\b,?\s*",
+    re.IGNORECASE,
+)
+
+# These five subordinators are the ones adversarial testing caught opening a reduced,
+# verbless aside ("although serious,", "while sympathetic...,") rather than a genuine
+# subordinate clause. The others (but, however, therefore, ...) were never observed
+# misfiring this way, even with an unrelated later comma inside the clause they open, so
+# they are left unguarded rather than adding a check with no observed failure to fix.
+_RISKY_SUBORDINATORS = frozenset({"although", "though", "while", "whereas", "yet"})
+
+# A reduced aside omits its own subject ("[being] delayed", "[though it was] sympathetic")
+# and launches straight into an adjective/participle/adverb; a genuine subordinate clause
+# always opens with its own subject (determiner, pronoun, quantifier, or proper noun) first.
+_SUBJECT_STARTERS = frozenset(
+    "the a an this these that those his her their its our your my many some most each "
+    "every any no such he she it they we you i one".split()
+)
+_WORD_FINDER = re.compile(r"[a-zA-Z']+")
+
+
+def _opens_subjectless_aside(sentence: str, after: int) -> bool:
+    """True when the text from `after` (just past a matched connective) to the next comma
+    does NOT open with its own subject -- the structural signature of a reduced
+    parenthetical aside ("although delayed,", "while sympathetic...,") rather than a
+    genuine subordinate clause ("although the claimant appealed,"). Known residual gap,
+    accepted rather than fixed (prototypes/NOTES.md): a genuine clause whose subject is a
+    bare common noun immediately followed by an unrelated comma (e.g. an appositive) is
+    indistinguishable from an aside by this heuristic and gets missed -- that only ever
+    falls back to whole-sentence scoring for the clause in question, never to a wrong tier."""
+    next_comma = sentence.find(",", after)
+    if next_comma == -1:
+        return False
+    window_words = _WORD_FINDER.findall(sentence[after:next_comma])
+    if not window_words:
+        return True
+    first = window_words[0].lower()
+    if first in _SUBJECT_STARTERS:
+        return False
+    # A capitalised first word this far into the sentence is almost certainly a proper
+    # noun acting as a subject ("while Parliament intended..."), not an adjective.
+    return not window_words[0][0].isupper()
+
+
+def _split_into_claim_units(sentence: str) -> List[str]:
+    """Breaks one candidate sentence into atomic claim units at connectives, so a compound
+    sentence is scored per clause instead of hidden behind one whole-sentence verdict. The
+    connective word stays at the START of the unit it introduces ("X, but Y" -> ["X", "but
+    Y"]). Guarded by _opens_subjectless_aside for the five risky subordinators, so a
+    parenthetical aside ("X, although Y, Z") is never torn out as its own confidently-tagged
+    unit. Returns [sentence] unchanged when no genuine boundary is found -- the common case,
+    since most candidate sentences aren't compound."""
+    parts: List[str] = []
+    last = 0
+    for m in _CONN_RE.finditer(sentence):
+        word = m.group(1).lower()
+        if word in _RISKY_SUBORDINATORS and _opens_subjectless_aside(sentence, m.end()):
+            continue  # parenthetical aside -- not a genuine clause boundary, skip it
+        head = sentence[last:m.start()].strip(" ,;")
+        if head:
+            parts.append(head)
+        last = m.start(1)  # next unit starts AT the connective word, not after it
+    tail = sentence[last:].strip(" ,;")
+    if tail:
+        parts.append(tail)
+    return parts if len(parts) > 1 else [sentence]
+
+
+# ---------------------------------------------------------------------------
 # Provenance spans -- the formula
 # ---------------------------------------------------------------------------
 
@@ -487,6 +576,13 @@ def provenance_spans(
     indistinguishable from "checked and clean" (found live, during testing). There is no such
     gap here: the formula always returns a definite classification.
 
+    Each candidate sentence is first broken into atomic claim units at connectives (see
+    _split_into_claim_units) and classified per unit, not per whole sentence -- a compound
+    sentence like "X, but [unsourced opinion]." previously let one clause's QUOTED/SOURCED
+    match cover the other, entirely unrelated, clause (found live, confirmed on a branch
+    prototype before this was folded in). A sentence with no connective boundary yields
+    exactly one unit, so this never changes anything for the common, non-compound case.
+
     Deterministic and free: no network call, no judge, so no "fails open on exception" story is
     needed for the classification step itself -- the only failure mode is a bug, not a flaky
     dependency. Still wrapped by the caller in the same try/except discipline as every other
@@ -501,17 +597,18 @@ def provenance_spans(
     idf = _source_idf(sources)
     norm_sources = [_normalize(s) for s in sources]
     for sentence in sentences:
-        if _is_verbatim_match(sentence, norm_sources, normalized=True):
-            spans.append(Span(quote=sentence, tier="QUOTED", source="provenance",
-                               why="near-verbatim match of an available source"))
-            continue
-        score = _coverage_score(_toks(sentence), idf)
-        if score >= threshold:
-            spans.append(Span(quote=sentence, tier="SOURCED", source="provenance",
-                               why=f"{score:.0%} of its distinctive terms appear in the available sources"))
-        else:
-            spans.append(Span(quote=sentence, tier="UNSOURCED", source="provenance",
-                               why="no available source shares this sentence's distinctive vocabulary"))
+        for unit in _split_into_claim_units(sentence):
+            if _is_verbatim_match(unit, norm_sources, normalized=True):
+                spans.append(Span(quote=unit, tier="QUOTED", source="provenance",
+                                   why="near-verbatim match of an available source"))
+                continue
+            score = _coverage_score(_toks(unit), idf)
+            if score >= threshold:
+                spans.append(Span(quote=unit, tier="SOURCED", source="provenance",
+                                   why=f"{score:.0%} of its distinctive terms appear in the available sources"))
+            else:
+                spans.append(Span(quote=unit, tier="UNSOURCED", source="provenance",
+                                   why="no available source shares this sentence's distinctive vocabulary"))
     return spans
 
 
