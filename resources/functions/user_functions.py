@@ -2283,7 +2283,25 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
             except Exception as e:
                 return {"success": False, "error": f"Failed to parse DOCX: {e}"}
 
-        elif ext in (".mp3", ".wav", ".m4a"):
+        elif ext in (".xlsx", ".xlsm", ".xlam"):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True, read_only=True)
+                sheet_texts = []
+                for ws in wb.worksheets:
+                    rows = []
+                    for row in ws.iter_rows(values_only=True):
+                        if any(cell is not None for cell in row):
+                            rows.append("\t".join("" if cell is None else str(cell) for cell in row))
+                    if rows:
+                        sheet_texts.append(f"--- Sheet: {ws.title} ---\n" + "\n".join(rows))
+                extracted_text = "\n\n".join(sheet_texts)
+            except ImportError:
+                return {"success": False, "error": "Excel library not installed. Run: pip install openpyxl"}
+            except Exception as e:
+                return {"success": False, "error": f"Failed to parse Excel file: {e}"}
+
+        elif ext in (".mp3", ".wav", ".m4a", ".mp4"):
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
                 return {"success": False, "error": "OpenAI API key required for audio transcription."}
@@ -2295,14 +2313,27 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
             except Exception as e:
                 return {"success": False, "error": f"Audio transcription failed: {e}"}
 
-        elif ext in (".png", ".jpg", ".jpeg"):
+        elif ext in (".png", ".jpg", ".jpeg", ".webp", ".heic"):
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
                 return {"success": False, "error": "OpenAI API key required for image OCR."}
             try:
                 import base64, mimetypes
+                if ext == ".heic":
+                    try:
+                        import pillow_heif
+                        from PIL import Image
+                        pillow_heif.register_heif_opener()
+                        image = Image.open(io.BytesIO(contents)).convert("RGB")
+                        buf = io.BytesIO()
+                        image.save(buf, format="JPEG")
+                        contents = buf.getvalue()
+                        mime_type = "image/jpeg"
+                    except ImportError:
+                        return {"success": False, "error": "HEIC library not installed. Run: pip install pillow-heif Pillow"}
+                else:
+                    mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
                 b64 = base64.b64encode(contents).decode("utf-8")
-                mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
                 client = make_openai_client(api_key=api_key)
                 resp = client.chat.completions.create(
                     model="gpt-4o",
@@ -2317,7 +2348,7 @@ def analyze_document(s3_key: str, filename: str = None) -> dict:
                 return {"success": False, "error": f"Image OCR failed: {e}"}
 
         else:
-            return {"success": False, "error": f"Unsupported file type '{ext}'. Supported: PDF, DOCX, TXT, PNG, JPG, MP3, WAV, M4A."}
+            return {"success": False, "error": f"Unsupported file type '{ext}'. Supported: PDF, DOCX, TXT, XLSX, XLSM, XLAM, PNG, JPG, WEBP, HEIC, MP3, WAV, M4A, MP4."}
 
         extracted_text = extracted_text.strip()
         if not extracted_text:
@@ -2439,19 +2470,49 @@ def _uk_extract_document_text(path: str, fname: str, contents: bytes) -> dict:
             return {"error": "DOCX library not installed. Run: pip install python-docx"}
         except Exception as e:
             return {"error": f"Failed to parse DOCX: {e}"}
-    if ext in (".mp3", ".wav", ".m4a", ".png", ".jpg", ".jpeg"):
+    if ext in (".xlsx", ".xlsm", ".xlam"):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True, read_only=True)
+            sheet_texts = []
+            for ws in wb.worksheets:
+                rows = []
+                for row in ws.iter_rows(values_only=True):
+                    if any(cell is not None for cell in row):
+                        rows.append("\t".join("" if cell is None else str(cell) for cell in row))
+                if rows:
+                    sheet_texts.append(f"--- Sheet: {ws.title} ---\n" + "\n".join(rows))
+            return {"text": "\n\n".join(sheet_texts)}
+        except ImportError:
+            return {"error": "Excel library not installed. Run: pip install openpyxl"}
+        except Exception as e:
+            return {"error": f"Failed to parse Excel file: {e}"}
+    if ext in (".mp3", ".wav", ".m4a", ".mp4", ".png", ".jpg", ".jpeg", ".webp", ".heic"):
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             return {"error": "OpenAI API key required for audio transcription and image OCR."}
         from openai import OpenAI
         client = make_openai_client(api_key=api_key)
         try:
-            if ext in (".mp3", ".wav", ".m4a"):
+            if ext in (".mp3", ".wav", ".m4a", ".mp4"):
                 with open(path, "rb") as audio_file:
                     return {"text": client.audio.transcriptions.create(model="whisper-1", file=audio_file).text}
             import base64, mimetypes
+            if ext == ".heic":
+                try:
+                    import pillow_heif
+                    from PIL import Image
+                    pillow_heif.register_heif_opener()
+                    image = Image.open(io.BytesIO(contents)).convert("RGB")
+                    buf = io.BytesIO()
+                    image.save(buf, format="JPEG")
+                    contents = buf.getvalue()
+                    mime_type = "image/jpeg"
+                except ImportError:
+                    return {"error": "HEIC library not installed. Run: pip install pillow-heif Pillow"}
+            else:
+                mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
             b64 = base64.b64encode(contents).decode("utf-8")
-            mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
             resp = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": [
@@ -2462,8 +2523,8 @@ def _uk_extract_document_text(path: str, fname: str, contents: bytes) -> dict:
             )
             return {"text": resp.choices[0].message.content.strip()}
         except Exception as e:
-            return {"error": f"Could not read the {'audio' if ext in ('.mp3', '.wav', '.m4a') else 'image'}: {e}"}
-    return {"error": f"Unsupported file type '{ext}'. Supported: PDF, DOCX, TXT, PNG, JPG, MP3, WAV, M4A."}
+            return {"error": f"Could not read the {'audio' if ext in ('.mp3', '.wav', '.m4a', '.mp4') else 'image'}: {e}"}
+    return {"error": f"Unsupported file type '{ext}'. Supported: PDF, DOCX, TXT, XLSX, XLSM, XLAM, PNG, JPG, WEBP, HEIC, MP3, WAV, M4A, MP4."}
 
 
 def analyze_document_uk(s3_key: str = None, filename: str = None) -> dict:
