@@ -634,6 +634,13 @@ def _extract_meeting_destination(text: str) -> str | None:
     return None
 
 
+# The Case Intake personas: "intake" (UK) and "intake_kr" (Korea). Everything intake-specific
+# downstream — the model override, the intake citation gate, the per-turn [LAWYER_MATCHES]/
+# [CASE_READY] reset and frames, the buffered (not live-streamed) answer — applies to both, so
+# check membership here rather than `persona == "intake"`.
+INTAKE_PERSONAS = ("intake", "intake_kr")
+
+
 def process_persona(user_input: str, jurisdiction: str = None):
     """Detect [legal ai] persona tag. Returns (persona, cleaned_input, filtered_tools, addendum_override).
 
@@ -936,6 +943,36 @@ def process_persona(user_input: str, jurisdiction: str = None):
             "Never show, mention, or repeat any annotation in your response — all annotations are internal data only.\n\n"
             "RESPONSE — after the tool completes, respond with exactly 1 short sentence confirming the outfit has been generated."
         )
+
+    elif user_input.lower().startswith("[intake kr]") or (user_input.lower().startswith("[intake]") and _kr_jurisdiction):
+        # Korean Case Intake: the same consumer-side consultation as "intake" below, for a client
+        # on the KR site — ilovelawyer-api sends the plain "[intake]" tag with jurisdiction "KR"
+        # (same idiom as legal_kr). Same posture as the UK intake: gathers facts for a lawyer,
+        # may explain general rights under Korean law with fetched citations, never assesses the
+        # client's own case. Same downstream handling too (INTAKE_PERSONAS) — only the research
+        # tools and the prompt differ.
+        persona = "intake_kr"
+        user_input = user_input[11:].strip() if user_input.lower().startswith("[intake kr]") else user_input[8:].strip()
+        # Korean Law MCP's fetch-and-search core only: legal_research/legal_analysis build
+        # applied analysis, which intake never does. find_lawyer is left out on purpose: KR
+        # lawyers don't take client requests yet (ilovelawyer-api's CLIENT_REQUESTS_OPEN_TENANTS
+        # is UK-only, and its matching needs a UK jurisdiction), so it could only ever return
+        # nobody. Add it back once KR matching exists. get_case_document stays out for the same
+        # reason as the UK intake's (see below).
+        intake_kr_whitelist = [
+            "search_law",
+            "get_law_text",
+            "search_decisions",
+            "get_decision_text",
+            "mark_case_ready",
+            "create_case",
+        ]
+        filtered_tools = [t for t in _context.all_fun_manifest if t["function"]["name"] in intake_kr_whitelist]
+        try:
+            with open("resources/prompts/intake_prompt_kr.txt", "r", encoding="utf-8") as f:
+                addendum_override = f.read()
+        except Exception as e:
+            logging.error(f"Failed to load intake_prompt_kr.txt: {e}")
 
     elif user_input.lower().startswith("[intake]"):
         # Case Intake: ilovelawyer-client's consumer-side consultation. Gathers facts for a
@@ -1635,6 +1672,9 @@ def summarize_conversation(state, new_history: str):
     except Exception as e:
         logging.error(f"Conversation summary failed: {e}")
 
+_HANGUL_RE = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
+
+
 def prepare_chat_messages(state, query: str, addendum_override: str = None, persona: str = "auto"):
     prevs = ""
     if state.prompt:
@@ -1672,6 +1712,18 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
         # language default, and a 2-4 word guess should never override that.
         if len(query.split()) < 5:
             language = "en"
+        # Korean intake answers in the language the client writes in: Korean to Korean, English to
+        # English. Korean packs a whole answer into very few space-separated words ("월급을 못
+        # 받았어요" is three), so the short-query default above would answer most Korean replies in
+        # English — Hangul is an unambiguous script signal, not a guess.
+        if persona == "intake_kr" and _HANGUL_RE.search(query or ""):
+            language = "ko"
+        # A short reply with no Hangul ("ok", "yes", "3") from someone who has been writing in
+        # Korean stays Korean: the conversation's language is the better signal than three Latin
+        # letters. legal_kr gets the same effect from ilovelawyer-api's Jev reply-language triage,
+        # which the intake path doesn't run (so no reply_language arrives here for it).
+        elif persona == "intake_kr" and len((query or "").split()) < 5 and any(_HANGUL_RE.search(p or "") for p in (state.prompt or [])[-3:]):
+            language = "ko"
 
     system_content = ""
     if addendum_override:
@@ -1702,7 +1754,7 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
     user_content = f"{context}\n\n[Instructions]\nUnless explicitly instructed otherwise, always respond in the `{language}`-locale language.\n"
     user_content += generic_user_metaprompt
     user_content = re.sub(r"\n\s*\n", "\n\n", user_content)
-    if persona == "intake":
+    if persona in INTAKE_PERSONAS:
         # The generic "Question:" framing below is built for Q&A personas where `query` is a
         # new question to answer. In intake, `query` is almost always the user's ANSWER to the
         # assistant's last checklist question — labeling it "Question:" reads to the model as a
@@ -1836,7 +1888,7 @@ def _document_context_injection(persona: str, document_context: str) -> str:
             "\n\n[CASE CONTEXT — background for this legal consultation: case summary, "
             "relevant document excerpts, and any triage notes]\n"
         )
-    elif persona == "intake":
+    elif persona in INTAKE_PERSONAS:
         label = (
             "\n\n[CASE CONTEXT — facts the user already gave when they opened this case (kind "
             "of problem, jurisdiction, parties, notes). Already answered — do not ask for any "
@@ -3021,7 +3073,7 @@ def _broadcast_retrieval_context(state, tools, addendum_override, session_id, qu
             )
         broadcast_trace("retrieval", "RAG not used — LLM relied solely on its training knowledge and conversation history", session_id,
             summary=_no_rag_summary)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "intake": "Case Intake", "intake_kr": "Korean Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     available_tools = tools if tools is not None else _context.fun_manifest
     history_turns = len(state.prompt) if state.prompt else 0
     _history_desc = f"{history_turns} prior message(s)" if history_turns > 0 else "no prior context"
@@ -3232,7 +3284,7 @@ def _intake_model_override(persona: str, session_id: str = None, query: str = ""
     ever turned off, fall back to "none" here too — same posture as _legal_model_override's own
     use_responses fallback — rather than reproduce the crash on the Chat Completions path.
     """
-    if persona != "intake":
+    if persona not in INTAKE_PERSONAS:
         return None, None
     # The "none" fallback must win whenever the Responses API is off, even if
     # INTAKE_REASONING_EFFORT is configured — a real effort value plus tools is the exact
@@ -3281,7 +3333,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     state.turn_tool_calls = 0
     state.turn_kr_call_cache = {}
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query, session_id)
-    if persona == "intake":
+    if persona in INTAKE_PERSONAS:
         _model, _reasoning_effort = _intake_model_override(persona, session_id, query)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
@@ -3297,7 +3349,7 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
-    elif persona == "intake" and _legal_use_responses_api():
+    elif persona in INTAKE_PERSONAS and _legal_use_responses_api():
         # Same reason as legal/legal_uk (_legal_model_override's docstring): intake's tool
         # whitelist is non-empty now, and a real reasoning_effort with function tools on
         # /v1/chat/completions is rejected outright — route through /v1/responses instead,
@@ -3661,7 +3713,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     state.turn_tool_calls = 0
     state.turn_kr_call_cache = {}
     _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query, session_id)
-    if persona == "intake":
+    if persona in INTAKE_PERSONAS:
         _model, _reasoning_effort = _intake_model_override(persona, session_id, query)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
@@ -3677,7 +3729,7 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
-    elif persona == "intake" and _legal_use_responses_api():
+    elif persona in INTAKE_PERSONAS and _legal_use_responses_api():
         # Same reason as reason_loop's non-streaming branch — see _intake_model_override.
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
@@ -4010,7 +4062,7 @@ def chat(request: ChatRequest):
     init_openai_client(state, _context.openai_api_key)
 
     _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
+    _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "intake": "Case Intake", "intake_kr": "Korean Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
     broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
         summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -4176,7 +4228,7 @@ def chat(request: ChatRequest):
 
     state.prompt.append(user_input.strip())
     final_text = (result or "").strip()
-    if persona == "intake":
+    if persona in INTAKE_PERSONAS:
         final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
     else:
         _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
@@ -4189,7 +4241,7 @@ def chat(request: ChatRequest):
             state=state,
         )
     related_cases: list = []
-    if persona in ("legal", "legal_uk", "legal_kr", "intake") and state.last_search_legal_results:
+    if persona in ("legal", "legal_uk", "legal_kr", *INTAKE_PERSONAS) and state.last_search_legal_results:
         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
         related_cases = select_related_cases(state.last_search_legal_results)
     _do_nav_extract = persona == "nav"
@@ -4578,7 +4630,7 @@ async def chat_stream(websocket: WebSocket):
                     # Reset per-turn so a document drafted on turn N doesn't leak into
                     # turn N+1's [GENERATED_FILE_DATA] frame — mirrors /chat's reset.
                     _context.sessions[session_id].last_generated_file_result = {}
-            elif persona == "intake" and session_id and session_id in _context.sessions:
+            elif persona in INTAKE_PERSONAS and session_id and session_id in _context.sessions:
                 # Reset per-turn, same reasoning as legal's last_generated_file_result above —
                 # unlike the stylist persona's last_outfit_ids_result (which has no such reset
                 # and so resends stale ids on every later turn), intake's [LAWYER_MATCHES] and
@@ -4705,7 +4757,7 @@ async def chat_stream(websocket: WebSocket):
                 addendum_override = (addendum_override or "You are a helpful assistant.") + _build_case_damages_injection(state.case_damages)
 
             _tool_count = len(filtered_tools) if filtered_tools is not None else len(_context.fun_manifest)
-            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "intake": "Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
+            _persona_label = {"legal": "Legal AI", "legal_uk": "UK Legal AI", "legal_kr": "Korean Legal AI", "garment": "Garment Stylist", "cosmetics": "Cosmetics Advisor", "maps": "Maps Guide", "nav": "Wayfinder", "stylist": "Miraj", "tailor": "Tailor", "intake": "Case Intake", "intake_kr": "Korean Case Intake", "auto": "General Assistant"}.get(persona, persona.title())
             broadcast_trace("request", f"New turn — session {session_id} — input: {user_input[:120]}", session_id,
                 summary=f"A new question was received.\n\nPersona: {_persona_label} — {_tool_count} tool(s) available.\n\n{_describe_input(_display_query(user_input))}")
 
@@ -4796,14 +4848,14 @@ async def chat_stream(websocket: WebSocket):
                     # Legal and intake answers must pass through citation gating (legal also
                     # gets doctrine guards) before the client sees them, so raw chunks are
                     # buffered instead of streamed live for these personas.
-                    if persona not in ("legal", "legal_uk", "legal_kr", "intake"):
+                    if persona not in ("legal", "legal_uk", "legal_kr", *INTAKE_PERSONAS):
                         await websocket.send_text(chunk)
                     full_response += chunk
 
                 if full_response:
                     state.prompt.append(user_input)
                     final_text = full_response.strip()
-                    if persona == "intake":
+                    if persona in INTAKE_PERSONAS:
                         final_text = _finalize_intake_citations(final_text, state.last_search_legal_results, state)
                     else:
                         _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
@@ -4816,9 +4868,9 @@ async def chat_stream(websocket: WebSocket):
                             jurisdiction=_jurisdiction,
                             state=state,
                         )
-                    if persona in ("legal", "legal_uk", "legal_kr", "intake"):
+                    if persona in ("legal", "legal_uk", "legal_kr", *INTAKE_PERSONAS):
                         await websocket.send_text(final_text)
-                    if persona in ("legal", "legal_uk", "legal_kr", "intake") and state.last_search_legal_results:
+                    if persona in ("legal", "legal_uk", "legal_kr", *INTAKE_PERSONAS) and state.last_search_legal_results:
                         state.source_metadata = _search_results_to_source_metadata(state.last_search_legal_results)
                         await websocket.send_text(f"[Sources] {json.dumps(state.source_metadata)}")
                         related_cases = select_related_cases(state.last_search_legal_results)
@@ -4847,9 +4899,9 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[COSMETICS_IDS]{json.dumps(state.last_cosmetics_ids_result)}")
                 if persona == "garment" and state.last_garment_result:
                     await websocket.send_text(f"[GARMENT_DATA]{json.dumps(state.last_garment_result)}")
-                if persona == "intake" and state.last_find_lawyer_result:
+                if persona in INTAKE_PERSONAS and state.last_find_lawyer_result:
                     await websocket.send_text(f"[LAWYER_MATCHES]{json.dumps(state.last_find_lawyer_result)}")
-                if persona == "intake" and state.last_mark_case_ready:
+                if persona in INTAKE_PERSONAS and state.last_mark_case_ready:
                     await websocket.send_text("[CASE_READY]true")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
                 if _garment_gender in ("MALE", "FEMALE"):
@@ -4890,7 +4942,7 @@ async def chat_stream(websocket: WebSocket):
                 # text the reader actually received. Isolated in its own try/except, same
                 # reasoning as above — a telemetry failure must never look like a failed turn to
                 # ilovelawyer-api.
-                if confidence.confidence_enabled() and persona in ("legal", "legal_uk", "legal_kr", "intake") and full_response:
+                if confidence.confidence_enabled() and persona in ("legal", "legal_uk", "legal_kr", *INTAKE_PERSONAS) and full_response:
                     # confidence.provenance_spans classifies every sentence by FORMULA (lexical
                     # overlap against the sources actually available this turn), not a judge
                     # call — see confidence.py's module docstring for why this replaced two
