@@ -30,6 +30,8 @@ import contextvars
 import llm_usage
 from llm_usage import make_openai_client
 import model_registry
+import model_router
+import routing_overrides
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query, Header
 from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
@@ -3151,7 +3153,7 @@ def _confidence_sources(persona: str, state) -> list:
     return sources
 
 
-def _legal_model_override(persona: str, state=None, query: str = ""):
+def _legal_model_override(persona: str, state=None, query: str = "", session_id: str = None):
     """Legal answers use a stronger model, not the default persona config.
 
     gpt-5.6-terra rejects function tools on /v1/chat/completions unless
@@ -3201,15 +3203,22 @@ def _legal_model_override(persona: str, state=None, query: str = ""):
         base_max_chains + (2 * manifest_len) + per_part * max(0, sub_questions - 1),
         int(os.getenv("LEGAL_MAX_CHAINS_CEILING", "80")),
     )
+    _default_model = os.getenv(f"LEGAL_CHAT_MODEL_{suffix}") or "gpt-5.6-luna"
+    # CW-8: only the MANUAL-pin path is live here -- candidate_models=[] means the AUTO/
+    # Decisions-API race (CW-6 proper) never fires, since that still needs the latency
+    # benchmark gate the plan requires before it's wired in. A MANUAL override is a
+    # deterministic, zero-latency, zero-cost lookup, so it has no such gate.
+    _decision = model_router.decide_turn_model(None, persona, _default_model, candidate_models=[], query=query, session_id=session_id)
+    llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _decision["decision_source"])
     return (
-        os.getenv(f"LEGAL_CHAT_MODEL_{suffix}") or "gpt-5.6-luna",
+        _decision["model"],
         reasoning_effort,
         temperature,
         max_chains,
     )
 
 
-def _intake_model_override(persona: str):
+def _intake_model_override(persona: str, session_id: str = None, query: str = ""):
     """Case Intake uses a stronger model at low reasoning effort, not the default persona config.
 
     Intake now carries a small tool whitelist (the advice refinement — case law/legislation
@@ -3230,8 +3239,11 @@ def _intake_model_override(persona: str):
     # combination that gets rejected on /v1/chat/completions (see docstring above).
     configured = os.getenv("INTAKE_REASONING_EFFORT")
     reasoning_effort = (configured or "low") if _legal_use_responses_api() else "none"
+    _default_model = os.getenv("INTAKE_CHAT_MODEL") or "gpt-5.6-luna"
+    _decision = model_router.decide_turn_model(None, persona, _default_model, candidate_models=[], query=query, session_id=session_id)
+    llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _decision["decision_source"])
     return (
-        os.getenv("INTAKE_CHAT_MODEL") or "gpt-5.6-luna",
+        _decision["model"],
         reasoning_effort,
     )
 
@@ -3268,9 +3280,9 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
     _broadcast_retrieval_context(state, tools, addendum_override, session_id, query=query, persona=persona)
     state.turn_tool_calls = 0
     state.turn_kr_call_cache = {}
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query, session_id)
     if persona == "intake":
-        _model, _reasoning_effort = _intake_model_override(persona)
+        _model, _reasoning_effort = _intake_model_override(persona, session_id, query)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -3648,9 +3660,9 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
     await asyncio.sleep(0)
     state.turn_tool_calls = 0
     state.turn_kr_call_cache = {}
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(persona, state, query, session_id)
     if persona == "intake":
-        _model, _reasoning_effort = _intake_model_override(persona)
+        _model, _reasoning_effort = _intake_model_override(persona, session_id, query)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     # HITL is disabled: every persona (including the untagged "auto" default)
     # auto-approves function calls, so /chat and the websocket path never
@@ -4304,7 +4316,7 @@ def approve(request: ApproveRequest):
     available_manifest = [t for t in _context.fun_manifest if t["function"]["name"] in (tools or [])] if tools else _context.fun_manifest
     _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
     _resume_persona = "legal" if (addendum_override and "LEGAL ASSISTANT MODE" in addendum_override) else "auto"
-    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona, state)
+    _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override(_resume_persona, state, session_id=session_id)
     _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
     if _resume_persona == "legal":
         _chain_kwargs["verify"] = make_legal_verifier(state, query=_resume_query)
@@ -4457,7 +4469,7 @@ async def chat_stream(websocket: WebSocket):
                 full_response = ""
                 _legal_mode = bool(addendum_override and "LEGAL ASSISTANT MODE" in addendum_override)
                 _is_intake_resume = _is_intake_addendum(addendum_override)
-                _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto", state)
+                _model, _reasoning_effort, _temperature, _max_chains = _legal_model_override("legal" if _legal_mode else "auto", state, session_id=session_id)
                 _chain_kwargs = {"max_chains": _max_chains} if _max_chains is not None else {}
                 _resume_query = _display_query(state.prompt[-1]) if state.prompt else ""
                 if _legal_mode:

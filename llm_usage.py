@@ -48,6 +48,18 @@ class TurnUsage:
         self._lock = threading.Lock()
         self._by_model: dict[str, dict[str, int]] = {}
         self.pass_count = 0
+        self._default_routing_mode: Optional[str] = None
+        self._default_decision_source: Optional[str] = None
+
+    def set_routing_info(self, routing_mode: Optional[str], decision_source: Optional[str]) -> None:
+        """Sticky per-turn default, set once right after a routing decision is made (the_server.py's
+        _legal_model_override/_intake_model_override). `add()`'s own call sites (the ~20 OpenAI-call
+        wrappers in this module) have no idea a routing decision happened, so they can't pass these
+        themselves -- every add() for this turn picks these up automatically unless it passes its own
+        (it never does today, but the override exists so a future call site still can)."""
+        with self._lock:
+            self._default_routing_mode = routing_mode
+            self._default_decision_source = decision_source
 
     def add(
         self,
@@ -76,6 +88,8 @@ class TurnUsage:
             total = _int(_get(usage, "total_tokens")) or prompt + completion
             key = model or "unknown"
             with self._lock:
+                routing_mode = routing_mode if routing_mode is not None else self._default_routing_mode
+                decision_source = decision_source if decision_source is not None else self._default_decision_source
                 row = self._by_model.setdefault(
                     key, {"prompt_tokens": 0, "cached_input_tokens": 0,
                           "completion_tokens": 0, "total_tokens": 0, "calls": 0,
