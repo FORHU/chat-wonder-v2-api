@@ -8,23 +8,44 @@
   },
   {
     "persona": "legal_uk",
-    "query": "My landlord has not fixed a broken boiler for three weeks despite repeated requests. What are my options?",
+    "query": "My landlord has not fixed a broken boiler for three weeks despite repeated requests, and is now threatening to start eviction proceedings after I withheld a portion of rent in protest. What does the relevant housing legislation say about my options, and is there case law on whether withholding rent for disrepair counts as a lawful defence to a possession claim?",
     "default_model": "gpt-5.6-luna",
     "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
-    "source": "placeholder"
+    "source": "handwritten: derived from legal_uk's tool whitelist (legislation_search, case_law_search) in process_persona, the_server.py, 2026-11-18"
+  },
+  {
+    "persona": "legal_uk",
+    "query": "I run a small limited company and just crossed the VAT registration threshold this quarter. What's the current VAT rate I need to charge, and what do Making Tax Digital rules require of me going forward?",
+    "default_model": "gpt-5.6-luna",
+    "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
+    "source": "handwritten: derived from legal_uk's HMRC tool whitelist (hmrc_get_vat_rate, hmrc_check_mtd_status) in process_persona, the_server.py, 2026-11-18"
   },
   {
     "persona": "legal",
-    "query": "A faulty appliance I bought two weeks ago stopped working. Can I get a refund instead of a repair?",
+    "query": "A faulty appliance I bought two weeks ago stopped working. Can I get a refund instead of a repair under Philippine consumer protection law?",
     "default_model": "gpt-5.6-luna",
     "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
-    "source": "placeholder"
+    "source": "handwritten: derived from legal's tool whitelist (search_republic_acts) in process_persona, the_server.py, 2026-11-18"
+  },
+  {
+    "persona": "legal",
+    "query": "I was told to resign after 6 years with the company or be terminated for 'redundancy', with no separation pay offered and no written notice. Does this count as illegal dismissal under the Labor Code, and what remedies would apply?",
+    "default_model": "gpt-5.6-luna",
+    "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
+    "source": "handwritten: derived from legal's tool whitelist (search_jurisprudence, get_republic_act) in process_persona, the_server.py, 2026-11-18"
   },
   {
     "persona": "intake",
-    "query": "I was in a car accident last month and the other driver's insurance is refusing to pay for my car repairs.",
+    "query": "I lost my job last month after raising a complaint about unpaid overtime, and now my former employer is disputing my claim for notice pay. I haven't signed anything yet. What should I know about my general rights before I speak to a solicitor?",
     "default_model": "gpt-5.6-luna",
     "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
-    "source": "placeholder"
+    "source": "handwritten: derived from intake_prompt.txt's described scope (job loss, general UK rights, never case-specific advice), 2026-11-18"
+  },
+  {
+    "persona": "intake",
+    "query": "My landlord is refusing to return my deposit after I moved out, claiming damage that wasn't there when I left. I have photos from move-in. What are my general rights here, and what would a solicitor need from me to take this further?",
+    "default_model": "gpt-5.6-luna",
+    "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
+    "source": "handwritten: derived from intake_prompt.txt's described scope (landlord disputes, fact-gathering for a solicitor), 2026-11-18"
   }
 ]
