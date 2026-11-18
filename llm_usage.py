@@ -49,8 +49,25 @@ class TurnUsage:
         self._by_model: dict[str, dict[str, int]] = {}
         self.pass_count = 0
 
-    def add(self, usage: Any, model: Optional[str]) -> None:
-        """Add one call's usage. Accepts Chat Completions and Responses shapes."""
+    def add(
+        self,
+        usage: Any,
+        model: Optional[str],
+        *,
+        routing_mode: Optional[str] = None,
+        decision_source: Optional[str] = None,
+    ) -> None:
+        """Add one call's usage. Accepts Chat Completions and Responses shapes.
+
+        `routing_mode`/`decision_source` are CW-9's addition (chat-wonder-v2-api#150): which
+        routing_overrides.py mode was in effect and what model_router.py decided, for this
+        model's calls this turn. Optional and None by default -- every existing call site (about
+        20, per this module's own docstring) stays unchanged, since model_router.py isn't wired
+        into any of them yet. When given more than once for the same model in one turn, the
+        latest non-None value wins -- a later call that omits them (an untouched call site)
+        never erases what an earlier, routing-aware call site already recorded. In practice
+        every call to a given model within a turn comes from the same routing decision, so this
+        never actually differs call to call."""
         try:
             prompt = _int(_get(usage, "prompt_tokens", _get(usage, "input_tokens")))
             completion = _int(_get(usage, "completion_tokens", _get(usage, "output_tokens")))
@@ -61,12 +78,17 @@ class TurnUsage:
             with self._lock:
                 row = self._by_model.setdefault(
                     key, {"prompt_tokens": 0, "cached_input_tokens": 0,
-                          "completion_tokens": 0, "total_tokens": 0, "calls": 0})
+                          "completion_tokens": 0, "total_tokens": 0, "calls": 0,
+                          "routing_mode": None, "decision_source": None})
                 row["prompt_tokens"] += prompt
                 row["cached_input_tokens"] += cached
                 row["completion_tokens"] += completion
                 row["total_tokens"] += total
                 row["calls"] += 1
+                if routing_mode is not None:
+                    row["routing_mode"] = routing_mode
+                if decision_source is not None:
+                    row["decision_source"] = decision_source
         except Exception:
             pass
 
@@ -93,7 +115,8 @@ class TurnUsage:
                 {"model": r["model"], "prompt_tokens": r["prompt_tokens"],
                  "cached_input_tokens": r["cached_input_tokens"],
                  "completion_tokens": r["completion_tokens"],
-                 "total_tokens": r["total_tokens"], "calls": r["calls"]}
+                 "total_tokens": r["total_tokens"], "calls": r["calls"],
+                 "routing_mode": r.get("routing_mode"), "decision_source": r.get("decision_source")}
                 for r in by_model
             ],
         }
