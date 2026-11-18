@@ -1,26 +1,30 @@
 [
   {
     "persona": "legal_uk",
-    "query": "My employer dismissed me after 10 months without any warning or process. Do I have a claim for unfair dismissal?",
+    "query": "My client was employed as a senior sales manager at a mid-sized technology company for four years. She recently reported to HR that her direct supervisor was manipulating commission calculations in a way that disadvantaged certain employees. Two weeks after making the report, she was placed on a performance improvement plan citing vague performance deficiencies. One month later, she was terminated for alleged failure to meet performance targets. She has consistently received positive performance evaluations prior to the complaint. There is documentation of her complaint to HR and prior performance reviews. The employer claims the termination was solely based on performance metrics and denies any retaliatory motive.",
     "default_model": "gpt-5.6-luna",
-    "candidates": ["gpt-5.6-luna", "gpt-6-luna"]
+    "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
+    "source": "real: local sessions.pkl, 2026-11-12"
   },
   {
     "persona": "legal_uk",
     "query": "My landlord has not fixed a broken boiler for three weeks despite repeated requests. What are my options?",
     "default_model": "gpt-5.6-luna",
-    "candidates": ["gpt-5.6-luna", "gpt-6-luna"]
+    "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
+    "source": "placeholder"
   },
   {
     "persona": "legal",
     "query": "A faulty appliance I bought two weeks ago stopped working. Can I get a refund instead of a repair?",
     "default_model": "gpt-5.6-luna",
-    "candidates": ["gpt-5.6-luna", "gpt-6-luna"]
+    "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
+    "source": "placeholder"
   },
   {
     "persona": "intake",
     "query": "I was in a car accident last month and the other driver's insurance is refusing to pay for my car repairs.",
     "default_model": "gpt-5.6-luna",
-    "candidates": ["gpt-5.6-luna", "gpt-6-luna"]
+    "candidates": ["gpt-5.6-luna", "gpt-6-luna"],
+    "source": "placeholder"
   }
 ]

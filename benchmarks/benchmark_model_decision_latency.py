@@ -47,6 +47,13 @@ from typing import List, Optional
 # model_router.py lives at the repo root, one level up from this script.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import dotenv  # noqa: E402
+
+# the_server.py normally does this at import time, but model_router.py only imports from it
+# lazily (inside _broadcast, to avoid a circular import) -- _best_candidate never touches that
+# path, so nothing would load .env for this script otherwise.
+dotenv.load_dotenv()
+
 import model_router as router  # noqa: E402
 
 
@@ -56,11 +63,16 @@ class QuerySpec:
     query: str
     default_model: str
     candidates: List[str]
+    # Free text, e.g. "real: local sessions.pkl, 2026-11-12" or "placeholder". Never blend a
+    # "real" and a "placeholder" query's latencies into one number without saying so -- that's
+    # exactly the kind of result that looks precise and isn't.
+    source: str = "unspecified"
 
 
 @dataclass
 class CallResult:
     persona: str
+    source: str
     latency_s: float
     chosen_model: Optional[str]
     confidence: Optional[float]
@@ -76,6 +88,7 @@ def load_queries(path: str) -> List[QuerySpec]:
             query=r["query"],
             default_model=r["default_model"],
             candidates=r["candidates"],
+            source=r.get("source", "unspecified"),
         )
         for r in raw
     ]
@@ -95,10 +108,10 @@ def run_once(client, spec: QuerySpec) -> CallResult:
     try:
         best_model, best_p = router._best_candidate(client, spec.query, options)
         elapsed = time.perf_counter() - t0
-        return CallResult(persona=spec.persona, latency_s=elapsed, chosen_model=best_model, confidence=best_p)
+        return CallResult(persona=spec.persona, source=spec.source, latency_s=elapsed, chosen_model=best_model, confidence=best_p)
     except Exception as e:  # noqa: BLE001 -- a benchmark run records the failure, it does not crash the run
         elapsed = time.perf_counter() - t0
-        return CallResult(persona=spec.persona, latency_s=elapsed, chosen_model=None, confidence=None, error=str(e))
+        return CallResult(persona=spec.persona, source=spec.source, latency_s=elapsed, chosen_model=None, confidence=None, error=str(e))
 
 
 def percentile(values: List[float], p: float) -> float:
@@ -154,7 +167,7 @@ def main() -> int:
             result = run_once(client, spec)
             results.append(result)
             status = f"error={result.error}" if result.error else f"chosen={result.chosen_model} p={result.confidence}"
-            print(f"  [{spec.persona}] run {run_idx + 1}/{args.runs}: {result.latency_s:.3f}s  {status}")
+            print(f"  [{spec.persona}/{spec.source}] run {run_idx + 1}/{args.runs}: {result.latency_s:.3f}s  {status}")
             if args.delay_s:
                 time.sleep(args.delay_s)
 
@@ -162,11 +175,17 @@ def main() -> int:
     by_persona = {}
     for persona in sorted({r.persona for r in results}):
         by_persona[persona] = summarize([r for r in results if r.persona == persona])
+    by_source = {}
+    for source in sorted({r.source for r in results}):
+        by_source[source] = summarize([r for r in results if r.source == source])
 
     print("\n=== Summary (seconds) ===")
     print(f"Overall: {json.dumps(overall, indent=2)}")
     for persona, summary in by_persona.items():
         print(f"\n{persona}: {json.dumps(summary, indent=2)}")
+    print("\n--- By source (never trust a number blending real and placeholder queries) ---")
+    for source, summary in by_source.items():
+        print(f"\n{source}: {json.dumps(summary, indent=2)}")
 
     if overall["errors"]:
         print(
@@ -180,6 +199,7 @@ def main() -> int:
         payload = {
             "overall": overall,
             "by_persona": by_persona,
+            "by_source": by_source,
             "raw": [r.__dict__ for r in results],
         }
         with open(args.out, "w", encoding="utf-8") as f:
