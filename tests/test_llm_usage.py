@@ -66,6 +66,19 @@ class TurnUsageTests(unittest.TestCase):
         self.assertEqual(row["routing_mode"], "AUTO")
         self.assertEqual(row["decision_source"], "race_corrected")
 
+    def test_routing_fields_are_also_surfaced_at_the_top_level(self):
+        # ilovelawyer-api's ingestion (chat-wonder-usage.ts) reads the flat top-level fields, not
+        # by_model -- same reason `model` is already top-level, mirroring by_model[0].
+        t = llm_usage.TurnUsage()
+        t.add(cc_usage(5, 5), "a", routing_mode="MANUAL", decision_source="manual")
+        d = t.to_dict()
+        self.assertEqual(d["routing_mode"], "MANUAL")
+        self.assertEqual(d["decision_source"], "manual")
+
+    def test_top_level_routing_fields_are_none_with_no_calls(self):
+        self.assertIsNone(llm_usage.TurnUsage().to_dict()["routing_mode"])
+        self.assertIsNone(llm_usage.TurnUsage().to_dict()["decision_source"])
+
     def test_a_later_call_without_routing_fields_does_not_erase_an_earlier_ones(self):
         # Every call to the same model in one turn comes from the same routing decision in
         # practice; a later call that simply omits the kwargs (an untouched call site) should

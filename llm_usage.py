@@ -111,6 +111,11 @@ class TurnUsage:
             "call_count": totals["calls"],
             "pass_count": passes,
             "model": by_model[0]["model"] if by_model else None,
+            # Top-level, alongside `model` (same "dominant model this turn" row) rather than only
+            # inside by_model -- ilovelawyer-api's ingestion (chat-wonder-usage.ts) records one
+            # LlmUsage row per call from the flat top-level fields, it does not read by_model.
+            "routing_mode": by_model[0].get("routing_mode") if by_model else None,
+            "decision_source": by_model[0].get("decision_source") if by_model else None,
             "by_model": [
                 {"model": r["model"], "prompt_tokens": r["prompt_tokens"],
                  "cached_input_tokens": r["cached_input_tokens"],
