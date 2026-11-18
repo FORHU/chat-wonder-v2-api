@@ -283,6 +283,31 @@ def broadcast_trace(event_type: str, text: str, session_id: str = None, summary:
         _put_all()
 
 
+def broadcast_model_decision(persona: str, decision_kind: str, from_model: str, to_model: str,
+                              decision_source: str, session_id: str = None, tool_name: str = None,
+                              confidence: float = None):
+    """A model-routing decision (CW-6's decide_turn_model / CW-7's decide_tool_model), broadcast
+    on the same "model" event_type over the existing Glass-box channel that scl-core-v2 already
+    consumes via /trace-stream -- not a new event bus, the one broadcast_trace already serves.
+    `decision_kind` is "turn" or "tool"; `decision_source` matches chat-wonder-v2-api#150's
+    model_usage_log fields ("default" | "race_corrected" | "tool_override"). Call this from
+    model_router.py once CW-6/CW-7 land -- this is the broadcast half, built ahead of the
+    decision logic itself per the CW-10 SCL note."""
+    # `text` (developer feed) carries the raw fields; `summary` (also reaches ilovelawyer-api's
+    # scoped stream, since "model" is in _USER_TRACE_TYPES) stays human-readable prose, matching
+    # every other broadcast_trace call site -- never a JSON blob.
+    text = f"decision_kind={decision_kind} persona={persona} tool={tool_name} from_model={from_model} to_model={to_model} decision_source={decision_source} confidence={confidence}"
+    if decision_kind == "tool" and tool_name:
+        scope = f"the {tool_name} tool call"
+    else:
+        scope = "this turn"
+    if from_model == to_model:
+        summary = f"Kept {to_model} for {scope} ({decision_source})."
+    else:
+        summary = f"Switched {scope} from {from_model} to {to_model} ({decision_source})."
+    broadcast_trace("model", text, session_id, summary=summary)
+
+
 def increment_metric_counter(name: str, value: int = 1, tags: dict = None, session_id: str = None):
     """Emit a lightweight counter metric via logs + optional trace."""
     if not name:
@@ -364,7 +389,7 @@ async def trace_stream():
 # developer-grade (session ids, raw tool output); `summary` is the plain-language explanation
 # that broadcast_trace's callers already write for exactly this purpose. Metric events and
 # anything without a summary are dropped.
-_USER_TRACE_TYPES = frozenset({"request", "cognition", "action", "retrieval", "control", "memory"})
+_USER_TRACE_TYPES = frozenset({"request", "cognition", "action", "retrieval", "control", "memory", "model"})
 
 
 def _user_trace_event(raw: str, session_id: str) -> Optional[str]:
