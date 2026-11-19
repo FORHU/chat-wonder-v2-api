@@ -1,0 +1,23 @@
+services:
+  # Local-dev-only S3 emulator for the legal document-upload flow (s3_storage.py,
+  # /api/legal/document-upload-url). Real AWS is untouched -- this only takes effect when
+  # AWS_S3_ENDPOINT is set in .env to point at it; unset, the app still talks to real S3.
+  # On a separate host port (4568, not S3's usual 4566) so this can run alongside
+  # ilovelawyer-api's own LocalStack instance on the same machine.
+  localstack:
+    image: localstack/localstack:3
+    container_name: chat-wonder-localstack
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=${AWS_REGION:-ap-southeast-1}
+      - AWS_S3_BUCKET=${LEGAL_S3_BUCKET_NAME:-chat-wonder-dev}
+    ports:
+      - "4568:4566"
+    volumes:
+      - ./docker/localstack-init/ready-create-bucket.sh:/etc/localstack/init/ready.d/create-bucket.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: always

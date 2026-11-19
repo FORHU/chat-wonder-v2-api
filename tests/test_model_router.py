@@ -70,12 +70,18 @@ class DecideTurnModelTests(unittest.TestCase):
         self.assertEqual(len(self.broadcasts), 1)
         self.assertEqual(self.broadcasts[0]["to_model"], "gpt-6-luna")
 
-    def test_low_confidence_keeps_the_default_and_does_not_broadcast(self):
+    def test_low_confidence_keeps_the_default_and_still_broadcasts(self):
+        # decide_turn_model's own docstring promises a broadcast "either way ... even when nothing
+        # changed" -- CW-10's whole point is visibility into every turn-start decision, not just
+        # the ones that switched models. Silence here would look identical to the decision never
+        # having run at all, on the live trace.
         client = FakeDecisionsClient({0: 0.3})
         result = router.decide_turn_model(client, "legal_uk", "gpt-5.6-luna", candidate_models=["gpt-6-luna"], query="q")
         self.assertEqual(result["model"], "gpt-5.6-luna")
         self.assertEqual(result["decision_source"], "default")
-        self.assertEqual(self.broadcasts, [])
+        self.assertEqual(len(self.broadcasts), 1)
+        self.assertEqual(self.broadcasts[0]["decision_source"], "default")
+        self.assertEqual(self.broadcasts[0]["from_model"], self.broadcasts[0]["to_model"])
 
     def test_a_decisions_api_failure_never_raises_and_keeps_the_default(self):
         client = FakeDecisionsClient({}, fail=True)

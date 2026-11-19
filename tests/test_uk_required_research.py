@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import legal_responses_chain as lrc
+import model_router
 import the_server
 
 TOOL = "get_legal_recommendation_uk"
@@ -103,6 +104,46 @@ class ChainTests(unittest.TestCase):
         client = FakeOpenAI([_text("Answer.")])
         self._run(client, force_first_tool="not_a_tool")
         self.assertEqual(self._choices(client), ["auto"])
+
+    def _models(self, client):
+        return [c["model"] for c in client.calls]
+
+    def test_a_tool_override_pins_only_the_one_call_right_after_that_tool_not_the_rest_of_the_turn(self):
+        """Real bug, found live: legal_uk's last tool call was overridden to deepseek-reasoner,
+        which then also served the turn's final answer -- because nothing reset _current_model
+        back to the turn's own default before that last, un-overridden call. CW-7's own contract
+        ("a per-tool pin") means an override must only ever affect the one call that processes
+        that tool's result, never the call after it."""
+        def _call_with_args(name, call_id, args):
+            item = SimpleNamespace(type="function_call", call_id=call_id, name=name, arguments=args)
+            return [
+                SimpleNamespace(type="response.output_item.added", output_index=0, item=item),
+                SimpleNamespace(type="response.output_item.done", output_index=0, item=item),
+            ]
+
+        client = FakeOpenAI([
+            _call_with_args("legislation_search", "call-1", '{"q": "unfair dismissal"}'),
+            # Different args than call 1 -- otherwise the loop's own duplicate-call guard would
+            # block this second call before it ever reaches decide_tool_model.
+            _call_with_args("legislation_search", "call-2", '{"q": "ACAS code"}'),
+            _text("Final answer."),
+        ])
+        with patch.object(
+            model_router,
+            "decide_tool_model",
+            side_effect=[
+                {"model": "overridden-model", "decision_source": "tool_override", "confidence": None},
+                {"model": "m", "decision_source": "default", "confidence": None},
+            ],
+        ):
+            self._run(client)
+        self.assertEqual(
+            self._models(client),
+            ["m", "overridden-model", "m"],
+            "call 1: turn default (no tool has run yet); call 2: the override, scoped to the "
+            "one call after the overridden tool; call 3: back to the turn default, not stuck on "
+            "the override from call 2's tool.",
+        )
 
 
 if __name__ == "__main__":

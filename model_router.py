@@ -125,15 +125,18 @@ def decide_turn_model(
 
     options = _compatible_candidates([m for m in (candidate_models or []) if m != default_model], require_responses_api_ok)
     if not options:
+        _broadcast(persona=persona, decision_kind="turn", from_model=default_model, to_model=default_model, decision_source="default", session_id=session_id)
         return _decision_result(default_model, "default", None)
 
     try:
         best_model, best_p = _best_candidate(client, query, options)
     except Exception as e:  # noqa: BLE001 -- a Decisions API failure must never block or alter the turn
         _logger.warning("decide_turn_model failed for persona=%s, keeping default: %s", persona, e)
+        _broadcast(persona=persona, decision_kind="turn", from_model=default_model, to_model=default_model, decision_source="default", session_id=session_id)
         return _decision_result(default_model, "default", None)
 
     if best_model is None or best_p < MODEL_DECISION_CONFIDENCE_MIN:
+        _broadcast(persona=persona, decision_kind="turn", from_model=default_model, to_model=default_model, decision_source="default", session_id=session_id, confidence=best_p if best_model else None)
         return _decision_result(default_model, "default", best_p if best_model else None)
 
     _broadcast(persona=persona, decision_kind="turn", from_model=default_model, to_model=best_model, decision_source="race_corrected", session_id=session_id, confidence=best_p)

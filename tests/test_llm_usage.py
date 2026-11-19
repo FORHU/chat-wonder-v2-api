@@ -110,6 +110,20 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(comps.kwargs["stream_options"], {"include_usage": True})
         self.assertEqual(turn.to_dict()["total_tokens"], 10)
 
+    def test_stream_records_usage_on_a_non_empty_choices_chunk_and_still_yields_it(self):
+        # DeepSeek's OpenAI-compatible streaming API attaches usage to the SAME chunk as the
+        # final content delta (confirmed live: finish_reason="stop" alongside a populated usage
+        # object), unlike OpenAI's separate empty-choices trailing chunk. That chunk carries real
+        # content the caller needs, so it must still be yielded, not swallowed like OpenAI's is.
+        turn = llm_usage.start_turn()
+        chunks = [NS(model="m", choices=[NS()], usage=None),
+                  NS(model="m", choices=[NS(finish_reason="stop")], usage=cc_usage(7, 3))]
+        comps = FakeCompletions(chunks)
+        client = llm_usage.UsageTrackingOpenAI(FakeClient(comps))
+        out = list(client.chat.completions.create(model="m", stream=True))
+        self.assertEqual(len(out), 2)  # both chunks reach the caller, unlike OpenAI's shape
+        self.assertEqual(turn.to_dict()["total_tokens"], 10)
+
     def test_stream_consumed_in_another_thread_still_records(self):
         turn = llm_usage.start_turn()
         chunks = [NS(model="m", choices=[], usage=cc_usage(1, 1))]

@@ -9,6 +9,7 @@ import os
 import logging
 from typing import Optional
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,20 @@ def get_s3_client(bucket_name: str = None, region: str = None):
     config = get_s3_config(bucket_name, region)
     if not config["use_s3"]:
         return None
+    # Local dev only: redirects at a per-developer LocalStack (see docker-compose.yml) instead of
+    # real AWS S3. forcePathStyle is required for LocalStack: it doesn't do virtual-hosted-style
+    # buckets. Mirrors ilovelawyer-api's src/utils/s3.ts AWS_S3_ENDPOINT override.
+    endpoint_url = os.getenv("AWS_S3_ENDPOINT", "").strip() or None
     try:
+        if endpoint_url:
+            return boto3.client(
+                "s3",
+                aws_access_key_id=config["access_key"] or "test",
+                aws_secret_access_key=config["secret_key"] or "test",
+                region_name=config["region"],
+                endpoint_url=endpoint_url,
+                config=Config(s3={"addressing_style": "path"}),
+            )
         if config["access_key"] and config["secret_key"]:
             return boto3.client(
                 "s3",

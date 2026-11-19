@@ -27,10 +27,14 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from types import SimpleNamespace
 from typing import List, Optional
 
 import decisions_research
 import llm_usage
+import routing_overrides
+import model_registry
+import model_router
 from legal_verify import DRAFT_DISCARD, Verifier, inject_verifier_feedback, verifier_trace_text
 
 
@@ -94,6 +98,91 @@ def chat_messages_to_input_items(messages: List[dict]) -> List[dict]:
     that ever stops being true for a future model.
     """
     return [dict(m) for m in messages]
+
+
+def items_to_chat_messages(input_items: List[dict]) -> List[dict]:
+    """One-way, call-time-only translation of this module's Responses-shaped input_items into
+    Chat Completions messages, for a CW-7 tool override that resolves to a deepseek-* model
+    (model_registry.is_deepseek_model) -- DeepSeek has no /v1/responses endpoint, only an
+    OpenAI-compatible /v1/chat/completions one.
+
+    Never persisted: input_items itself always stays in Responses shape regardless of which
+    vendor actually served a given step (append_function_call_round_trip writes every tool
+    result back the same way either way), so this is rebuilt fresh immediately before each
+    DeepSeek call rather than carried forward.
+    """
+    messages: List[dict] = []
+    pending_calls: dict = {}  # call_id -> {"name", "arguments"}, filled by a function_call item
+    for item in input_items:
+        itype = item.get("type")
+        if itype == "function_call":
+            pending_calls[item["call_id"]] = {"name": item["name"], "arguments": item.get("arguments", "")}
+        elif itype == "function_call_output":
+            call = pending_calls.pop(item["call_id"], None)
+            if call is None:
+                continue  # malformed pairing -- drop rather than send a broken tool_call upstream
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": item["call_id"],
+                    "type": "function",
+                    "function": {"name": call["name"], "arguments": call["arguments"]},
+                }],
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": item["call_id"],
+                "content": item.get("output", ""),
+            })
+        else:
+            messages.append(dict(item))
+    return messages
+
+
+def _deepseek_completions_events(client, model: str, messages: List[dict], chat_completions_tools: Optional[list]):
+    """Runs one call on DeepSeek's Chat Completions endpoint and yields synthetic events in the
+    same two shapes apply_responses_event already understands (response.output_item.added /
+    response.function_call_arguments.delta / response.output_text.delta) -- so the loop in
+    run_function_chain_responses/streaming_run_function_chain_responses never needs to know which
+    vendor actually served a call. This is the CW-7 bridge: a tool override that resolves to a
+    deepseek-* model reaches here instead of being refused.
+
+    Confirmed live against api.deepseek.com before writing this: a tool call's `id` and
+    `function.name` arrive only on its first delta chunk (keyed by `index`); every later chunk
+    for that same call carries only an `arguments` piece to append -- no closing/.done event is
+    sent, so (unlike the Responses API) there is nothing to reconcile against; the added+delta
+    events below already fully reconstruct each call.
+    """
+    args = {"model": model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+    if chat_completions_tools:
+        args["tools"] = chat_completions_tools
+        args["tool_choice"] = "auto"
+        args["parallel_tool_calls"] = False
+    args = model_registry.shape_chat_args(model, args)
+
+    calls: dict = {}  # output_index -> {"call_id", "name"}
+    for chunk in client.chat.completions.create(**args):
+        if not getattr(chunk, "choices", None):
+            continue
+        delta = chunk.choices[0].delta
+        tool_calls = getattr(delta, "tool_calls", None)
+        if tool_calls:
+            for tc in tool_calls:
+                idx = tc.index
+                if idx not in calls:
+                    calls[idx] = {"call_id": tc.id, "name": tc.function.name}
+                    yield SimpleNamespace(
+                        type="response.output_item.added",
+                        output_index=idx,
+                        item=SimpleNamespace(type="function_call", call_id=calls[idx]["call_id"], name=calls[idx]["name"]),
+                    )
+                piece = getattr(tc.function, "arguments", None) or ""
+                if piece:
+                    yield SimpleNamespace(type="response.function_call_arguments.delta", output_index=idx, delta=piece)
+        content = getattr(delta, "content", None)
+        if content:
+            yield SimpleNamespace(type="response.output_text.delta", delta=content)
 
 
 def append_function_call_round_trip(
@@ -269,6 +358,7 @@ def run_function_chain_responses(
     auto_approval: bool = False,
     verify: Optional[Verifier] = None,
     force_first_tool: Optional[str] = None,
+    persona: str = None,
 ):
     """Legal-persona equivalent of the_server.run_function_chain(), on /v1/responses
     instead of /v1/chat/completions, so real reasoning_effort can be combined
@@ -298,10 +388,23 @@ def run_function_chain_responses(
     last_tool = None
     tool_log = []
     state.last_turn_tool_log = tool_log
+    # CW-7: this path runs the Responses API, which DeepSeek has no endpoint for at all -- a tool
+    # override that resolves to a deepseek-* model is bridged to DeepSeek's Chat Completions
+    # endpoint instead (_deepseek_completions_events), never to state.openai_client. The turn's
+    # own starting model is never deepseek here (the_server.py's _force_completions routes a
+    # deepseek-default persona to run_function_chain/Chat Completions before this module ever
+    # runs), so this only ever applies from the second model call onward, after a tool override
+    # has switched _current_model -- _tool_choice_for's forced-first-tool call is unaffected.
+    _current_model = model
 
     def perform_responses_call(items):
+        if model_registry.is_deepseek_model(_current_model):
+            client = model_registry.get_client(_current_model, state.openai_client)
+            chat_tools = tools if tools is not None else _context.fun_manifest
+            llm_usage.current().add_pass()
+            return _deepseek_completions_events(client, _current_model, items_to_chat_messages(items), chat_tools)
         args = {
-            "model": model or _context.model,
+            "model": _current_model or _context.model,
             "input": items,
             "stream": True,
         }
@@ -339,6 +442,12 @@ def run_function_chain_responses(
             delta_text = apply_responses_event(event, pending_calls)
             if delta_text:
                 last_response += delta_text
+        # One-shot: a tool override only pins the ONE call that processes that tool's result
+        # (model_router.decide_tool_model's own docstring -- "a per-tool pin", not "every call
+        # for the rest of the turn"). _current_model was already read into this call's request
+        # above, so it's safe to revert to the turn's own default now; the tool-execution branch
+        # below sets it again, for the next call only, if the NEXT tool call is itself overridden.
+        _current_model = model
 
         function_call = _first_pending_call(pending_calls)
         last_response, _xai_reason = _strip_reason_line(last_response.strip())
@@ -450,6 +559,9 @@ def run_function_chain_responses(
         _prefetched = _decisions_prefetch(state, function_call, result, query, session_id, execute_function_call)
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        _current_model = _tool_decision["model"]
+        llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
@@ -531,6 +643,7 @@ async def streaming_run_function_chain_responses(
     auto_approval: bool = False,
     verify: Optional[Verifier] = None,
     force_first_tool: Optional[str] = None,
+    persona: str = None,
 ):
     """Streaming (async generator) counterpart of run_function_chain_responses,
     structurally mirroring the_server.streaming_run_function_chain -- same
@@ -563,10 +676,19 @@ async def streaming_run_function_chain_responses(
     refine_round = 0
     _verify_step_id = None  # open [TRACE] self-check step awaiting its 'result' frame
     _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
+    # See run_function_chain_responses's identical comment -- CW-7, a tool override that resolves
+    # to a deepseek-* model is bridged to DeepSeek's Chat Completions endpoint rather than
+    # refused.
+    _current_model = model
 
     def perform_responses_call(items):
+        if model_registry.is_deepseek_model(_current_model):
+            client = model_registry.get_client(_current_model, state.openai_client)
+            chat_tools = tools if tools is not None else _context.fun_manifest
+            llm_usage.current().add_pass()
+            return _deepseek_completions_events(client, _current_model, items_to_chat_messages(items), chat_tools)
         args = {
-            "model": model or _context.model,
+            "model": _current_model or _context.model,
             "input": items,
             "stream": True,
         }
@@ -638,6 +760,11 @@ async def streaming_run_function_chain_responses(
             else:
                 last_response += part
                 yield part
+        # One-shot: see run_function_chain_responses's identical comment -- a tool override only
+        # pins the ONE call that processes that tool's result, not every call for the rest of the
+        # turn. _current_model was already read into this call's request inside perform_responses_call
+        # above, so it's safe to revert to the turn's own default now.
+        _current_model = model
 
         if _xai_buffer and not _xai_first_line_done:
             reason_pos = _xai_buffer.find("REASON:")
@@ -791,6 +918,9 @@ async def streaming_run_function_chain_responses(
         _prefetched = await asyncio.to_thread(_decisions_prefetch, state, function_call, result, query, session_id, execute_function_call)
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        _current_model = _tool_decision["model"]
+        llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
