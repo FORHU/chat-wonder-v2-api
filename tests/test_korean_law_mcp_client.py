@@ -70,7 +70,11 @@ class KoreanLawMcpClientTests(unittest.TestCase):
         client = KoreanLawMcpClient(url="https://mcp.gomdori.app/law", api_key="test-key")
         self.assertEqual(client._session.headers.get("apikey"), "test-key")
 
+    @patch.dict("os.environ", {}, clear=False)
     def test_no_api_key_header_by_default(self):
+        import os
+
+        os.environ.pop("KOREAN_LAW_MCP_API_KEY", None)
         client = KoreanLawMcpClient(url="https://mcp.gomdori.app/law")
         self.assertNotIn("apikey", client._session.headers)
 
