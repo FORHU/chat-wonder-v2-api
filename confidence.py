@@ -224,6 +224,19 @@ _STOPWORDS = frozenset(
 #: which a plain [^\]]+ label pattern stops at, leaving raw markdown in the quote (found live).
 _MD_LINK_RE = re.compile(r"\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\(([^)\s]+)\)")
 _MD_HTTP_LINK_RE = re.compile(r"\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\((https?://[^)\s]+)\)")
+#: An embedded citation anchor (`<a href=...>...</a>`), stripped out of a line the same way
+#: _MD_HTTP_LINK_RE strips a markdown link below -- the anchor's own text is left to
+#: quoted_citation_spans (href-matched), but unlike the old whole-line skip, the prose sharing
+#: that line with it is still a candidate. A heavily-cited answer (every line carries a citation)
+#: previously lost ALL of its provenance coverage this way -- _candidate_sentences returned []
+#: for the whole answer, so provenance_spans (by its own "if not sentences: return spans"
+#: contract) returned [] too, with no error anywhere: the exact opposite of this module's
+#: founding reason for existing (see the module docstring's lesson #1 -- "every answer that
+#: cited nothing got NOTHING," now joined by "every answer that cited everywhere" got nothing
+#: either). Found live, 2026-11-19: two real legal_uk turns (one DeepSeek-involved, one pure
+#: gpt-5.6-luna -- confirmed model-independent) where every line of a long, citation-dense
+#: answer had an inline anchor, so the confidence toggle never appeared despite a correct answer.
+_HTML_ANCHOR_RE = re.compile(r"<a\b[^>]*>.*?</a>", re.IGNORECASE | re.DOTALL)
 
 
 def _plain_for_match(s: str) -> str:
@@ -258,19 +271,27 @@ def _candidate_sentences(text: str, limit: int = MAX_CANDIDATE_SENTENCES) -> Lis
     because leaving any of them uncolored reads as "this part was never checked" next to
     sentences that were -- the opposite of what coverage should communicate.
 
-    Two things ARE still skipped, for a structural reason rather than a content one:
-      - Any line containing an embedded citation anchor (`<a href=`): citation_spans already
-        covers that link precisely via href matching, and a sentence spanning INTO an anchor
-        element can never be found as one contiguous text node after rendering (the anchor's
-        text lives in its own child text node, split off from the surrounding prose) -- so
-        matching it here would silently never work anyway.
-      - A markdown table row is split into its individual CELLS instead of treated as one
-        sentence, for the identical structural reason: marked.js renders each cell as its own
-        <td> with its own isolated text node, so only a per-cell quote can ever match."""
+    One thing is still split out rather than matched here, for a structural reason rather than
+    a content one: a markdown table row is split into its individual CELLS instead of treated as
+    one sentence, since marked.js renders each cell as its own <td> with its own isolated text
+    node, so only a per-cell quote can ever match.
+
+    An embedded citation anchor (`<a href=...>...</a>`) is stripped out of its line rather than
+    matched -- citation_spans already covers that link precisely via href matching, and a
+    sentence spanning INTO an anchor element can never be found as one contiguous text node
+    after rendering (the anchor's text lives in its own child text node, split off from the
+    surrounding prose). Critically, this only removes the anchor itself: the rest of the line's
+    prose is still a candidate, same as a markdown link's surrounding text below. An earlier
+    version skipped the WHOLE line whenever it contained any anchor at all, which meant a
+    citation-dense answer -- every line carrying a link -- got zero provenance coverage, not
+    partial: found live on two real legal_uk turns, confirmed model-independent."""
     out: List[str] = []
     for line in (text or "").splitlines():
         stripped = line.lstrip()
-        if not stripped or "<a href=" in stripped:
+        if not stripped:
+            continue
+        stripped = _HTML_ANCHOR_RE.sub("", stripped).strip()
+        if not stripped:
             continue
         # Markdown http(s) links get the same treatment as embedded <a href> anchors: the link
         # is left to quoted_citation_spans (href-matched, styled in place), so it's removed

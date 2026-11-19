@@ -161,6 +161,23 @@ class CoverageHonestyTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class ProvenanceSpansTests(unittest.TestCase):
+    def test_a_citation_dense_answer_still_gets_provenance_coverage(self):
+        # The actual bug, reproduced at the provenance_spans level (not just _candidate_sentences):
+        # a real legal_uk answer where EVERY line carries an inline citation link previously
+        # returned the EMPTY LIST for the whole answer -- not partial coverage, zero -- because
+        # the old whole-line skip left _candidate_sentences with nothing at all, and
+        # provenance_spans' own "if not sentences: return spans" contract then short-circuited.
+        # That silently dropped the confidence view entirely for citation-dense answers,
+        # independent of which model wrote them.
+        text = (
+            'Under <a href="https://x.gov.uk/era-s98">section 98 ERA 1996</a> a dismissal must '
+            'have a fair reason.\n'
+            'The tribunal in <a href="https://x.gov.uk/case1">Smith v Jones</a> confirmed this '
+            'test applies here.\n'
+        )
+        spans = confidence.provenance_spans(text, [])
+        self.assertTrue(spans, "a citation-dense answer must still get provenance coverage")
+
     SOURCES = [
         "Section 103A of the Employment Rights Act 1996 provides that a dismissal is "
         "automatically unfair if the reason, or principal reason, for the dismissal is that "
@@ -203,10 +220,17 @@ class ProvenanceSpansTests(unittest.TestCase):
         # Heading + 2 sentences = 3 candidates, all three must appear.
         self.assertEqual(len(spans), 3)
 
-    def test_sentence_containing_citation_anchor_is_skipped(self):
-        # Left to quoted_citation_spans (href-matched) instead — a sentence spanning into an
-        # embedded <a> cannot be matched as one contiguous text node after rendering.
+    def test_citation_anchor_is_stripped_but_its_lines_prose_still_a_candidate(self):
+        # The anchor's own text is left to quoted_citation_spans (href-matched) -- a sentence
+        # spanning INTO an embedded <a> can't be matched as one contiguous text node after
+        # rendering. But the anchor is cut out of the line, not the whole line: a citation-dense
+        # answer (every line carrying a link) must not lose ALL provenance coverage this way --
+        # found live, 2026-11-19, on two real legal_uk turns (confirmed model-independent).
         text = 'See <a href="https://x.gov.uk/s1">Some Act Law</a> for the rule, which applies broadly.'
+        self.assertEqual(confidence._candidate_sentences(text), ["See for the rule, which applies broadly."])
+
+    def test_a_line_that_is_nothing_but_a_citation_anchor_contributes_no_sentence(self):
+        text = '<a href="https://x.gov.uk/s1">Some Act Law</a>'
         self.assertEqual(confidence._candidate_sentences(text), [])
 
     def test_markdown_link_with_bracketed_neutral_citation_is_unwrapped(self):
