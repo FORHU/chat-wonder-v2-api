@@ -50,6 +50,46 @@ class TurnUsageTests(unittest.TestCase):
         llm_usage.start_turn().add(cc_usage(5, 5), "m")
         self.assertEqual(llm_usage.start_turn().to_dict()["call_count"], 0)
 
+    def test_routing_fields_default_to_none(self):
+        # CW-9 (chat-wonder-v2-api#150): every existing call site omits these, and must keep
+        # working exactly as before.
+        t = llm_usage.TurnUsage()
+        t.add(cc_usage(5, 5), "a")
+        row = t.to_dict()["by_model"][0]
+        self.assertIsNone(row["routing_mode"])
+        self.assertIsNone(row["decision_source"])
+
+    def test_routing_fields_are_recorded_when_given(self):
+        t = llm_usage.TurnUsage()
+        t.add(cc_usage(5, 5), "a", routing_mode="AUTO", decision_source="race_corrected")
+        row = t.to_dict()["by_model"][0]
+        self.assertEqual(row["routing_mode"], "AUTO")
+        self.assertEqual(row["decision_source"], "race_corrected")
+
+    def test_routing_fields_are_also_surfaced_at_the_top_level(self):
+        # ilovelawyer-api's ingestion (chat-wonder-usage.ts) reads the flat top-level fields, not
+        # by_model -- same reason `model` is already top-level, mirroring by_model[0].
+        t = llm_usage.TurnUsage()
+        t.add(cc_usage(5, 5), "a", routing_mode="MANUAL", decision_source="manual")
+        d = t.to_dict()
+        self.assertEqual(d["routing_mode"], "MANUAL")
+        self.assertEqual(d["decision_source"], "manual")
+
+    def test_top_level_routing_fields_are_none_with_no_calls(self):
+        self.assertIsNone(llm_usage.TurnUsage().to_dict()["routing_mode"])
+        self.assertIsNone(llm_usage.TurnUsage().to_dict()["decision_source"])
+
+    def test_a_later_call_without_routing_fields_does_not_erase_an_earlier_ones(self):
+        # Every call to the same model in one turn comes from the same routing decision in
+        # practice; a later call that simply omits the kwargs (an untouched call site) should
+        # not wipe out what an earlier, routing-aware call site already recorded.
+        t = llm_usage.TurnUsage()
+        t.add(cc_usage(5, 5), "a", routing_mode="MANUAL", decision_source="manual")
+        t.add(cc_usage(5, 5), "a")
+        row = t.to_dict()["by_model"][0]
+        self.assertEqual(row["routing_mode"], "MANUAL")
+        self.assertEqual(row["decision_source"], "manual")
+
 
 class ProxyTests(unittest.TestCase):
     def test_non_stream_records_and_delegates(self):

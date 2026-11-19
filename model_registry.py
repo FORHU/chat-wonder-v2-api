@@ -62,6 +62,63 @@ def get_client(model: str, fallback_client):
     return _deepseek_client
 
 
+class ModelSpec:
+    """A model's known constraints beyond vendor dispatch (is_deepseek_model/get_client/
+    shape_chat_args above). CW-6/CW-7's model_router.py (not built yet) needs this to decide
+    whether a Decisions-API-nominated model can actually serve a given call shape before
+    switching to it. the_server.py's _legal_model_override/_intake_model_override already
+    encode the same constraints correctly for today's personas via env vars; this does not
+    replace that, it's the generic lookup a router needs where that persona-specific
+    special-casing isn't available.
+
+    Two fields are conditional on request shape, not absolute properties of the model --
+    read the field's own meaning, not just its name:
+
+    - requires_responses_api_with_reasoning_tools: confirmed live (the exact error the_server.py
+      documents) that this model 400s on /v1/chat/completions when a request carries BOTH
+      function tools AND a real (non-"none") reasoning_effort ("Function tools with
+      reasoning_effort are not supported ... To use function tools, use /v1/responses or set
+      reasoning_effort to 'none'."). True means exactly that combination needs /v1/responses --
+      tools alone, or reasoning_effort alone, are both fine on Chat Completions.
+    - supports_temperature_on_responses: confirmed live that gpt-5.6-terra 400s on `temperature`
+      over /v1/responses ("Unsupported parameter: 'temperature' is not supported with this
+      model."), but accepts it on Chat Completions -- False here is scoped to the Responses API
+      specifically, not a blanket "this model has no temperature."
+    - supports_reasoning_effort: whether the model accepts `reasoning_effort` at all. DeepSeek
+      models never do (shape_chat_args above already strips it unconditionally); most GPT-5.x+
+      models do.
+    """
+
+    def __init__(
+        self,
+        *,
+        requires_responses_api_with_reasoning_tools: bool = False,
+        supports_temperature_on_responses: bool = True,
+        supports_reasoning_effort: bool = True,
+    ):
+        self.requires_responses_api_with_reasoning_tools = requires_responses_api_with_reasoning_tools
+        self.supports_temperature_on_responses = supports_temperature_on_responses
+        self.supports_reasoning_effort = supports_reasoning_effort
+
+
+_DEFAULT_MODEL_SPEC = ModelSpec()
+
+# Only a model with a confirmed-live quirk gets its own entry; everything else is
+# _DEFAULT_MODEL_SPEC (no known constraints beyond the vendor-level ones above).
+_MODEL_SPECS = {
+    "gpt-5.6-luna": ModelSpec(requires_responses_api_with_reasoning_tools=True),
+    "gpt-5.6-terra": ModelSpec(requires_responses_api_with_reasoning_tools=True, supports_temperature_on_responses=False),
+    "deepseek-chat": ModelSpec(supports_reasoning_effort=False),
+    "deepseek-reasoner": ModelSpec(supports_reasoning_effort=False),
+}
+
+
+def model_spec(model: str) -> ModelSpec:
+    """Case-insensitive, exact-match lookup. An unknown model id gets _DEFAULT_MODEL_SPEC --
+    the safe assumption is "no known quirks", not "inherits some other model's constraints"."""
+    return _MODEL_SPECS.get((model or "").strip().lower(), _DEFAULT_MODEL_SPEC)
+
+
 def shape_chat_args(model: str, args: dict) -> dict:
     """Adjusts a Chat Completions args dict for the vendor `model` belongs to.
 
