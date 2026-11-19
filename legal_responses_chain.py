@@ -31,6 +31,9 @@ from typing import List, Optional
 
 import decisions_research
 import llm_usage
+import routing_overrides
+import model_registry
+import model_router
 from legal_verify import DRAFT_DISCARD, Verifier, inject_verifier_feedback, verifier_trace_text
 
 
@@ -269,6 +272,7 @@ def run_function_chain_responses(
     auto_approval: bool = False,
     verify: Optional[Verifier] = None,
     force_first_tool: Optional[str] = None,
+    persona: str = None,
 ):
     """Legal-persona equivalent of the_server.run_function_chain(), on /v1/responses
     instead of /v1/chat/completions, so real reasoning_effort can be combined
@@ -298,10 +302,16 @@ def run_function_chain_responses(
     last_tool = None
     tool_log = []
     state.last_turn_tool_log = tool_log
+    # CW-7: see the_server.run_function_chain's identical comment. This path (unlike that one)
+    # always calls state.openai_client directly -- there is no DeepSeek dispatch here, and there
+    # structurally can't be (DeepSeek has no /v1/responses endpoint at all) -- so a tool override
+    # that resolves to a deepseek-* model is refused here and the current model kept, same
+    # fail-open posture decide_tool_model already uses for every other failure mode.
+    _current_model = model
 
     def perform_responses_call(items):
         args = {
-            "model": model or _context.model,
+            "model": _current_model or _context.model,
             "input": items,
             "stream": True,
         }
@@ -450,6 +460,10 @@ def run_function_chain_responses(
         _prefetched = _decisions_prefetch(state, function_call, result, query, session_id, execute_function_call)
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        if not model_registry.is_deepseek_model(_tool_decision["model"]):
+            _current_model = _tool_decision["model"]
+            llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
@@ -531,6 +545,7 @@ async def streaming_run_function_chain_responses(
     auto_approval: bool = False,
     verify: Optional[Verifier] = None,
     force_first_tool: Optional[str] = None,
+    persona: str = None,
 ):
     """Streaming (async generator) counterpart of run_function_chain_responses,
     structurally mirroring the_server.streaming_run_function_chain -- same
@@ -563,10 +578,13 @@ async def streaming_run_function_chain_responses(
     refine_round = 0
     _verify_step_id = None  # open [TRACE] self-check step awaiting its 'result' frame
     _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
+    # See run_function_chain_responses's identical comment -- CW-7, DeepSeek structurally
+    # unreachable on this path, refused rather than attempted.
+    _current_model = model
 
     def perform_responses_call(items):
         args = {
-            "model": model or _context.model,
+            "model": _current_model or _context.model,
             "input": items,
             "stream": True,
         }
@@ -791,6 +809,10 @@ async def streaming_run_function_chain_responses(
         _prefetched = await asyncio.to_thread(_decisions_prefetch, state, function_call, result, query, session_id, execute_function_call)
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        if not model_registry.is_deepseek_model(_tool_decision["model"]):
+            _current_model = _tool_decision["model"]
+            llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)

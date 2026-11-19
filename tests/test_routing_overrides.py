@@ -91,6 +91,19 @@ class GetOverrideTests(unittest.TestCase):
         self.assertEqual(result["routingMode"], "AUTO")
         self.assertIsNone(result["manualPinnedModel"])
 
+    def test_none_persona_fails_open_to_auto_instead_of_crashing(self):
+        # decide_tool_model's own `persona: str = None` default, and any caller that forgets to
+        # pass one, reaches here -- this module's whole design is fail-open (its own docstring:
+        # "Always returns a usable dict"), so a missing persona must not be the one case that
+        # crashes the turn instead of just defaulting.
+        result = ro.get_override(None)
+        self.assertEqual(result["routingMode"], "AUTO")
+        self.assertIsNone(result["manualPinnedModel"])
+
+    def test_non_string_persona_also_fails_open(self):
+        result = ro.get_override(123)
+        self.assertEqual(result["routingMode"], "AUTO")
+
     def test_a_failed_refresh_keeps_serving_the_last_known_snapshot(self):
         rows = [{"persona": "legal_uk", "routingMode": "MANUAL", "manualPinnedModel": "gpt-6-luna", "toolOverrides": None}]
         with patch("urllib.request.urlopen", _fake_urlopen(rows)), patch.dict(os.environ, {"ROUTING_OVERRIDE_CACHE_TTL_S": "0"}):

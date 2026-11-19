@@ -117,7 +117,14 @@ def get_override(persona: str) -> dict:
     """The only function model_router.py needs. Always returns a usable dict -- `source` is
     "cache" when it came from ilovelawyer-api (even a stale snapshot still counts as "cache",
     since fail-open means we trust it until a fresher one arrives) or "env" when nothing has ever
-    been cached for this persona."""
+    been cached for this persona.
+
+    A falsy/non-string persona (a caller that forgot to pass one, decide_tool_model's own
+    `persona: str = None` default among them) is treated as "unknown persona", same as one with
+    no cached row and no env vars set -- AUTO, nothing pinned. This module's whole design is
+    fail-open; a crash here would instead fail the turn."""
+    if not persona or not isinstance(persona, str):
+        return {"persona": persona, "routingMode": "AUTO", "manualPinnedModel": None, "toolOverrides": None, "source": "env"}
     _ensure_fresh()
     with _LOCK:
         row = _CACHE.get(persona)

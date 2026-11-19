@@ -2438,7 +2438,7 @@ def execute_function_call(function_call: dict, session_id: str = None):
 # Reason loop (non-streaming, collects full response)
 # ---------------------------------------------------------------------------
 
-def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False, verify=None):
+def run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False, verify=None, persona: str = None):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -2447,9 +2447,16 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
     tool_log = []
     state.last_turn_tool_log = tool_log
     refine_round = 0
+    # CW-7: the turn's own default model, re-picked per tool call via decide_tool_model.
+    # candidate_models=[] below keeps this zero-cost/zero-risk for the common case (same
+    # reasoning as _legal_model_override's CW-8 wiring) -- only a real toolOverrides entry or a
+    # persona-level MANUAL pin actually changes anything; the Decisions-API race never fires.
+    # perform_chat only reads this, never reassigns it, so plain closure capture is enough --
+    # no nonlocal needed.
+    _current_model = model
 
     def perform_chat(msgs):
-        _model = model or _context.model
+        _model = _current_model or _context.model
         args = {
             "model": _model,
             "messages": msgs,
@@ -2597,6 +2604,9 @@ def run_function_chain(state, messages: list, max_chains: int = 7, session_id: s
         function_outputs.append((function_call["name"], result))
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        _current_model = _tool_decision["model"]
+        llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
@@ -3354,15 +3364,15 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
-        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
+        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, persona=persona, **_chain_kwargs)
     elif persona in INTAKE_PERSONAS and _legal_use_responses_api() and not _force_completions:
         # Same reason as legal/legal_uk (_legal_model_override's docstring): intake's tool
         # whitelist is non-empty now, and a real reasoning_effort with function tools on
         # /v1/chat/completions is rejected outright — route through /v1/responses instead,
         # which is what actually lets INTAKE_REASONING_EFFORT be anything but "none".
-        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
+        result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, persona=persona, **_chain_kwargs)
     else:
-        result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
+        result = run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, persona=persona, **_chain_kwargs)
     _broadcast_turn_confidence(state, session_id)
     return result
 
@@ -3396,7 +3406,7 @@ async def _astream_llm(perform_chat_fn, messages):
         yield item
 
 
-async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False, verify=None):
+async def streaming_run_function_chain(state, messages: list, max_chains: int = 7, session_id: str = None, tools: list = None, query: str = "", model: str = None, reasoning_effort: str = None, temperature: float = None, auto_approval: bool = False, verify=None, persona: str = None):
     available_manifest = tools if tools is not None else _context.fun_manifest
     funcall_chains = []
     function_outputs = []
@@ -3406,6 +3416,8 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
     state.last_turn_tool_log = tool_log
     _chain_start = time.time()
     refine_round = 0
+    # See run_function_chain's identical comment -- CW-7, zero-cost/zero-risk for the common case.
+    _current_model = model
     _verify_step_id = None  # open [TRACE] self-check step awaiting its 'result' frame
     _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
 
@@ -3418,7 +3430,7 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
     state.confidence_tokens = []
 
     def perform_chat(msgs):
-        _model = model or _context.model
+        _model = _current_model or _context.model
         args = {
             "model": _model,
             "messages": msgs,
@@ -3642,6 +3654,9 @@ async def streaming_run_function_chain(state, messages: list, max_chains: int = 
         function_outputs.append((function_call["name"], result))
         last_tool = function_call["name"]
         state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        _current_model = _tool_decision["model"]
+        llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
 
         try:
             _rp = json.dumps(result, ensure_ascii=False)
@@ -3736,12 +3751,12 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
-        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
+        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, persona=persona, **_chain_kwargs)
     elif persona in INTAKE_PERSONAS and _legal_use_responses_api() and not _force_completions:
         # Same reason as reason_loop's non-streaming branch — see _intake_model_override.
-        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
+        chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, persona=persona, **_chain_kwargs)
     else:
-        chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, **_chain_kwargs)
+        chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=_auto_approval, persona=persona, **_chain_kwargs)
     async for chunk in chain:
         yield chunk
     _broadcast_turn_confidence(state, session_id)
@@ -4381,9 +4396,9 @@ def approve(request: ApproveRequest):
     if _resume_persona == "legal":
         _chain_kwargs["verify"] = make_legal_verifier(state, query=_resume_query)
     if _resume_persona == "legal" and _legal_use_responses_api():
-        cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
+        cont_result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, persona=_resume_persona, **_chain_kwargs)
     else:
-        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=True, **_chain_kwargs)
+        cont_result = run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=True, persona=_resume_persona, **_chain_kwargs)
 
     if isinstance(cont_result, dict) and cont_result.get("__hitl__"):
         # Another tool call needs approval
@@ -4536,9 +4551,9 @@ async def chat_stream(websocket: WebSocket):
                     _chain_kwargs["verify"] = make_legal_verifier(state, query=_resume_query)
                 try:
                     if _legal_mode and _legal_use_responses_api():
-                        _resume_chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, **_chain_kwargs)
+                        _resume_chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=True, persona=("legal" if _legal_mode else "auto"), **_chain_kwargs)
                     else:
-                        _resume_chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=True, **_chain_kwargs)
+                        _resume_chain = streaming_run_function_chain(state, messages, session_id=session_id, tools=available_manifest, query=_resume_query, model=_model, reasoning_effort=_reasoning_effort, temperature=_temperature, auto_approval=True, persona=("legal" if _legal_mode else "auto"), **_chain_kwargs)
                     async for chunk in _resume_chain:
                         if chunk.startswith("__HITL__"):
                             hitl_data = json.loads(chunk[8:])
