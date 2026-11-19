@@ -168,18 +168,24 @@ def record_response_event(turn: TurnUsage, event: Any) -> None:
 
 
 def _tracked_stream(stream, turn: TurnUsage, requested_model: Optional[str]):
-    """Yield the stream unchanged, except the usage-only final chunk.
+    """Yield the stream unchanged, except a usage-only chunk with no real content.
 
-    With include_usage the last chunk has empty `choices`; callers do
-    chunk.choices[0], so it is recorded and swallowed here.
+    OpenAI's include_usage sends usage on its own trailing chunk with empty `choices` --
+    callers do chunk.choices[0], so that chunk is recorded and swallowed (never yielded).
+    DeepSeek's OpenAI-compatible API instead attaches usage to the SAME chunk as the final
+    content delta, which has real, non-empty `choices` (confirmed live: finish_reason="stop"
+    alongside a populated usage object) -- swallowing that chunk would drop real content the
+    caller needs, so it's recorded AND yielded. Either way, usage is captured whenever present;
+    only an empty-choices chunk is ever withheld from the caller.
     """
     model = requested_model
     for chunk in stream:
         model = _get(chunk, "model") or model
         usage = _get(chunk, "usage")
-        if usage is not None and not _get(chunk, "choices"):
+        if usage is not None:
             turn.add(usage, model)
-            continue
+            if not _get(chunk, "choices"):
+                continue
         yield chunk
 
 

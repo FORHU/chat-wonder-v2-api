@@ -3344,12 +3344,18 @@ def reason_loop(state, query: str, session_id: str = None, tools: list = None, a
         _chain_kwargs["verify"] = make_legal_verifier(
             state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
         )
-    if persona in ("legal", "legal_uk", "legal_kr") and _legal_use_responses_api():
+    # /v1/responses is an OpenAI-only surface -- DeepSeek has no Responses API at all, so a
+    # deepseek-* model (CW-8 MANUAL pin or otherwise) must always take the Chat Completions
+    # path below, same as testers/model_tester_demo.html's own documented behavior
+    # ("bypasses the Responses API path, which isn't DeepSeek-wired yet"). model_registry's
+    # get_client/shape_chat_args (the real vendor dispatch) only runs on that path.
+    _force_completions = model_registry.is_deepseek_model(_model)
+    if persona in ("legal", "legal_uk", "legal_kr") and _legal_use_responses_api() and not _force_completions:
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         result = legal_responses_chain.run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
-    elif persona in INTAKE_PERSONAS and _legal_use_responses_api():
+    elif persona in INTAKE_PERSONAS and _legal_use_responses_api() and not _force_completions:
         # Same reason as legal/legal_uk (_legal_model_override's docstring): intake's tool
         # whitelist is non-empty now, and a real reasoning_effort with function tools on
         # /v1/chat/completions is rejected outright — route through /v1/responses instead,
@@ -3724,12 +3730,14 @@ async def streaming_reason_loop(state, query: str, session_id: str = None, tools
         _chain_kwargs["verify"] = make_legal_verifier(
             state, query=query, uk=(persona == "legal_uk"), judge=_attribution_judge(state) if persona == "legal_uk" else None
         )
-    if persona in ("legal", "legal_uk", "legal_kr") and _legal_use_responses_api():
+    # See reason_loop's identical guard: /v1/responses has no DeepSeek support at all.
+    _force_completions = model_registry.is_deepseek_model(_model)
+    if persona in ("legal", "legal_uk", "legal_kr") and _legal_use_responses_api() and not _force_completions:
         _research = _uk_forced_first_tool(persona, state, query, tools)
         if _research:
             logging.info("legal_uk: first step requires %s session=%s", _research, session_id)
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, force_first_tool=_research, **_chain_kwargs)
-    elif persona in INTAKE_PERSONAS and _legal_use_responses_api():
+    elif persona in INTAKE_PERSONAS and _legal_use_responses_api() and not _force_completions:
         # Same reason as reason_loop's non-streaming branch — see _intake_model_override.
         chain = legal_responses_chain.streaming_run_function_chain_responses(state, messages, session_id=session_id, tools=tools, query=query, model=_model, reasoning_effort=_reasoning_effort, auto_approval=_auto_approval, **_chain_kwargs)
     else:
