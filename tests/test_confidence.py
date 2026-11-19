@@ -527,6 +527,25 @@ class LongAnswerCoverageTests(unittest.TestCase):
         spans = confidence.provenance_spans(text, ["unfair dismissal rules"])
         self.assertEqual(len(spans), 300)
 
+    def test_a_citation_dense_answer_at_realistic_scale_keeps_every_lines_coverage(self):
+        # The real incident, at scale: an 84KB answer (bigger than the real turn that triggered
+        # this) where EVERY line carries a citation anchor, same shape as a well-sourced UK legal
+        # answer after _format_legal_citation_links runs. Confirmed against the actual pre-fix
+        # confidence.py (git show f82e138:confidence.py) that this exact input returned 0 spans
+        # there -- this isn't a synthetic edge case, it's the real failure mode reproduced at the
+        # real scale.
+        lines = [
+            f'Point {i}: under <a href="https://www.legislation.gov.uk/ukpga/1996/18/section/98">'
+            f'section 98 ERA 1996</a> the dismissal for reason {i} must still be fair in all the '
+            f'circumstances, as confirmed in <a href="https://caselaw.nationalarchives.gov.uk/case/{i}">'
+            f'Smith v Employer {i}</a>.'
+            for i in range(300)
+        ]
+        text = "\n".join(lines)
+        self.assertGreater(len(text), 80_000)
+        spans = confidence.provenance_spans(text, ["section 98 era 1996 fair dismissal circumstances"])
+        self.assertEqual(len(spans), len(lines), "every citation-carrying line must still produce a span")
+
 
 class ConfidenceSourcesTests(unittest.TestCase):
     """Found live (2026-11-10): 67 of 71 spans on a UK answer were UNSOURCED because the corpus
