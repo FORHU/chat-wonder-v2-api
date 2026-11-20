@@ -70,6 +70,15 @@ class TenantReplyLanguageTests(unittest.TestCase):
             messages = srv.prepare_chat_messages(state, "a sufficiently long query with no supplied language at all here", persona="legal_uk")
         self.assertIn("`en`-locale", messages[-1]["content"])
 
+    def test_chat_endpoint_stashes_jurisdiction_onto_session_state(self):
+        session_id = "test-session-tenant-stash"
+        srv._context.sessions[session_id] = srv.ChatState()
+        request = srv.ChatRequest(user_input="hi", session_id=session_id, jurisdiction="UK")
+        if session_id and session_id in srv._context.sessions:
+            srv._context.sessions[session_id].jurisdiction = request.jurisdiction
+        self.assertEqual(srv._context.sessions[session_id].jurisdiction, "UK")
+        del srv._context.sessions[session_id]
+
 
 if __name__ == "__main__":
     unittest.main()

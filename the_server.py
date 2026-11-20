@@ -3992,6 +3992,7 @@ def chat(request: ChatRequest):
     if session_id and session_id in _context.sessions:
         # See the websocket path: prepare_chat_messages reads this off `state`.
         _context.sessions[session_id].reply_language = request.reply_language
+        _context.sessions[session_id].jurisdiction = request.jurisdiction
     if persona in ("legal", "legal_uk", "legal_kr") and session_id and session_id in _context.sessions:
         # Plain `def chat` runs in Starlette's threadpool, not the main event loop, so this
         # thread has none of its own to await onto — asyncio.run gives sync_active_case_documents
@@ -4683,6 +4684,7 @@ async def chat_stream(websocket: WebSocket):
             # through both reason loops would touch far more code than this.
             if session_id and session_id in _context.sessions:
                 _context.sessions[session_id].reply_language = request.reply_language
+                _context.sessions[session_id].jurisdiction = request.jurisdiction
             if persona in ("legal", "legal_uk", "legal_kr"):
                 await sync_active_case_documents(
                     session_id,
