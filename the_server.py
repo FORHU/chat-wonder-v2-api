@@ -142,13 +142,6 @@ class ChatState:
         # unlike last_outfit_ids_result above, so a result from turn N never resends on turn N+1.
         self.last_find_lawyer_result: list = []
         self.last_mark_case_ready: bool = False
-        # #157: caches the last {fields, missing} extraction result against a fingerprint of the
-        # conversation it was computed from (see _intake_conversation_fingerprint), so
-        # _extract_intake_fields skips its OpenAI call on a turn that added nothing new to
-        # extract from. Deliberately NOT reset per-turn like last_find_lawyer_result above --
-        # the point here is avoiding redundant work, not avoiding a stale resend, since the
-        # fingerprint check already makes a stale cache harmless.
-        self.intake_fields_cache: Optional[dict] = None
         self.active_case_documents: list = []
         self.case_document_cache: dict = {}
         # None = not yet synced this process; empty set = this turn has no case docs.
@@ -660,11 +653,6 @@ def _extract_meeting_destination(text: str) -> str | None:
 # [CASE_READY] reset and frames, the buffered (not live-streamed) answer — applies to both, so
 # check membership here rather than `persona == "intake"`.
 INTAKE_PERSONAS = ("intake", "intake_kr")
-
-# #157: the intake form's field list. Copied from the ticket's description of its screenshot, not
-# the screenshot itself (none was attached) -- CONFIRM WITH THE TEAM before treating these names
-# as final; the ticket explicitly flags the field list as unconfirmed.
-INTAKE_FORM_FIELDS = ("parties", "type_of_action", "venue", "timeline", "witnesses", "client_goals")
 
 # Per-tenant reply-language restriction (issue #145 / CW-6): keyed by the same `jurisdiction`
 # value process_persona above already normalizes with .strip().upper(), so the clamp site in
@@ -1265,23 +1253,10 @@ def _generate_mind_map(legal_response: str, state, case_context: str | None = No
         return None
 
 
-def _intake_conversation_fingerprint(state) -> str:
-    """A cheap fingerprint of the intake conversation so far, for #157/#158's caches: turn count
-    plus each turn's length, not a hash of the full text (which can be large and isn't needed --
-    any real edit changes a length). Good enough to tell "nothing changed since last time" apart
-    from "a new turn happened", which is all these caches need to decide."""
-    import hashlib
-    parts = [str(len(state.prompt))]
-    for p, g in zip(state.prompt, state.generated):
-        parts.append(str(len(p or "")))
-        parts.append(str(len(g or "")))
-    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
-
-
 def _intake_conversation_text(state, max_chars: int = 12000) -> str:
     """The intake conversation so far as plain turns, newest last, for a side LLM call -- same
     truncation idiom as _generate_mind_map's legal_response: a hard character cap, not a token
-    budget, which is good enough for a lightweight extraction/suggestion call."""
+    budget, which is good enough for a lightweight suggestion call."""
     lines = []
     for p, g in zip(state.prompt, state.generated):
         if p:
@@ -1292,78 +1267,7 @@ def _intake_conversation_text(state, max_chars: int = 12000) -> str:
     return text[-max_chars:]
 
 
-def _intake_fields_prompt(conversation: str) -> str:
-    fields_list = ", ".join(INTAKE_FORM_FIELDS)
-    return (
-        "You are mapping an already-completed client-intake conversation onto a structured "
-        "intake form. The conversation below already contains everything you know about this "
-        "case -- do not ask the client anything, do not invent facts, and do not guess at a "
-        "field the conversation doesn't clearly settle.\n\n"
-        f"Form fields: {fields_list}.\n\n"
-        "Return only valid JSON of this exact shape:\n"
-        '{"fields": {"<field name>": "<short value, drawn only from the client\'s own facts>"}, '
-        '"missing": ["<field name>", ...]}\n\n'
-        "Rules:\n"
-        "- Every field in the form field list belongs in exactly one of \"fields\" or \"missing\".\n"
-        "- A field goes in \"fields\" only when the conversation clearly settles it. The slightest "
-        "doubt means it goes in \"missing\" instead -- a wrong guess is worse than an honest gap.\n"
-        "- A \"fields\" value is a short, factual summary (one sentence or a short list), never a "
-        "copy of the whole conversation.\n\n"
-        f"CONVERSATION:\n{conversation}"
-    )
-
-
-def _extract_intake_fields(state) -> dict | None:
-    """#157: maps what the intake conversation has ALREADY established onto the form's named
-    fields, as {"fields": {...}, "missing": [...]}. This is not new extraction -- process_persona's
-    own conversation already does the work of drawing this information out of the client (see
-    CONTEXT.md and the intake prompt); this is a side LLM call that re-expresses what's already in
-    state.prompt/state.generated in the shape ilovelawyer-client's question-loop UI needs, the
-    same way _generate_mind_map re-expresses a legal answer as a tree. Cached per
-    _intake_conversation_fingerprint so a turn that adds nothing new (e.g. a tool-only reply)
-    skips the extra OpenAI call. Returns None on any failure or an empty conversation -- exactly
-    like _generate_mind_map, a missing extraction never fails the turn."""
-    if not state.prompt:
-        return None
-    fingerprint = _intake_conversation_fingerprint(state)
-    cached = getattr(state, "intake_fields_cache", None)
-    if cached and cached.get("fingerprint") == fingerprint:
-        return cached.get("result")
-    try:
-        conversation = _intake_conversation_text(state)
-        messages = [
-            {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
-            {"role": "user", "content": _intake_fields_prompt(conversation)},
-        ]
-        params = dict(model=_context.model, messages=messages, temperature=0.1, max_tokens=900)
-        try:
-            completion = state.openai_client.chat.completions.create(**params, response_format={"type": "json_object"})
-        except Exception as e:
-            if "response_format" not in str(e) and "json_object" not in str(e):
-                raise
-            logging.info("_extract_intake_fields: response_format unsupported, retrying without it (%s)", e)
-            completion = state.openai_client.chat.completions.create(**params)
-        raw = completion.choices[0].message.content or ""
-        parsed = _extract_json_object(raw)
-        parsed_fields = parsed.get("fields") if isinstance(parsed, dict) and isinstance(parsed.get("fields"), dict) else {}
-        # Never trust the model's own "missing" bookkeeping -- derive it from INTAKE_FORM_FIELDS
-        # minus whatever actually landed in "fields", so every field ends up in exactly one
-        # bucket regardless of what the model did or didn't say about it.
-        fields = {k: v for k, v in parsed_fields.items() if k in INTAKE_FORM_FIELDS and isinstance(v, str) and v.strip()}
-        missing = [f for f in INTAKE_FORM_FIELDS if f not in fields]
-        result = {"fields": fields, "missing": missing}
-        state.intake_fields_cache = {"fingerprint": fingerprint, "result": result}
-        return result
-    except Exception as e:
-        logging.warning(f"_extract_intake_fields failed (non-fatal): {e}")
-        return None
-
-
-def _intake_suggestions_prompt(conversation: str, fields_result: dict | None) -> str:
-    known = ""
-    if fields_result and fields_result.get("fields"):
-        known_lines = "\n".join(f"- {k}: {v}" for k, v in fields_result["fields"].items())
-        known = f"\nAlready established:\n{known_lines}\n"
+def _intake_suggestions_prompt(conversation: str) -> str:
     return (
         "The assistant below just asked the client a question during a legal-intake "
         "conversation. Suggest 2 to 4 short, tappable replies the client could pick instead of "
@@ -1371,25 +1275,26 @@ def _intake_suggestions_prompt(conversation: str, fields_result: dict | None) ->
         "conversation, never a generic placeholder like \"Yes\" or \"Tell me more\".\n\n"
         "If nothing in the conversation supports a good guess at the next answer, return an "
         "empty list -- a wrong or generic suggestion is worse than none.\n\n"
-        'Return only valid JSON: {"suggestions": ["...", ...]}\n'
-        f"{known}\n"
+        'Return only valid JSON: {"suggestions": ["...", ...]}\n\n'
         f"CONVERSATION (the assistant's last message is the question being answered):\n{conversation}"
     )
 
 
-def _generate_intake_suggestions(state, fields_result: dict | None) -> list:
+def _generate_intake_suggestions(state) -> list:
     """#158: 2-4 tappable reply candidates for the question the assistant's own last turn just
-    asked, grounded in the case's answers-so-far (#157's fields_result, when available). Returns
-    [] whenever the model isn't confident, the conversation hasn't started, or the call fails --
-    an empty list, never an omission, per the ticket's acceptance criterion that a weak
-    suggestion must never be shown."""
+    asked, grounded in the conversation so far. (#157's field/missing mapping is NOT this
+    function's job -- ilovelawyer-api's existing ClientIntakeSvc already derives that from data it
+    has, so CW never needs its own second extraction of the same facts; see the plan's
+    "Related in-flight PRs" note.) Returns [] whenever the model isn't confident, the conversation
+    hasn't started, or the call fails -- an empty list, never an omission, per the ticket's
+    acceptance criterion that a weak suggestion must never be shown."""
     if not state.generated or not (state.generated[-1] or "").strip():
         return []
     try:
         conversation = _intake_conversation_text(state)
         messages = [
             {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
-            {"role": "user", "content": _intake_suggestions_prompt(conversation, fields_result)},
+            {"role": "user", "content": _intake_suggestions_prompt(conversation)},
         ]
         params = dict(model=_context.model, messages=messages, temperature=0.3, max_tokens=300)
         try:
@@ -1410,16 +1315,17 @@ def _generate_intake_suggestions(state, fields_result: dict | None) -> list:
         return []
 
 
-def _build_intake_state_payload(state) -> dict | None:
-    """Combines #157's fields/missing and #158's suggestions into the single payload
-    ilovelawyer-client reads (sent as the [INTAKE_STATE] frame by the websocket handler) -- one
-    contract for both tickets, not two independent shapes. None when there's no conversation yet
-    to extract anything from."""
-    fields_result = _extract_intake_fields(state)
-    if fields_result is None:
+def _build_intake_suggestions_payload(state) -> dict | None:
+    """#158's payload, sent as the [INTAKE_SUGGESTIONS] frame by the websocket handler. Formerly
+    also carried #157's fields/missing (as [INTAKE_STATE]) -- dropped per the plan's reconciliation:
+    ilovelawyer-api's ClientIntakeSvc already derives those fields without a second LLM call, so
+    duplicating that extraction here only doubled the cost and risked the two disagreeing. None
+    only when there's no assistant turn yet to suggest a reply to -- an empty `suggestions` list
+    (the model found nothing confident to suggest) is still a real payload, sent as {"suggestions":
+    []} per the ticket's acceptance criterion that this case is explicit, never an omission."""
+    if not state.generated or not (state.generated[-1] or "").strip():
         return None
-    suggestions = _generate_intake_suggestions(state, fields_result)
-    return {"fields": fields_result["fields"], "missing": fields_result["missing"], "suggestions": suggestions}
+    return {"suggestions": _generate_intake_suggestions(state)}
 
 
 def _generate_reasoning_explanation(user_input: str, legal_response: str, search_results: list, tool_log: list, state) -> dict | None:
@@ -5129,17 +5035,19 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[LAWYER_MATCHES]{json.dumps(state.last_find_lawyer_result)}")
                 if persona in INTAKE_PERSONAS and state.last_mark_case_ready:
                     await websocket.send_text("[CASE_READY]true")
-                # #157/#158: structured fields/missing + suggested replies, one payload for both
-                # tickets (see _build_intake_state_payload). A side LLM call, same shape as the
-                # mind-map/reasoning extras below -- never allowed to fail the turn itself.
+                # #158: suggested replies for the question the assistant's own last turn just
+                # asked (see _build_intake_suggestions_payload). A side LLM call, same shape as
+                # the mind-map/reasoning extras below -- never allowed to fail the turn itself.
+                # #157's fields/missing is deliberately NOT sent from here -- ilovelawyer-api's
+                # existing ClientIntakeSvc already derives it without a second LLM call.
                 if persona in INTAKE_PERSONAS:
                     try:
-                        intake_state_payload = _build_intake_state_payload(state)
+                        intake_suggestions_payload = _build_intake_suggestions_payload(state)
                     except Exception as e:
-                        logging.warning(f"_build_intake_state_payload failed (non-fatal): {e}")
-                        intake_state_payload = None
-                    if intake_state_payload is not None:
-                        await websocket.send_text(f"[INTAKE_STATE]{json.dumps(intake_state_payload)}")
+                        logging.warning(f"_build_intake_suggestions_payload failed (non-fatal): {e}")
+                        intake_suggestions_payload = None
+                    if intake_suggestions_payload is not None:
+                        await websocket.send_text(f"[INTAKE_SUGGESTIONS]{json.dumps(intake_suggestions_payload)}")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
                 if _garment_gender in ("MALE", "FEMALE"):
                     await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
