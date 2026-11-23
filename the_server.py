@@ -560,6 +560,20 @@ class DescribeImageRequest(BaseModel):
     filename: Optional[str] = None
     session_id: Optional[str] = None
 
+class ExtractEvidenceFactsRequest(BaseModel):
+    image_url: str
+    filename: Optional[str] = None
+    session_id: Optional[str] = None
+
+class EvidenceGap(BaseModel):
+    id: str
+    label: str
+    detail: Optional[str] = None
+
+class SuggestNextEvidenceRequest(BaseModel):
+    gaps: List[EvidenceGap] = []
+    session_id: Optional[str] = None
+
 class CategorizeDocumentRequest(BaseModel):
     text: str
     filename: Optional[str] = None
@@ -5842,6 +5856,147 @@ async def describe_image(request: DescribeImageRequest):
         "description": description or None,
         "usage": llm_usage.current().to_dict(),
     }
+
+
+@app.post("/api/legal/extract-evidence-facts")
+async def extract_evidence_facts(request: ExtractEvidenceFactsRequest):
+    """#159: the structured counterpart to describe_image for evidence that's an email or
+    message screenshot -- sender/date/amount/what-was-agreed instead of a free-text description.
+    One vision call attempts structured facts first and falls back to a free-text description
+    (describe_image's own shape) only when the image plainly isn't an email/message screenshot,
+    so ilovelawyer-api's document-extraction pipeline can call this in place of /describe-image
+    for any image Textract found no text in, without needing its own screenshot classifier.
+    Fetches by presigned URL for the same reason describe_image does: the caller's images live in
+    its own S3 bucket, not ours."""
+    llm_usage.start_turn()
+    from urllib.parse import urlparse
+    filename = request.filename or os.path.basename(urlparse(request.image_url).path)
+    session_id = request.session_id
+    broadcast_trace("request", f"Extract evidence facts — file: {filename}", session_id,
+        summary=f"Starting AI fact extraction from uploaded evidence: '{filename}'")
+
+    import requests
+    try:
+        http_response = requests.get(request.image_url, timeout=30)
+        http_response.raise_for_status()
+    except Exception as e:
+        logging.warning(f"[Extract Evidence Facts] failed to fetch image_url: {e}")
+        raise HTTPException(status_code=404, detail="Could not download the image from the provided URL.")
+    contents = http_response.content
+
+    if len(contents) > VISION_MAX_IMAGE_BYTES:
+        logging.warning(f"[Extract Evidence Facts] '{filename}' exceeds {VISION_MAX_IMAGE_BYTES} bytes; skipping")
+        broadcast_trace("cognition", f"Image too large to analyze — '{filename}'", session_id,
+            summary="The photo is too large for the AI fact extraction and was skipped.")
+        return {"success": False, "is_email_screenshot": False, "facts": None, "description": None, "usage": llm_usage.current().to_dict()}
+
+    if not _context.openai_api_key:
+        return {"success": False, "is_email_screenshot": False, "facts": None, "description": None, "usage": llm_usage.current().to_dict()}
+
+    try:
+        import base64, mimetypes
+        ext = os.path.splitext(filename)[1].lower()
+        b64 = base64.b64encode(contents).decode("utf-8")
+        mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext[1:]}"
+        broadcast_trace("action", "Extracting evidence facts with AI vision...", session_id,
+            summary="The AI is reading the photo for the facts it establishes.")
+        client = make_openai_client(api_key=_context.openai_api_key)
+        prompt = (
+            "This image was uploaded as evidence in a legal case. First decide whether it is a "
+            "screenshot of an email or a chat/message thread.\n\n"
+            "If it IS an email or message screenshot: extract only what the image actually shows "
+            "-- sender, date, amount (if any sum of money appears), and a short factual summary "
+            "of what was agreed or said. Leave a field null rather than guessing.\n\n"
+            "If it is NOT an email or message screenshot (e.g. a photo of damage, a document "
+            "page, a scene): instead describe in detail and factually what it shows -- the "
+            "setting, any people present (without trying to identify who they are), objects, "
+            "vehicles, visible damage or injuries, signage, and any visible text. Do not offer "
+            "legal conclusions or speculate about fault. If the image is unclear, say so "
+            "explicitly.\n\n"
+            "Return only valid JSON of this exact shape:\n"
+            '{"is_email_screenshot": true|false, '
+            '"facts": {"sender": str|null, "date": str|null, "amount": str|null, "agreement": str|null} | null, '
+            '"description": str | null}\n'
+            "\"facts\" is set only when is_email_screenshot is true; \"description\" only when it "
+            "is false."
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+            ]}],
+            max_tokens=800,
+            response_format={"type": "json_object"},
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = _extract_json_object(raw) if raw else {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except Exception as e:
+        logging.warning(f"[Extract Evidence Facts] vision call failed (non-fatal): {e}")
+        broadcast_trace("cognition", f"Evidence fact extraction failed — {e}", session_id,
+            summary="The AI could not extract facts from the photo due to an error.")
+        return {"success": False, "is_email_screenshot": False, "facts": None, "description": None, "usage": llm_usage.current().to_dict()}
+
+    is_email = bool(parsed.get("is_email_screenshot"))
+    facts = parsed.get("facts") if is_email and isinstance(parsed.get("facts"), dict) else None
+    description = (parsed.get("description") or None) if not is_email else None
+    if description is not None and not isinstance(description, str):
+        description = None
+    return {
+        "success": bool(facts or description),
+        "is_email_screenshot": is_email,
+        "facts": facts,
+        "description": description,
+        "usage": llm_usage.current().to_dict(),
+    }
+
+
+@app.post("/api/legal/suggest-next-evidence")
+async def suggest_next_evidence(request: SuggestNextEvidenceRequest):
+    """#159: given the case's open evidence gaps (ilovelawyer-api's CaseMissingEvidence rows,
+    passed in rather than looked up here -- gap persistence lives entirely on that side), picks
+    the single one most worth asking for next and phrases it as a short, client-facing prompt.
+    Returns success: false / suggestion: null when there are no gaps or the call fails -- the
+    client UI should show nothing in that case, not an error."""
+    llm_usage.start_turn()
+    gaps = request.gaps or []
+    if not gaps or not _context.openai_api_key:
+        return {"success": False, "suggestion": None, "usage": llm_usage.current().to_dict()}
+    try:
+        gap_lines = "\n".join(
+            f"- id={g.id}: {g.label}" + (f" ({g.detail})" if g.detail else "")
+            for g in gaps
+        )
+        prompt = (
+            "A client in a legal-intake chat has these open evidence gaps on their case:\n\n"
+            f"{gap_lines}\n\n"
+            "Pick the single one that would most help their case if filled next, and phrase a "
+            "short, friendly, one-sentence prompt asking the client to upload it. Return only "
+            'valid JSON: {"gap_id": "<the id you picked, exactly as given>", "message": "<the one-sentence prompt>"}'
+        )
+        client = make_openai_client(api_key=_context.openai_api_key)
+        response = client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=200,
+            response_format={"type": "json_object"},
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = _extract_json_object(raw) if raw else {}
+        gap_id = parsed.get("gap_id") if isinstance(parsed, dict) else None
+        message = parsed.get("message") if isinstance(parsed, dict) else None
+        valid_ids = {g.id for g in gaps}
+        if gap_id not in valid_ids or not isinstance(message, str) or not message.strip():
+            return {"success": False, "suggestion": None, "usage": llm_usage.current().to_dict()}
+        return {"success": True, "suggestion": {"gapId": gap_id, "message": message.strip()}, "usage": llm_usage.current().to_dict()}
+    except Exception as e:
+        logging.warning(f"[Suggest Next Evidence] failed (non-fatal): {e}")
+        return {"success": False, "suggestion": None, "usage": llm_usage.current().to_dict()}
 
 
 @app.post("/api/legal/upload-and-analyze")
