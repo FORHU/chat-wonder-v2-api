@@ -640,6 +640,16 @@ def _extract_meeting_destination(text: str) -> str | None:
 # check membership here rather than `persona == "intake"`.
 INTAKE_PERSONAS = ("intake", "intake_kr")
 
+# Per-tenant reply-language restriction (issue #145 / CW-6): keyed by the same `jurisdiction`
+# value process_persona above already normalizes with .strip().upper(), so the clamp site in
+# prepare_chat_messages applies the identical normalization before this lookup.
+TENANT_ALLOWED_LANGUAGES = {
+    "PH": frozenset({"en", "tl"}),
+    "KR": frozenset({"en", "ko"}),
+    "UK": frozenset({"en"}),
+}
+TENANT_DEFAULT_LANGUAGE = {"PH": "en", "KR": "en", "UK": "en"}
+
 
 def process_persona(user_input: str, jurisdiction: str = None):
     """Detect [legal ai] persona tag. Returns (persona, cleaned_input, filtered_tools, addendum_override).
@@ -1724,6 +1734,14 @@ def prepare_chat_messages(state, query: str, addendum_override: str = None, pers
         # which the intake path doesn't run (so no reply_language arrives here for it).
         elif persona == "intake_kr" and len((query or "").split()) < 5 and any(_HANGUL_RE.search(p or "") for p in (state.prompt or [])[-3:]):
             language = "ko"
+
+    # Clamp whichever language the branches above produced (supplied or langid-detected) to the
+    # tenant's allowed set — see TENANT_ALLOWED_LANGUAGES. No tenant, or an unrecognized one,
+    # leaves `language` untouched.
+    tenant = (getattr(state, "jurisdiction", None) or "").strip().upper()
+    allowed = TENANT_ALLOWED_LANGUAGES.get(tenant)
+    if allowed and language not in allowed:
+        language = TENANT_DEFAULT_LANGUAGE[tenant]
 
     system_content = ""
     if addendum_override:
@@ -3974,6 +3992,7 @@ def chat(request: ChatRequest):
     if session_id and session_id in _context.sessions:
         # See the websocket path: prepare_chat_messages reads this off `state`.
         _context.sessions[session_id].reply_language = request.reply_language
+        _context.sessions[session_id].jurisdiction = request.jurisdiction
     if persona in ("legal", "legal_uk", "legal_kr") and session_id and session_id in _context.sessions:
         # Plain `def chat` runs in Starlette's threadpool, not the main event loop, so this
         # thread has none of its own to await onto — asyncio.run gives sync_active_case_documents
@@ -4665,6 +4684,7 @@ async def chat_stream(websocket: WebSocket):
             # through both reason loops would touch far more code than this.
             if session_id and session_id in _context.sessions:
                 _context.sessions[session_id].reply_language = request.reply_language
+                _context.sessions[session_id].jurisdiction = request.jurisdiction
             if persona in ("legal", "legal_uk", "legal_kr"):
                 await sync_active_case_documents(
                     session_id,
