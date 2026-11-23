@@ -1322,13 +1322,36 @@ def _intake_suggestions_prompt(conversation: str) -> str:
     return (
         "The assistant below just asked the client a question during a legal-intake "
         "conversation. Suggest 2 to 4 short, tappable replies the client could pick instead of "
-        "typing -- each one a plausible, specific answer grounded in facts already in the "
-        "conversation, never a generic placeholder like \"Yes\" or \"Tell me more\".\n\n"
-        "If nothing in the conversation supports a good guess at the next answer, return an "
-        "empty list -- a wrong or generic suggestion is worse than none.\n\n"
+        "typing.\n\n"
+        "Only suggest for a CLOSED question -- one with a short, specific, nameable answer: a "
+        "place, a date or rough timeframe, a yes/no, a pick-one among named options. Return an "
+        "empty list for an OPEN question that invites the client to describe, explain, or tell "
+        "more in their own words (\"what happened\", \"tell me more\", \"can you describe...\") "
+        "-- there is no finite set of good guesses for that, so suggesting anything there is "
+        "always wrong, not just sometimes risky.\n\n"
+        "For a closed question, each suggestion must be grounded in facts already in the "
+        "conversation, never a generic placeholder like \"Yes\" or \"Tell me more\". If the "
+        "question offers its own fixed set of named options (e.g. lists three named choices), "
+        "your suggestions must be exactly those options, worded exactly as given -- never split "
+        "a compound option into parts (\"England and Wales\" is one option, not two) and never "
+        "rephrase a named option into a different one. If nothing in the conversation supports a "
+        "good guess even for a closed question, return an empty list -- a wrong or generic "
+        "suggestion is worse than none.\n\n"
         'Return only valid JSON: {"suggestions": ["...", ...]}\n\n'
         f"CONVERSATION (the assistant's last message is the question being answered):\n{conversation}"
     )
+
+
+# CW's own fixed offering of the jurisdiction question (intake_prompt.txt's PART OF THE UK
+# section mandates this exact wording: "offering only England and Wales, Scotland or Northern
+# Ireland"). Detected here so the real three valid values are returned verbatim rather than
+# trusted to a free-form rephrasing -- live QA (2026-11-23) showed the model split "England and
+# Wales" into two separate, invalid suggestions ("England", "Wales") despite the prompt already
+# saying not to; this is the same "stop trusting prose, verify in code" fix as
+# _verified_uk_jurisdiction, applied to the one question whose exact answer set is known in
+# advance.
+_JURISDICTION_QUESTION_MARKERS = ("England and Wales, Scotland, or Northern Ireland", "England and Wales, Scotland or Northern Ireland")
+_JURISDICTION_SUGGESTIONS = ["England and Wales", "Scotland", "Northern Ireland"]
 
 
 def _generate_intake_suggestions(state) -> list:
@@ -1341,6 +1364,9 @@ def _generate_intake_suggestions(state) -> list:
     acceptance criterion that a weak suggestion must never be shown."""
     if not state.generated or not (state.generated[-1] or "").strip():
         return []
+    last_turn = state.generated[-1]
+    if any(marker in last_turn for marker in _JURISDICTION_QUESTION_MARKERS):
+        return list(_JURISDICTION_SUGGESTIONS)
     try:
         conversation = _intake_conversation_text(state)
         messages = [

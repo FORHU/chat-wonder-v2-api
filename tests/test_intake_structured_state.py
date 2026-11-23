@@ -62,6 +62,20 @@ class GenerateIntakeSuggestionsTests(unittest.TestCase):
         state.openai_client = NS(chat=NS(completions=NS(create=raise_err)))
         self.assertEqual(srv._generate_intake_suggestions(state), [])
 
+    def test_the_jurisdiction_question_always_gets_the_real_three_values_verbatim(self):
+        """Live QA (2026-11-23) caught the model splitting "England and Wales" into two separate,
+        invalid suggestions. This question's answer set is known in advance, so it's short-circuited
+        before any OpenAI call is even made -- never trusted to a free-form rephrasing."""
+        state = srv.ChatState()
+        state.prompt = ["I was dismissed from my job."]
+        state.generated = ["Which part of the UK did this happen in — England and Wales, Scotland, or Northern Ireland — and roughly where?"]
+
+        def fail_if_called(**kw):
+            raise AssertionError("should have short-circuited before calling OpenAI")
+
+        state.openai_client = NS(chat=NS(completions=NS(create=fail_if_called)))
+        self.assertEqual(srv._generate_intake_suggestions(state), ["England and Wales", "Scotland", "Northern Ireland"])
+
 
 class BuildIntakeSuggestionsPayloadTests(unittest.TestCase):
     def test_returns_none_when_the_assistant_has_not_spoken_yet(self):
