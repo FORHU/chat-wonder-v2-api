@@ -1267,6 +1267,57 @@ def _intake_conversation_text(state, max_chars: int = 12000) -> str:
     return text[-max_chars:]
 
 
+# Mirrors ilovelawyer-client's regionFromDescription (src/lib/cases/describe-case.ts) exactly --
+# same signals, same "only a name found in exactly one part of the UK counts" rule. Duplicated
+# rather than shared across a Python/TS boundary, but kept in lockstep deliberately: both exist to
+# answer the same question (does the client's own text name a part of the UK?) and both must stay
+# conservative, since each is the deterministic backstop for a model-or-heuristic guess elsewhere.
+_UK_REGION_SIGNALS = (
+    (re.compile(r"\b(?:northern ireland|belfast|derry|londonderry|lisburn)\b", re.I), "Northern Ireland"),
+    (re.compile(r"\b(?:scotland|edinburgh|glasgow|aberdeen|dundee|inverness)\b", re.I), "Scotland"),
+    (
+        re.compile(
+            r"(?<!new )\bengland\b|(?<!new south )\bwales\b|\b(?:london|manchester|birmingham|leeds|liverpool|bristol|"
+            r"sheffield|nottingham|leicester|coventry|bradford|cardiff|swansea|newport)\b",
+            re.I,
+        ),
+        "England and Wales",
+    ),
+)
+
+
+def _uk_region_from_text(text: str) -> str | None:
+    """The part of the UK `text` unambiguously names, or None -- None as well when it names more
+    than one part (e.g. "moved from Glasgow to London")."""
+    named = {region for pattern, region in _UK_REGION_SIGNALS if pattern.search(text)}
+    return named.pop() if len(named) == 1 else None
+
+
+def _verified_uk_jurisdiction(session_id: str, claimed: str | None) -> str | None:
+    """#986: create_case's uk_jurisdiction, verified against the client's OWN messages
+    (state.prompt only -- never state.generated, so the model can't corroborate its own guess)
+    rather than trusted from the model's tool-call argument. Caught live: the model repeatedly
+    set uk_jurisdiction to "England and Wales" with nothing in the conversation naming a place,
+    in the same turn its own reply was still asking which part of the UK it was -- two rounds of
+    strengthening the prompt's "never guess" instruction didn't stop it. This makes the field's
+    correctness independent of the model's compliance: a claimed value survives only if the
+    client's own words actually, unambiguously name that same part of the UK; otherwise it's
+    dropped (logged, not an error) exactly as if the model had left it out, which is what should
+    have happened. Also used to confirm or ignore a confidently-named claim either way."""
+    if not claimed:
+        return None
+    state = _context.sessions.get(session_id)
+    client_text = "\n".join(p for p in (getattr(state, "prompt", None) or []) if p)
+    confirmed = _uk_region_from_text(client_text)
+    if confirmed == claimed:
+        return claimed
+    logging.warning(
+        "create_case: dropping unverified uk_jurisdiction=%r (client's own messages name %r) session=%s",
+        claimed, confirmed, session_id,
+    )
+    return None
+
+
 def _intake_suggestions_prompt(conversation: str) -> str:
     return (
         "The assistant below just asked the client a question during a legal-intake "
@@ -2194,6 +2245,12 @@ def execute_function_call(function_call: dict, session_id: str = None):
             _cc_state = _context.sessions.get(session_id)
             func_args["case_id"] = getattr(_cc_state, "case_id", None)
             func_args["user_id"] = getattr(_cc_state, "user_id", None)
+            # #986: never trust the model's own uk_jurisdiction claim -- verify it against the
+            # client's actual messages first (see _verified_uk_jurisdiction's docstring).
+            if "uk_jurisdiction" in func_args:
+                func_args["uk_jurisdiction"] = _verified_uk_jurisdiction(session_id, func_args.get("uk_jurisdiction"))
+                if func_args["uk_jurisdiction"] is None:
+                    func_args.pop("uk_jurisdiction")
         if func_name == "get_case_document" and session_id:
             _cd_state = _context.sessions.get(session_id)
             # The model is only ever shown a handle (F1, ...), never the real id — see
