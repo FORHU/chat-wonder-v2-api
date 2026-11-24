@@ -553,6 +553,20 @@ class DescribeImageRequest(BaseModel):
     filename: Optional[str] = None
     session_id: Optional[str] = None
 
+class ExtractEvidenceFactsRequest(BaseModel):
+    image_url: str
+    filename: Optional[str] = None
+    session_id: Optional[str] = None
+
+class EvidenceGap(BaseModel):
+    id: str
+    label: str
+    detail: Optional[str] = None
+
+class SuggestNextEvidenceRequest(BaseModel):
+    gaps: List[EvidenceGap] = []
+    session_id: Optional[str] = None
+
 class CategorizeDocumentRequest(BaseModel):
     text: str
     filename: Optional[str] = None
@@ -1239,6 +1253,178 @@ def _generate_mind_map(legal_response: str, state, case_context: str | None = No
         return None
 
 
+def _intake_conversation_text(state, max_chars: int = 12000) -> str:
+    """The intake conversation so far as plain turns, newest last, for a side LLM call -- same
+    truncation idiom as _generate_mind_map's legal_response: a hard character cap, not a token
+    budget, which is good enough for a lightweight suggestion call."""
+    lines = []
+    for p, g in zip(state.prompt, state.generated):
+        if p:
+            lines.append(f"Client: {p}")
+        if g:
+            lines.append(f"Assistant: {g}")
+    text = "\n".join(lines)
+    return text[-max_chars:]
+
+
+# Mirrors ilovelawyer-client's regionFromDescription (src/lib/cases/describe-case.ts) exactly --
+# same signals, same "only a name found in exactly one part of the UK counts" rule. Duplicated
+# rather than shared across a Python/TS boundary, but kept in lockstep deliberately: both exist to
+# answer the same question (does the client's own text name a part of the UK?) and both must stay
+# conservative, since each is the deterministic backstop for a model-or-heuristic guess elsewhere.
+_UK_REGION_SIGNALS = (
+    (re.compile(r"\b(?:northern ireland|belfast|derry|londonderry|lisburn)\b", re.I), "Northern Ireland"),
+    (re.compile(r"\b(?:scotland|edinburgh|glasgow|aberdeen|dundee|inverness)\b", re.I), "Scotland"),
+    (
+        re.compile(
+            r"(?<!new )\bengland\b|(?<!new south )\bwales\b|\b(?:london|manchester|birmingham|leeds|liverpool|bristol|"
+            r"sheffield|nottingham|leicester|coventry|bradford|cardiff|swansea|newport)\b",
+            re.I,
+        ),
+        "England and Wales",
+    ),
+)
+
+
+def _uk_region_from_text(text: str) -> str | None:
+    """The part of the UK `text` unambiguously names, or None -- None as well when it names more
+    than one part (e.g. "moved from Glasgow to London")."""
+    named = {region for pattern, region in _UK_REGION_SIGNALS if pattern.search(text)}
+    return named.pop() if len(named) == 1 else None
+
+
+def _verified_uk_jurisdiction(session_id: str, claimed: str | None) -> str | None:
+    """#986: create_case's uk_jurisdiction, verified against the client's OWN messages
+    (state.prompt only -- never state.generated, so the model can't corroborate its own guess)
+    rather than trusted from the model's tool-call argument. Caught live: the model repeatedly
+    set uk_jurisdiction to "England and Wales" with nothing in the conversation naming a place,
+    in the same turn its own reply was still asking which part of the UK it was -- two rounds of
+    strengthening the prompt's "never guess" instruction didn't stop it. This makes the field's
+    correctness independent of the model's compliance: a claimed value survives only if the
+    client's own words actually, unambiguously name that same part of the UK; otherwise it's
+    dropped (logged, not an error) exactly as if the model had left it out, which is what should
+    have happened. Also used to confirm or ignore a confidently-named claim either way."""
+    if not claimed:
+        return None
+    state = _context.sessions.get(session_id)
+    client_text = "\n".join(p for p in (getattr(state, "prompt", None) or []) if p)
+    confirmed = _uk_region_from_text(client_text)
+    if confirmed == claimed:
+        logging.info(
+            "create_case: uk_jurisdiction=%r confirmed by client's own messages session=%s",
+            claimed, session_id,
+        )
+        return claimed
+    logging.warning(
+        "create_case: dropping unverified uk_jurisdiction=%r (client's own messages name %r) session=%s",
+        claimed, confirmed, session_id,
+    )
+    return None
+
+
+def _intake_suggestions_prompt(conversation: str) -> str:
+    return (
+        "The assistant below just asked the client a question during a legal-intake "
+        "conversation. Suggest 2 to 4 short, tappable replies the client could pick instead of "
+        "typing.\n\n"
+        "Only suggest for a CLOSED question -- one with a short, specific, nameable answer: a "
+        "place, a date or rough timeframe, a yes/no, a pick-one among named options. Return an "
+        "empty list for an OPEN question that invites the client to describe, explain, or tell "
+        "more in their own words (\"what happened\", \"tell me more\", \"can you describe...\") "
+        "-- there is no finite set of good guesses for that, so suggesting anything there is "
+        "always wrong, not just sometimes risky.\n\n"
+        "For a closed question, each suggestion must be grounded in facts already in the "
+        "conversation, never a generic placeholder like \"Yes\" or \"Tell me more\". This is "
+        "strictest for a question asking the client to name a specific real-world person, "
+        "company, or place that hasn't been named yet anywhere in the conversation (e.g. \"what's "
+        "the name of the moving company you booked?\") -- nothing in the conversation can ground "
+        "a guess at a name nobody has given, so a plausible-sounding invented one (\"ABC Movers\", "
+        "\"Speedy Transport Co.\") is exactly as fabricated as a wrong one. It's also not a "
+        "harmless guess: handing someone describing a real problem a row of made-up options to "
+        "pick from reads as not taking their situation seriously, as if it were a form to fill in "
+        "rather than their actual complaint. Always return an empty list for this shape of "
+        "question instead, even though it's otherwise short and specific enough to look closed. "
+        "If the "
+        "question offers its own fixed set of named options (e.g. lists three named choices), "
+        "your suggestions must be exactly those options, worded exactly as given -- never split "
+        "a compound option into parts (\"England and Wales\" is one option, not two) and never "
+        "rephrase a named option into a different one. If nothing in the conversation supports a "
+        "good guess even for a closed question, return an empty list -- a wrong or generic "
+        "suggestion is worse than none.\n\n"
+        "The question is meant to ask about ONE fact, but doesn't always: if it actually bundles "
+        "two distinct asks together (e.g. \"roughly when did this happen, and where in the UK "
+        "are you?\", or \"what happened, and roughly when?\"), a suggestion list can only ever "
+        "answer one of them -- tapping it would look like it answered the whole question when it "
+        "didn't. Return an empty list whenever the question asks about more than one distinct "
+        "fact, even if one half would otherwise qualify as closed on its own.\n\n"
+        'Return only valid JSON: {"suggestions": ["...", ...]}\n\n'
+        f"CONVERSATION (the assistant's last message is the question being answered):\n{conversation}"
+    )
+
+
+# CW's own fixed offering of the jurisdiction question (intake_prompt.txt's PART OF THE UK
+# section mandates this exact wording: "offering only England and Wales, Scotland or Northern
+# Ireland"). Detected here so the real three valid values are returned verbatim rather than
+# trusted to a free-form rephrasing -- live QA (2026-11-23) showed the model split "England and
+# Wales" into two separate, invalid suggestions ("England", "Wales") despite the prompt already
+# saying not to; this is the same "stop trusting prose, verify in code" fix as
+# _verified_uk_jurisdiction, applied to the one question whose exact answer set is known in
+# advance.
+_JURISDICTION_QUESTION_MARKERS = ("England and Wales, Scotland, or Northern Ireland", "England and Wales, Scotland or Northern Ireland")
+_JURISDICTION_SUGGESTIONS = ["England and Wales", "Scotland", "Northern Ireland"]
+
+
+def _generate_intake_suggestions(state) -> list:
+    """#158: 2-4 tappable reply candidates for the question the assistant's own last turn just
+    asked, grounded in the conversation so far. (#157's field/missing mapping is NOT this
+    function's job -- ilovelawyer-api's existing ClientIntakeSvc already derives that from data it
+    has, so CW never needs its own second extraction of the same facts; see the plan's
+    "Related in-flight PRs" note.) Returns [] whenever the model isn't confident, the conversation
+    hasn't started, or the call fails -- an empty list, never an omission, per the ticket's
+    acceptance criterion that a weak suggestion must never be shown."""
+    if not state.generated or not (state.generated[-1] or "").strip():
+        return []
+    last_turn = state.generated[-1]
+    if any(marker in last_turn for marker in _JURISDICTION_QUESTION_MARKERS):
+        return list(_JURISDICTION_SUGGESTIONS)
+    try:
+        conversation = _intake_conversation_text(state)
+        messages = [
+            {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
+            {"role": "user", "content": _intake_suggestions_prompt(conversation)},
+        ]
+        params = dict(model=_context.model, messages=messages, temperature=0.3, max_tokens=300)
+        try:
+            completion = state.openai_client.chat.completions.create(**params, response_format={"type": "json_object"})
+        except Exception as e:
+            if "response_format" not in str(e) and "json_object" not in str(e):
+                raise
+            logging.info("_generate_intake_suggestions: response_format unsupported, retrying without it (%s)", e)
+            completion = state.openai_client.chat.completions.create(**params)
+        raw = completion.choices[0].message.content or ""
+        parsed = _extract_json_object(raw)
+        suggestions = parsed.get("suggestions") if isinstance(parsed, dict) else None
+        if not isinstance(suggestions, list):
+            return []
+        return [s.strip() for s in suggestions if isinstance(s, str) and s.strip()][:4]
+    except Exception as e:
+        logging.warning(f"_generate_intake_suggestions failed (non-fatal): {e}")
+        return []
+
+
+def _build_intake_suggestions_payload(state) -> dict | None:
+    """#158's payload, sent as the [INTAKE_SUGGESTIONS] frame by the websocket handler. Formerly
+    also carried #157's fields/missing (as [INTAKE_STATE]) -- dropped per the plan's reconciliation:
+    ilovelawyer-api's ClientIntakeSvc already derives those fields without a second LLM call, so
+    duplicating that extraction here only doubled the cost and risked the two disagreeing. None
+    only when there's no assistant turn yet to suggest a reply to -- an empty `suggestions` list
+    (the model found nothing confident to suggest) is still a real payload, sent as {"suggestions":
+    []} per the ticket's acceptance criterion that this case is explicit, never an omission."""
+    if not state.generated or not (state.generated[-1] or "").strip():
+        return None
+    return {"suggestions": _generate_intake_suggestions(state)}
+
+
 def _generate_reasoning_explanation(user_input: str, legal_response: str, search_results: list, tool_log: list, state) -> dict | None:
     """Third lightweight LLM call: a plain-language 'why this answer' explanation for
     the ilovelawyer chat UI. Distinct from the glass-box SCL trace (raw R-CCAM phase
@@ -1595,6 +1781,33 @@ def _is_intake_addendum(addendum_override) -> bool:
     return bool(addendum_override) and "CASE INTAKE MODE" in addendum_override
 
 
+def _strip_leaked_reason_lines(text: str) -> str:
+    """2026-11-24: live QA caught `REASON: ...` leaking straight into the client-visible
+    reply, mid-message -- not on the stream's first line, where the existing per-iteration
+    buffering in legal_responses_chain.py/the_server.py's streaming loops already catch it,
+    but on a later line within a single generation, which neither of those checks inspects.
+    Rather than chase that one more streaming edge case, this is a universal last-pass net:
+    every intake reply funnels through _finalize_intake_citations regardless of which path
+    produced it, so stripping every REASON:-bearing line here, not just the first, closes
+    the whole class of leak at once. Same convention as the narrower checks: text before
+    REASON: on a line is real and kept; REASON: and everything after it on that line is
+    internal and dropped (the model is expected to put REASON: at the end of a line, never
+    in front of real reply text -- when it doesn't, the real text after it is lost, but
+    every observed leak so far was the model re-stating something already said elsewhere in
+    the reply, so losing that duplicate is the right outcome, not a new one worth guarding)."""
+    cleaned_lines = []
+    for line in text.split("\n"):
+        pos = line.find("REASON:")
+        if pos == -1:
+            cleaned_lines.append(line)
+            continue
+        visible = line[:pos].rstrip()
+        if visible:
+            cleaned_lines.append(visible)
+    cleaned = "\n".join(cleaned_lines)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
 def _finalize_intake_citations(text: str, search_results, state=None) -> str:
     """Citation gate for intake's general-rights answers — deliberately NOT
     _finalize_legal_response: no verifier/refine loop, no doctrine guards (those police
@@ -1602,6 +1815,7 @@ def _finalize_intake_citations(text: str, search_results, state=None) -> str:
     format pipeline legal_uk uses, called directly as a pure function, so a citation intake
     names is either backed by a real tool result this turn or stripped — never invented.
     """
+    text = _strip_leaked_reason_lines(text)
     exhibits = exhibit_texts(state)
     out = _finalize_legal_citations(
         text,
@@ -2105,6 +2319,12 @@ def execute_function_call(function_call: dict, session_id: str = None):
             _cc_state = _context.sessions.get(session_id)
             func_args["case_id"] = getattr(_cc_state, "case_id", None)
             func_args["user_id"] = getattr(_cc_state, "user_id", None)
+            # #986: never trust the model's own uk_jurisdiction claim -- verify it against the
+            # client's actual messages first (see _verified_uk_jurisdiction's docstring).
+            if "uk_jurisdiction" in func_args:
+                func_args["uk_jurisdiction"] = _verified_uk_jurisdiction(session_id, func_args.get("uk_jurisdiction"))
+                if func_args["uk_jurisdiction"] is None:
+                    func_args.pop("uk_jurisdiction")
         if func_name == "get_case_document" and session_id:
             _cd_state = _context.sessions.get(session_id)
             # The model is only ever shown a handle (F1, ...), never the real id — see
@@ -4946,6 +5166,19 @@ async def chat_stream(websocket: WebSocket):
                     await websocket.send_text(f"[LAWYER_MATCHES]{json.dumps(state.last_find_lawyer_result)}")
                 if persona in INTAKE_PERSONAS and state.last_mark_case_ready:
                     await websocket.send_text("[CASE_READY]true")
+                # #158: suggested replies for the question the assistant's own last turn just
+                # asked (see _build_intake_suggestions_payload). A side LLM call, same shape as
+                # the mind-map/reasoning extras below -- never allowed to fail the turn itself.
+                # #157's fields/missing is deliberately NOT sent from here -- ilovelawyer-api's
+                # existing ClientIntakeSvc already derives it without a second LLM call.
+                if persona in INTAKE_PERSONAS:
+                    try:
+                        intake_suggestions_payload = _build_intake_suggestions_payload(state)
+                    except Exception as e:
+                        logging.warning(f"_build_intake_suggestions_payload failed (non-fatal): {e}")
+                        intake_suggestions_payload = None
+                    if intake_suggestions_payload is not None:
+                        await websocket.send_text(f"[INTAKE_SUGGESTIONS]{json.dumps(intake_suggestions_payload)}")
                 _garment_gender = (state.last_garment_result or {}).get("gender", "").upper()
                 if _garment_gender in ("MALE", "FEMALE"):
                     await websocket.send_text(f"[GENDER_UPDATE]{_garment_gender}")
@@ -5662,6 +5895,147 @@ async def describe_image(request: DescribeImageRequest):
         "description": description or None,
         "usage": llm_usage.current().to_dict(),
     }
+
+
+@app.post("/api/legal/extract-evidence-facts")
+async def extract_evidence_facts(request: ExtractEvidenceFactsRequest):
+    """#159: the structured counterpart to describe_image for evidence that's an email or
+    message screenshot -- sender/date/amount/what-was-agreed instead of a free-text description.
+    One vision call attempts structured facts first and falls back to a free-text description
+    (describe_image's own shape) only when the image plainly isn't an email/message screenshot,
+    so ilovelawyer-api's document-extraction pipeline can call this in place of /describe-image
+    for any image Textract found no text in, without needing its own screenshot classifier.
+    Fetches by presigned URL for the same reason describe_image does: the caller's images live in
+    its own S3 bucket, not ours."""
+    llm_usage.start_turn()
+    from urllib.parse import urlparse
+    filename = request.filename or os.path.basename(urlparse(request.image_url).path)
+    session_id = request.session_id
+    broadcast_trace("request", f"Extract evidence facts — file: {filename}", session_id,
+        summary=f"Starting AI fact extraction from uploaded evidence: '{filename}'")
+
+    import requests
+    try:
+        http_response = requests.get(request.image_url, timeout=30)
+        http_response.raise_for_status()
+    except Exception as e:
+        logging.warning(f"[Extract Evidence Facts] failed to fetch image_url: {e}")
+        raise HTTPException(status_code=404, detail="Could not download the image from the provided URL.")
+    contents = http_response.content
+
+    if len(contents) > VISION_MAX_IMAGE_BYTES:
+        logging.warning(f"[Extract Evidence Facts] '{filename}' exceeds {VISION_MAX_IMAGE_BYTES} bytes; skipping")
+        broadcast_trace("cognition", f"Image too large to analyze — '{filename}'", session_id,
+            summary="The photo is too large for the AI fact extraction and was skipped.")
+        return {"success": False, "is_email_screenshot": False, "facts": None, "description": None, "usage": llm_usage.current().to_dict()}
+
+    if not _context.openai_api_key:
+        return {"success": False, "is_email_screenshot": False, "facts": None, "description": None, "usage": llm_usage.current().to_dict()}
+
+    try:
+        import base64, mimetypes
+        ext = os.path.splitext(filename)[1].lower()
+        b64 = base64.b64encode(contents).decode("utf-8")
+        mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext[1:]}"
+        broadcast_trace("action", "Extracting evidence facts with AI vision...", session_id,
+            summary="The AI is reading the photo for the facts it establishes.")
+        client = make_openai_client(api_key=_context.openai_api_key)
+        prompt = (
+            "This image was uploaded as evidence in a legal case. First decide whether it is a "
+            "screenshot of an email or a chat/message thread.\n\n"
+            "If it IS an email or message screenshot: extract only what the image actually shows "
+            "-- sender, date, amount (if any sum of money appears), and a short factual summary "
+            "of what was agreed or said. Leave a field null rather than guessing.\n\n"
+            "If it is NOT an email or message screenshot (e.g. a photo of damage, a document "
+            "page, a scene): instead describe in detail and factually what it shows -- the "
+            "setting, any people present (without trying to identify who they are), objects, "
+            "vehicles, visible damage or injuries, signage, and any visible text. Do not offer "
+            "legal conclusions or speculate about fault. If the image is unclear, say so "
+            "explicitly.\n\n"
+            "Return only valid JSON of this exact shape:\n"
+            '{"is_email_screenshot": true|false, '
+            '"facts": {"sender": str|null, "date": str|null, "amount": str|null, "agreement": str|null} | null, '
+            '"description": str | null}\n'
+            "\"facts\" is set only when is_email_screenshot is true; \"description\" only when it "
+            "is false."
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+            ]}],
+            max_tokens=800,
+            response_format={"type": "json_object"},
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = _extract_json_object(raw) if raw else {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except Exception as e:
+        logging.warning(f"[Extract Evidence Facts] vision call failed (non-fatal): {e}")
+        broadcast_trace("cognition", f"Evidence fact extraction failed — {e}", session_id,
+            summary="The AI could not extract facts from the photo due to an error.")
+        return {"success": False, "is_email_screenshot": False, "facts": None, "description": None, "usage": llm_usage.current().to_dict()}
+
+    is_email = bool(parsed.get("is_email_screenshot"))
+    facts = parsed.get("facts") if is_email and isinstance(parsed.get("facts"), dict) else None
+    description = (parsed.get("description") or None) if not is_email else None
+    if description is not None and not isinstance(description, str):
+        description = None
+    return {
+        "success": bool(facts or description),
+        "is_email_screenshot": is_email,
+        "facts": facts,
+        "description": description,
+        "usage": llm_usage.current().to_dict(),
+    }
+
+
+@app.post("/api/legal/suggest-next-evidence")
+async def suggest_next_evidence(request: SuggestNextEvidenceRequest):
+    """#159: given the case's open evidence gaps (ilovelawyer-api's CaseMissingEvidence rows,
+    passed in rather than looked up here -- gap persistence lives entirely on that side), picks
+    the single one most worth asking for next and phrases it as a short, client-facing prompt.
+    Returns success: false / suggestion: null when there are no gaps or the call fails -- the
+    client UI should show nothing in that case, not an error."""
+    llm_usage.start_turn()
+    gaps = request.gaps or []
+    if not gaps or not _context.openai_api_key:
+        return {"success": False, "suggestion": None, "usage": llm_usage.current().to_dict()}
+    try:
+        gap_lines = "\n".join(
+            f"- id={g.id}: {g.label}" + (f" ({g.detail})" if g.detail else "")
+            for g in gaps
+        )
+        prompt = (
+            "A client in a legal-intake chat has these open evidence gaps on their case:\n\n"
+            f"{gap_lines}\n\n"
+            "Pick the single one that would most help their case if filled next, and phrase a "
+            "short, friendly, one-sentence prompt asking the client to upload it. Return only "
+            'valid JSON: {"gap_id": "<the id you picked, exactly as given>", "message": "<the one-sentence prompt>"}'
+        )
+        client = make_openai_client(api_key=_context.openai_api_key)
+        response = client.chat.completions.create(
+            model=_context.model,
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. No markdown, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=200,
+            response_format={"type": "json_object"},
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = _extract_json_object(raw) if raw else {}
+        gap_id = parsed.get("gap_id") if isinstance(parsed, dict) else None
+        message = parsed.get("message") if isinstance(parsed, dict) else None
+        valid_ids = {g.id for g in gaps}
+        if gap_id not in valid_ids or not isinstance(message, str) or not message.strip():
+            return {"success": False, "suggestion": None, "usage": llm_usage.current().to_dict()}
+        return {"success": True, "suggestion": {"gapId": gap_id, "message": message.strip()}, "usage": llm_usage.current().to_dict()}
+    except Exception as e:
+        logging.warning(f"[Suggest Next Evidence] failed (non-fatal): {e}")
+        return {"success": False, "suggestion": None, "usage": llm_usage.current().to_dict()}
 
 
 @app.post("/api/legal/upload-and-analyze")
