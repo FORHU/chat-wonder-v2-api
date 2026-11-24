@@ -1310,6 +1310,10 @@ def _verified_uk_jurisdiction(session_id: str, claimed: str | None) -> str | Non
     client_text = "\n".join(p for p in (getattr(state, "prompt", None) or []) if p)
     confirmed = _uk_region_from_text(client_text)
     if confirmed == claimed:
+        logging.info(
+            "create_case: uk_jurisdiction=%r confirmed by client's own messages session=%s",
+            claimed, session_id,
+        )
         return claimed
     logging.warning(
         "create_case: dropping unverified uk_jurisdiction=%r (client's own messages name %r) session=%s",
@@ -1330,13 +1334,29 @@ def _intake_suggestions_prompt(conversation: str) -> str:
         "-- there is no finite set of good guesses for that, so suggesting anything there is "
         "always wrong, not just sometimes risky.\n\n"
         "For a closed question, each suggestion must be grounded in facts already in the "
-        "conversation, never a generic placeholder like \"Yes\" or \"Tell me more\". If the "
+        "conversation, never a generic placeholder like \"Yes\" or \"Tell me more\". This is "
+        "strictest for a question asking the client to name a specific real-world person, "
+        "company, or place that hasn't been named yet anywhere in the conversation (e.g. \"what's "
+        "the name of the moving company you booked?\") -- nothing in the conversation can ground "
+        "a guess at a name nobody has given, so a plausible-sounding invented one (\"ABC Movers\", "
+        "\"Speedy Transport Co.\") is exactly as fabricated as a wrong one. It's also not a "
+        "harmless guess: handing someone describing a real problem a row of made-up options to "
+        "pick from reads as not taking their situation seriously, as if it were a form to fill in "
+        "rather than their actual complaint. Always return an empty list for this shape of "
+        "question instead, even though it's otherwise short and specific enough to look closed. "
+        "If the "
         "question offers its own fixed set of named options (e.g. lists three named choices), "
         "your suggestions must be exactly those options, worded exactly as given -- never split "
         "a compound option into parts (\"England and Wales\" is one option, not two) and never "
         "rephrase a named option into a different one. If nothing in the conversation supports a "
         "good guess even for a closed question, return an empty list -- a wrong or generic "
         "suggestion is worse than none.\n\n"
+        "The question is meant to ask about ONE fact, but doesn't always: if it actually bundles "
+        "two distinct asks together (e.g. \"roughly when did this happen, and where in the UK "
+        "are you?\", or \"what happened, and roughly when?\"), a suggestion list can only ever "
+        "answer one of them -- tapping it would look like it answered the whole question when it "
+        "didn't. Return an empty list whenever the question asks about more than one distinct "
+        "fact, even if one half would otherwise qualify as closed on its own.\n\n"
         'Return only valid JSON: {"suggestions": ["...", ...]}\n\n'
         f"CONVERSATION (the assistant's last message is the question being answered):\n{conversation}"
     )
@@ -1761,6 +1781,33 @@ def _is_intake_addendum(addendum_override) -> bool:
     return bool(addendum_override) and "CASE INTAKE MODE" in addendum_override
 
 
+def _strip_leaked_reason_lines(text: str) -> str:
+    """2026-11-24: live QA caught `REASON: ...` leaking straight into the client-visible
+    reply, mid-message -- not on the stream's first line, where the existing per-iteration
+    buffering in legal_responses_chain.py/the_server.py's streaming loops already catch it,
+    but on a later line within a single generation, which neither of those checks inspects.
+    Rather than chase that one more streaming edge case, this is a universal last-pass net:
+    every intake reply funnels through _finalize_intake_citations regardless of which path
+    produced it, so stripping every REASON:-bearing line here, not just the first, closes
+    the whole class of leak at once. Same convention as the narrower checks: text before
+    REASON: on a line is real and kept; REASON: and everything after it on that line is
+    internal and dropped (the model is expected to put REASON: at the end of a line, never
+    in front of real reply text -- when it doesn't, the real text after it is lost, but
+    every observed leak so far was the model re-stating something already said elsewhere in
+    the reply, so losing that duplicate is the right outcome, not a new one worth guarding)."""
+    cleaned_lines = []
+    for line in text.split("\n"):
+        pos = line.find("REASON:")
+        if pos == -1:
+            cleaned_lines.append(line)
+            continue
+        visible = line[:pos].rstrip()
+        if visible:
+            cleaned_lines.append(visible)
+    cleaned = "\n".join(cleaned_lines)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
 def _finalize_intake_citations(text: str, search_results, state=None) -> str:
     """Citation gate for intake's general-rights answers — deliberately NOT
     _finalize_legal_response: no verifier/refine loop, no doctrine guards (those police
@@ -1768,6 +1815,7 @@ def _finalize_intake_citations(text: str, search_results, state=None) -> str:
     format pipeline legal_uk uses, called directly as a pure function, so a citation intake
     names is either backed by a real tool result this turn or stripped — never invented.
     """
+    text = _strip_leaked_reason_lines(text)
     exhibits = exhibit_texts(state)
     out = _finalize_legal_citations(
         text,

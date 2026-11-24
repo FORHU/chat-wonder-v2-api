@@ -76,6 +76,29 @@ class GenerateIntakeSuggestionsTests(unittest.TestCase):
         state.openai_client = NS(chat=NS(completions=NS(create=fail_if_called)))
         self.assertEqual(srv._generate_intake_suggestions(state), ["England and Wales", "Scotland", "Northern Ireland"])
 
+    def test_the_suggestions_prompt_refuses_a_compound_question(self):
+        """2026-11-24: live QA caught CW asking "roughly when this happened, and where in the
+        UK you are?" -- not the dedicated jurisdiction question (so the marker short-circuit
+        above doesn't apply), but still two distinct facts bundled into one question. The
+        suggestions this produced mixed date options and a place option in one flat list, with
+        no way to answer both -- the suggestions prompt must refuse to suggest anything for a
+        question shaped like this, same principle as never splitting a compound option."""
+        prompt = srv._intake_suggestions_prompt("irrelevant for this check")
+        self.assertIn("bundles two distinct asks together", prompt)
+        self.assertIn("more than one distinct fact", prompt)
+
+    def test_the_suggestions_prompt_forbids_inventing_a_name_nobody_gave(self):
+        """2026-11-24: live QA caught suggestions inventing four plausible-sounding but entirely
+        fictional moving-company names ("ABC Movers", "XYZ Relocation Services", ...) for "what's
+        the name of the moving company you booked?" -- nobody had named a company anywhere in the
+        conversation, so every suggestion was fabricated; tapping one would have written a made-up
+        company name straight into the case record."""
+        prompt = srv._intake_suggestions_prompt("irrelevant for this check")
+        self.assertIn("hasn't been named yet anywhere in the conversation", prompt)
+        self.assertIn("ABC Movers", prompt)
+        self.assertIn("not taking their situation seriously", prompt)
+        self.assertIn("return an empty list for this shape of question", prompt)
+
 
 class BuildIntakeSuggestionsPayloadTests(unittest.TestCase):
     def test_returns_none_when_the_assistant_has_not_spoken_yet(self):

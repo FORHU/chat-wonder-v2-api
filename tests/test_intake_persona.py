@@ -52,6 +52,20 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("Never hand-construct a", addendum)
         self.assertIn("general information, not analysis of their facts", addendum)
 
+    def test_the_prompt_forbids_hedged_unfetched_statute_claims(self):
+        """2026-11-24: live QA caught the model naming the Consumer Rights Act 2015 and
+        describing what it requires ("a service must be carried out with reasonable care and
+        skill...") while saying in the same breath "I'd need to pull up the exact provisions
+        to quote them properly" -- the existing "don't state what it says" rule didn't stop
+        this because the model treated its own hedge as compliance. No markdown link was ever
+        produced, so _finalize_intake_citations's citation gate (which only inspects markdown
+        links) never saw it either."""
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("This has no hedge", flat)
+        self.assertIn("is still stating what it says, disclaimer or not", flat)
+        self.assertIn("naming the Act alone, with nothing about what", flat)
+
     def test_the_prompt_describes_what_to_gather(self):
         _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
         for field in ("part of the UK", "the story in the user's own words", "what the user wants to happen"):
@@ -115,6 +129,25 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertNotIn("example.com/not-a-real-case", out)
         self.assertIn("a case the AI made up", out)
 
+    def test_finalize_intake_citations_strips_a_reason_line_leaked_mid_message(self):
+        # 2026-11-24: live QA caught "REASON: ..." leaking into the client-visible reply on a
+        # later line, not just the stream's first line (the only position the existing
+        # streaming-loop checks inspect) -- including real visible text the model glued onto
+        # the same line right after its own REASON clause, with no separating newline.
+        text = (
+            "That sounds frightening — I hope you're OK. I've set your case up as a road "
+            "accident matter.\n\n"
+            "REASON: The client's first message is a real, if brief, description of a road "
+            "traffic injury matter, so I'll record the case with the title they gave and a "
+            "starting area.That sounds frightening — I hope you're alright.\n\n"
+            "I've started setting your case up as a personal injury matter. So I know who any "
+            "lawyer would be dealing with: where in the UK did this happen?"
+        )
+        out = srv._finalize_intake_citations(text, [])
+        self.assertNotIn("REASON:", out)
+        self.assertIn("That sounds frightening — I hope you're OK.", out)
+        self.assertIn("I've started setting your case up as a personal injury matter.", out)
+
     def test_intake_reasoning_effort_falls_back_to_none_without_the_responses_api(self):
         # Regression for a live bug (2026-10-28): intake's new tool whitelist made the old
         # "always low effort, always Chat Completions" pairing invalid — gpt-5.6-luna rejects
@@ -156,6 +189,19 @@ class IntakeWiringTests(unittest.TestCase):
         self.assertIn("something has gone wrong and they need help", flat)
         self.assertIn("never a formula you repeat identically every time", flat)
         self.assertIn("never stack more than one of these in a single message", flat)
+
+    def test_the_prompt_forbids_bundling_two_form_fields_into_one_question(self):
+        """2026-11-24: live QA caught CW asking "who owes you the money and what it relates
+        to -- a trader or business?" in one turn -- two form fields (the other party, the
+        case category), not one, even though it was a single grammatical sentence and so
+        technically obeyed the older "never a long list of questions" wording."""
+        _persona, _cleaned, _tools, addendum = srv.process_persona("[intake] hello")
+        flat = addendum.replace("\n", " ")
+        self.assertIn("one still-missing form field at a time", flat)
+        self.assertIn('folded into a single sentence', flat)
+        self.assertIn("Who owes you the money and what it relates to", flat)
+        self.assertIn("even when one side of the \"and\" isn't a named field", flat)
+        self.assertIn("roughly when was it", flat)
 
     def test_the_prompt_requires_answering_what_the_user_actually_asked(self):
         # Regression for a live bug (2026-11-12): user attached a file and asked "what is in the
