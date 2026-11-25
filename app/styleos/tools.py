@@ -1,0 +1,1638 @@
+"""StyleOS tool implementations extracted from user_functions."""
+import os
+import io
+import json
+import time
+import uuid
+import hashlib
+import tempfile
+import logging
+import urllib.request
+import urllib.parse
+import urllib.error
+from datetime import datetime, date
+from llm_usage import make_openai_client
+
+_logger = logging.getLogger(__name__)
+
+# Garments API
+_GARMENTS_API_BASE = os.getenv("GARMENTS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/garments")
+_GARMENTS_CACHE_TTL = 300  # 5 minutes
+_garments_cache: dict = {"data": None, "timestamp": 0}
+
+# Outfits API (pre-composed outfits)
+_OUTFITS_API_BASE = os.getenv("OUTFITS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/outfits")
+_OUTFITS_CACHE_TTL = 300  # 5 minutes
+_outfits_cache: dict = {"data": None, "timestamp": 0}
+
+# ilovelawyer-api — Case Document Tool
+# Base URL / API key are read at call time (not import time) so values from
+# user_functions.env loaded by the_server.py via dotenv are always picked up.
+# Bundled pleadings (many exhibits in one PDF) lose later pages at 8k.
+# Fact-filtered chunk lists still need room so page 30 is not cut off by the cover.
+_CASE_DOCUMENT_CHAR_CAP = 32000
+
+# Cosmetics API
+_COSMETICS_API_BASE = os.getenv("COSMETICS_API_BASE", "http://ec2-52-77-250-122.ap-southeast-1.compute.amazonaws.com:3007/api/external/cosmetics")
+_COSMETICS_CACHE_TTL = 300  # 5 minutes
+_cosmetics_cache: dict = {}   # keyed by search term
+_DEFAULT_LAT = 14.5995  # Manila
+_DEFAULT_LON = 120.9842
+
+_WMO_DESCRIPTIONS = {
+    0: ("clear sky", "sunny"), 1: ("mainly clear", "mostly sunny"),
+    2: ("partly cloudy", "partly cloudy"), 3: ("overcast", "cloudy"),
+    45: ("foggy", "foggy"), 48: ("icy fog", "foggy"),
+    51: ("light drizzle", "drizzly"), 53: ("moderate drizzle", "drizzly"), 55: ("heavy drizzle", "drizzly"),
+    61: ("light rain", "rainy"), 63: ("moderate rain", "rainy"), 65: ("heavy rain", "rainy"),
+    71: ("light snow", "snowy"), 73: ("moderate snow", "snowy"), 75: ("heavy snow", "snowy"),
+    80: ("rain showers", "showery"), 81: ("moderate showers", "showery"), 82: ("heavy showers", "showery"),
+    95: ("thunderstorm", "stormy"), 96: ("thunderstorm with hail", "stormy"), 99: ("severe thunderstorm", "stormy"),
+}
+_RAINY_CODES = {51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99}
+
+def scan_cosmetic(front_s3_key: str, back_s3_key: str, skin_type: str = "general") -> dict:
+    """Analyze a cosmetic product by scanning its front and back label images stored in S3."""
+    import s3_storage
+    import base64
+    import mimetypes
+    import tempfile
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    model = os.getenv("COSMETICS_MODEL", "gpt-4o-mini")
+    cosmetics_bucket = os.getenv("COSMETICS_S3_BUCKET_NAME")
+    cosmetics_region = os.getenv("COSMETICS_AWS_REGION")
+    front_s3_key = front_s3_key.lstrip("/") if front_s3_key else ""
+    back_s3_key = back_s3_key.lstrip("/")
+    logging.info(f"[scan_cosmetic] bucket={cosmetics_bucket} region={cosmetics_region} model={model}")
+
+    client = make_openai_client(api_key=api_key)
+
+    def _ocr_from_s3(s3_key: str, prompt: str) -> str:
+        fname = os.path.basename(s3_key)
+        ext = os.path.splitext(fname)[1].lower()
+        tmp_path = os.path.join(tempfile.gettempdir(), fname)
+        logging.info(f"[scan_cosmetic] downloading s3_key={s3_key} bucket={cosmetics_bucket} region={cosmetics_region}")
+        if not s3_storage.download_from_s3(s3_key, tmp_path, bucket_name=cosmetics_bucket, region=cosmetics_region):
+            logging.error(f"[scan_cosmetic] S3 download FAILED for key={s3_key}")
+            return ""
+        logging.info(f"[scan_cosmetic] S3 download OK, running OCR on {fname}")
+        try:
+            with open(tmp_path, "rb") as f:
+                contents = f.read()
+            mime_type = mimetypes.guess_type(fname)[0] or f"image/{ext[1:]}"
+            b64 = base64.b64encode(contents).decode("utf-8")
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                ]}],
+                max_tokens=2000,
+            )
+            result = resp.choices[0].message.content.strip()
+            logging.info(f"[scan_cosmetic] OCR OK for {fname}, chars={len(result)}")
+            return result
+        except Exception as e:
+            logging.error(f"[scan_cosmetic] OCR FAILED for {s3_key}: {e}")
+            return ""
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    front_text = _ocr_from_s3(
+        front_s3_key,
+        "Extract the product name, brand name, and any label claims (e.g. 'hypoallergenic', 'dermatologist tested', 'paraben-free') from this cosmetic product image. Return plain text only.",
+    ) if front_s3_key else ""
+    back_text = _ocr_from_s3(
+        back_s3_key,
+        "Extract the full ingredient list from this cosmetic product label exactly as written. Return only the ingredients, comma-separated, in the same order as on the label.",
+    )
+
+    if not back_text:
+        return {"success": False, "error": "Could not extract an ingredient list from the back label image."}
+
+    skin_type_normalized = (skin_type or "general").lower().strip()
+    if skin_type_normalized not in {"oily", "dry", "sensitive", "combination", "general"}:
+        skin_type_normalized = "general"
+
+    system_prompt = (
+        "You are a cosmetic ingredient expert and dermatologist. Analyze cosmetic product ingredients and return "
+        "a JSON object with this exact structure:\n"
+        "{\n"
+        '  "product_name": "...",\n'
+        '  "brand": "...",\n'
+        '  "label_claims": ["..."],\n'
+        '  "skin_type": "...",\n'
+        '  "ingredients": [\n'
+        '    {\n'
+        '      "name": "...",\n'
+        '      "function": "...",\n'
+        '      "safety_concern": "none | low | moderate | high",\n'
+        '      "safety_notes": "...",\n'
+        '      "skin_type_verdict": "beneficial | neutral | problematic",\n'
+        '      "skin_type_notes": "..."\n'
+        '    }\n'
+        '  ],\n'
+        '  "summary": "markdown overview of the product and key findings for the user\'s skin type"\n'
+        "}"
+    )
+    user_prompt = (
+        f"Front label:\n{front_text}\n\n"
+        f"Ingredients (back label):\n{back_text}\n\n"
+        f"Skin type: {skin_type_normalized}\n\n"
+        "Analyze every ingredient and return the JSON."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content.strip())
+        return {
+            "success": True,
+            "front_s3_key": front_s3_key,
+            "back_s3_key": back_s3_key,
+            "front_image_url": s3_storage.generate_presigned_get(front_s3_key, bucket_name=cosmetics_bucket, region=cosmetics_region),
+            "back_image_url": s3_storage.generate_presigned_get(back_s3_key, bucket_name=cosmetics_bucket, region=cosmetics_region),
+            **result,
+        }
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def match_cosmetics(
+    product_a_name: str,
+    product_a_ingredients: list,
+    product_b_name: str,
+    product_b_ingredients: list,
+    skin_type: str = "general",
+) -> dict:
+    """Check whether two cosmetic products are compatible based on their ingredient lists and skin type."""
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    model = os.getenv("COSMETICS_MODEL", "gpt-4o-mini")
+    client = make_openai_client(api_key=api_key)
+
+    skin_type_normalized = (skin_type or "general").lower().strip()
+    if skin_type_normalized not in {"oily", "dry", "sensitive", "combination", "general"}:
+        skin_type_normalized = "general"
+
+    def _ingredient_names(ingredients: list) -> str:
+        names = []
+        for item in ingredients:
+            if isinstance(item, dict):
+                names.append(item.get("name", ""))
+            elif isinstance(item, str):
+                names.append(item)
+        return ", ".join(n for n in names if n)
+
+    system_prompt = (
+        "You are a cosmetic chemist and dermatologist. Assess whether two cosmetic products are safe to use together.\n\n"
+        "Return a JSON object with this exact structure:\n"
+        "{\n"
+        '  "verdict": "safe | caution | avoid",\n'
+        '  "verdict_reason": "one-sentence explanation of the overall verdict",\n'
+        '  "conflicts": [\n'
+        '    {\n'
+        '      "ingredient_a": "...",\n'
+        '      "ingredient_b": "...",\n'
+        '      "issue": "...",\n'
+        '      "severity": "low | moderate | high",\n'
+        '      "skin_type_notes": "..."\n'
+        '    }\n'
+        '  ],\n'
+        '  "summary": "markdown summary with overall verdict, key conflicts, and usage recommendation (e.g. use product A in the morning, product B at night)"\n'
+        "}\n\n"
+        "If there are no conflicts, return an empty conflicts array and verdict of safe."
+    )
+
+    user_prompt = (
+        f"Skin type: {skin_type_normalized}\n\n"
+        f"Product A — {product_a_name}:\n{_ingredient_names(product_a_ingredients)}\n\n"
+        f"Product B — {product_b_name}:\n{_ingredient_names(product_b_ingredients)}\n\n"
+        "Check for ingredient interactions, efficacy conflicts, and skin-type-specific concerns. Return the JSON."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content.strip())
+        return {"success": True, "skin_type": skin_type_normalized, **result}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+
+def _fetch_cosmetics_by_search(search_term: str) -> list:
+    """Fetch all pages for a single search term, using a per-term cache."""
+    api_key = os.getenv("GARMENTS_API_KEY", "")
+    cached = _cosmetics_cache.get(search_term)
+    if cached and (time.time() - cached["timestamp"]) < _COSMETICS_CACHE_TTL:
+        return cached["data"]
+    try:
+        encoded = urllib.parse.quote(search_term)
+        first = _http_get_json(
+            f"{_COSMETICS_API_BASE}?search={encoded}&page=1&limit=100",
+            {"x-api-key": api_key},
+        )
+        if first.get("status") != "success":
+            return (cached or {}).get("data", [])
+        data = first["data"]
+        items = list(data["items"])
+        for page in range(2, data["totalPages"] + 1):
+            try:
+                pd = _http_get_json(
+                    f"{_COSMETICS_API_BASE}?search={encoded}&page={page}&limit=100",
+                    {"x-api-key": api_key},
+                )
+                if pd.get("status") == "success":
+                    items.extend(pd["data"]["items"])
+            except Exception as e:
+                logging.warning(f"[cosmetics] search={search_term!r} page {page} failed: {e}")
+        _cosmetics_cache[search_term] = {"data": items, "timestamp": time.time()}
+        logging.info(f"[cosmetics] search={search_term!r} fetched {len(items)} items")
+        return items
+    except Exception as e:
+        logging.error(f"[cosmetics] search={search_term!r} fetch failed: {e}")
+        return (cached or {}).get("data", [])
+
+
+def _fetch_cosmetics_for_profile(skin_type: str, concerns: list) -> list:
+    """Fetch and deduplicate products relevant to the user's skin type and concerns."""
+    search_terms = {skin_type} if skin_type != "general" else set()
+    for concern in concerns:
+        term = _CONCERN_SEARCH_TERMS.get(concern)
+        if term:
+            search_terms.add(term)
+    if not search_terms:
+        search_terms = {"general"}
+
+    seen_ids: set = set()
+    combined: list = []
+    for term in sorted(search_terms):
+        for item in _fetch_cosmetics_by_search(term):
+            if item["id"] not in seen_ids:
+                seen_ids.add(item["id"])
+                combined.append(item)
+
+    logging.info(f"[cosmetics] profile fetch: terms={sorted(search_terms)} total_unique={len(combined)}")
+    return combined
+
+
+def _derive_skin_profile(analysis_output: list) -> tuple:
+    """Returns (skin_type, concerns) from skin analysis output array."""
+    scores = {item["type"]: item.get("ui_score", item.get("score", 0)) for item in analysis_output}
+    oiliness = scores.get("oiliness", 50)
+    if oiliness >= 70:
+        skin_type = "oily"
+    elif oiliness <= 35:
+        skin_type = "dry"
+    elif 35 < oiliness < 55:
+        skin_type = "combination"
+    else:
+        skin_type = "general"
+
+    concerns = []
+    if scores.get("acne", 0) >= 60:
+        concerns.append("acne-prone")
+    if scores.get("wrinkle", 0) >= 60:
+        concerns.append("anti-aging")
+    if scores.get("age_spot", 0) >= 60:
+        concerns.append("brightening")
+    if scores.get("dark_circle_v2", 0) >= 60:
+        concerns.append("dark circles")
+    return skin_type, concerns
+
+
+_VALID_SKIN_TYPES = {"DRY", "OILY", "COMBINATION", "NORMAL", "SENSITIVE"}
+
+
+def get_cosmetics_by_skin_type(skin_type: str) -> dict:
+    """Emit skin type to mirror-api which resolves the matching cosmetic products from its DB."""
+    skin_upper = (skin_type or "").strip().upper()
+    if skin_upper not in _VALID_SKIN_TYPES:
+        return {
+            "success": False,
+            "error": (
+                f"Invalid skin type '{skin_type}'. "
+                f"Valid values are: {', '.join(sorted(_VALID_SKIN_TYPES))}. "
+                "Ask the user their skin type if unknown."
+            ),
+        }
+    return {
+        "success": True,
+        "skin_type": skin_upper,
+    }
+
+
+def search_cosmetics_by_skin_type(
+    skin_type: str,
+    concerns: list = None,
+    skin_analysis: dict = None,
+    weather: dict = None,
+    location: dict = None,
+    sets: int = 6,
+) -> dict:
+    """Filter cosmetics catalogue by skin type + concerns, use LLM to select product IDs, return ids only.
+
+    Designed for structured signals from mirror-api where the user's skin analysis has been
+    completed. Skips the outer Miraj persona LLM — only the selection LLM runs.
+    skin_analysis is the full object from mirror-api and drives the LLM selection context.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    skin_upper = (skin_type or "").strip().upper()
+    if skin_upper not in _VALID_SKIN_TYPES:
+        return {
+            "success": False,
+            "error": (
+                f"Invalid skin type '{skin_type}'. "
+                f"Valid values are: {', '.join(sorted(_VALID_SKIN_TYPES))}."
+            ),
+        }
+
+    n_sets = max(1, min(8, sets or 6))
+    concern_list = [c for c in (concerns or []) if c]
+
+    # Fetch cosmetics catalogue filtered by skin type + concerns
+    products = _fetch_cosmetics_for_profile(skin_upper.lower(), concern_list)
+    if not products:
+        return {"success": False, "error": "No cosmetics found for the given skin type."}
+
+    # Slim catalogue — id, name, brand, type only
+    slim = [
+        {
+            "id": p["id"],
+            "name": p.get("name", ""),
+            "brand": p.get("brand", ""),
+            "type": p.get("type", ""),
+        }
+        for p in products
+        if p.get("id")
+    ][:80]
+
+    # Build skin analysis context from the full skin_analysis object
+    skin_ctx_parts = [f"Skin type: {skin_upper}"]
+    if skin_analysis:
+        hydration = skin_analysis.get("hydrationPct")
+        oiliness  = skin_analysis.get("oilinessPct")
+        skin_age  = skin_analysis.get("skinAge")
+        skin_tone = skin_analysis.get("skinTone")
+        if hydration is not None:
+            skin_ctx_parts.append(f"Hydration: {hydration}%")
+        if oiliness is not None:
+            skin_ctx_parts.append(f"Oiliness: {oiliness}%")
+        if skin_age is not None:
+            skin_ctx_parts.append(f"Skin age: {skin_age}")
+        if skin_tone:
+            skin_ctx_parts.append(f"Skin tone: {skin_tone}")
+    if concern_list:
+        skin_ctx_parts.append(f"Concerns: {', '.join(concern_list)}")
+    skin_ctx = "\n".join(skin_ctx_parts)
+
+    # Build weather context
+    weather_parts = []
+    if weather:
+        temp = weather.get("temp") or weather.get("temperature_2m")
+        humidity = weather.get("humidity")
+        city = weather.get("city") or weather.get("name") or (location or {}).get("city") or (location or {}).get("name", "")
+        if city:
+            weather_parts.append(f"Location: {city}")
+        if temp is not None:
+            weather_parts.append(f"Temperature: {temp}°C")
+        if humidity is not None:
+            weather_parts.append(f"Humidity: {humidity}%")
+    weather_ctx = f"Climate: {', '.join(weather_parts)}" if weather_parts else ""
+
+    system_prompt = (
+        f"You are a skincare advisor. Select exactly {n_sets} distinct cosmetic product IDs "
+        f"from the catalogue that best match the user's skin analysis. "
+        f'Return JSON: {{"ids": ["<id1>", ...], "reply": "<one sentence explaining why these products suit the user>"}}. '
+        f"Only use IDs that appear in the catalogue."
+    )
+    user_prompt = (
+        f"Skin analysis:\n{skin_ctx}\n"
+        f"{weather_ctx}\n\n"
+        f"Cosmetics catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct product IDs."
+    )
+
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    client = make_openai_client(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+        ids = result.get("ids", [])
+        valid_ids = {p["id"] for p in products if p.get("id")}
+        ids = [i for i in ids if i in valid_ids][:n_sets]
+        reply = result.get("reply", "")
+        return {"success": True, "ids": ids, "requested": n_sets, "reply": reply, "skin_type": skin_upper}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def recommend_cosmetics(skin_analysis_json: str = None, sets: int = 1, weather_json: str = None, location_json: str = None) -> dict:
+    """Fetch cosmetics catalogue and return AI-curated skincare routines based on skin analysis scores.
+
+    Each routine covers core slots (CLEANSER, MOISTURIZER) plus optional slots
+    (TONER, ESSENCE, EXFOLIANT, SUNSCREEN). Multiple routines have distinct vibes
+    targeting different concerns derived from the skin analysis scores, weather, and location.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    n_sets = max(1, min(int(sets or 1), 3))
+
+    skin_type = "general"
+    concerns: list = []
+    overall_score = None
+    skin_age = None
+
+    if skin_analysis_json:
+        try:
+            analysis = json.loads(skin_analysis_json)
+            output = analysis.get("output", [])
+            skin_type, concerns = _derive_skin_profile(output)
+            overall_score = analysis.get("overallScore")
+            skin_age = analysis.get("skinAge")
+        except Exception as e:
+            logging.warning(f"[cosmetics] skin_analysis_json parse failed: {e}")
+
+    # Parse climate signals from weather and location
+    climate_rules: list[str] = []
+    climate_ctx = ""
+    if weather_json:
+        try:
+            weather = json.loads(weather_json)
+            humidity = weather.get("humidity")
+            uvi = weather.get("uvi")
+            temp = weather.get("temp")
+            city = weather.get("city") or weather.get("name", "")
+            climate_parts = []
+            if city:
+                climate_parts.append(f"Location: {city}")
+            if temp is not None:
+                climate_parts.append(f"Temperature: {temp}°C")
+            if humidity is not None:
+                climate_parts.append(f"Humidity: {humidity}%")
+            if uvi is not None:
+                climate_parts.append(f"UV index: {uvi}")
+            if climate_parts:
+                climate_ctx = "; ".join(climate_parts)
+            if humidity is not None and float(humidity) > 70:
+                climate_rules.append("High humidity: prefer lightweight, gel-based, oil-free formulas; avoid heavy creams")
+            if uvi is not None and float(uvi) >= 5:
+                climate_rules.append("High UV: ALWAYS include a SUNSCREEN in every routine")
+            if temp is not None and float(temp) < 10:
+                climate_rules.append("Cold weather: prefer richer cream moisturizers; avoid alcohol-heavy toners")
+        except Exception as e:
+            logging.warning(f"[cosmetics] weather_json parse failed: {e}")
+
+    if location_json:
+        try:
+            loc = json.loads(location_json)
+            loc_label = loc.get("city") or loc.get("name") or loc.get("label", "")
+            is_urban = loc.get("urban", False)
+            if is_urban or (loc_label and any(k in loc_label.lower() for k in ("city", "metro", "manila", "jakarta", "bangkok", "singapore", "kuala"))):
+                climate_rules.append("Urban/high-pollution environment: prioritise antioxidant ingredients (Vitamin C, niacinamide) for environmental protection")
+            if loc_label and not climate_ctx:
+                climate_ctx = f"Location: {loc_label}"
+        except Exception as e:
+            logging.warning(f"[cosmetics] location_json parse failed: {e}")
+
+    filtered = _fetch_cosmetics_for_profile(skin_type, concerns)
+    if not filtered:
+        return {"success": False, "error": "Cosmetics catalogue is unavailable. Please try again later."}
+
+    cosmetic_lookup = {c["id"]: c for c in filtered}
+
+    # Strip heavy fields before sending to GPT
+    _SLIM_KEEP = {"id", "name", "brand", "type", "hexColor", "finish",
+                  "oilFree", "hydrating", "spf", "priceAmount", "priceUnit"}
+    slim_all = [{k: v for k, v in c.items() if k in _SLIM_KEEP} for c in filtered]
+
+    # Cap at 80 products; sample proportionally by type so all routine slots are covered
+    _MAX_PRODUCTS = 80
+    if len(slim_all) > _MAX_PRODUCTS:
+        from collections import defaultdict
+        import random
+        by_type: dict = defaultdict(list)
+        for p in slim_all:
+            by_type[p.get("type", "OTHER")].append(p)
+        per_type = max(1, _MAX_PRODUCTS // max(len(by_type), 1))
+        slim = []
+        for bucket in by_type.values():
+            slim.extend(random.sample(bucket, min(per_type, len(bucket))))
+        slim = slim[:_MAX_PRODUCTS]
+    else:
+        slim = slim_all
+
+    concerns_ctx = f"Skin concerns: {', '.join(concerns)}." if concerns else "No specific skin concerns identified."
+    score_ctx = ""
+    if overall_score is not None:
+        score_ctx = f" Overall skin score: {overall_score}/100."
+    if skin_age is not None:
+        score_ctx += f" Skin age: {skin_age}."
+
+    climate_rules_str = ""
+    if climate_rules:
+        climate_rules_str = "\nCLIMATE RULES (apply on top of skin rules):\n" + "\n".join(f"- {r}" for r in climate_rules) + "\n"
+
+    system_prompt = (
+        f"You are a professional dermatologist and skincare specialist. Curate exactly {n_sets} distinct skincare "
+        f"routine(s) from the provided cosmetics catalogue based on the user's skin profile and local climate.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Each routine must contain EXACTLY ONE product per type slot. Never include two products of the same type in one routine.\n"
+        "2. Every routine MUST include CLEANSER and MOISTURIZER (core slots).\n"
+        "3. TONER, ESSENCE, EXFOLIANT, SUNSCREEN are optional — include only when beneficial for the concerns.\n"
+        "4. Do NOT reuse the same product id across different routines.\n"
+        f"5. Each routine must have a DISTINCT vibe that targets a different aspect of the user's skin concerns.\n"
+        f"{climate_rules_str}\n"
+        "Return a JSON object with this exact structure:\n"
+        "{\n"
+        '  "sets": [\n'
+        '    {\n'
+        '      "set_number": 1,\n'
+        '      "vibe": "Short vibe name e.g. Acne-Fighting AM Routine",\n'
+        '      "concern_note": "One sentence on how this routine addresses the user\'s skin concerns and local climate",\n'
+        '      "recommendations": [\n'
+        '        {\n'
+        '          "id": "...",\n'
+        '          "name": "...",\n'
+        '          "brand": "...",\n'
+        '          "type": "CLEANSER",\n'
+        '          "priceAmount": "...",\n'
+        '          "priceUnit": "...",\n'
+        '          "reason": "Why this product suits the user\'s skin type, concerns, and climate"\n'
+        '        }\n'
+        '      ]\n'
+        '    }\n'
+        '  ],\n'
+        '  "skin_notes": "Brief markdown overview of what the analysis and climate reveal about the user\'s skin needs",\n'
+        '  "routine_tips": ["tip1", "tip2"]\n'
+        "}\n\n"
+        "Additional rules:\n"
+        "- For oily/acne-prone skin: prefer oil-free, non-comedogenic products with salicylic acid or niacinamide\n"
+        "- For dry skin: prefer hydrating, cream-based moisturizers; avoid harsh exfoliants\n"
+        "- For anti-aging concerns: look for retinol, peptides, vitamin C in the details\n"
+        "- For brightening concerns: look for vitamin C, niacinamide, kojic acid\n"
+        "- Only use products from the provided catalogue — do not invent items\n"
+        f"- Return exactly {n_sets} routine(s) in the sets array"
+    )
+    climate_prompt = f"\nClimate context: {climate_ctx}" if climate_ctx else ""
+    user_prompt = (
+        f"Skin type: {skin_type}\n"
+        f"{concerns_ctx}{score_ctx}{climate_prompt}\n"
+        f"Routines requested: {n_sets}\n\n"
+        f"Cosmetics catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Curate {n_sets} distinct skincare routine(s) and return the JSON."
+    )
+
+    client = make_openai_client(api_key=api_key)
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+
+        for s in result.get("sets", []):
+            seen_types: set = set()
+            deduped = []
+            for rec in s.get("recommendations", []):
+                slot = rec.get("type", "")
+                if slot and slot in seen_types:
+                    continue
+                if slot:
+                    seen_types.add(slot)
+                full = cosmetic_lookup.get(rec.get("id"), {})
+                rec["imageUrl"] = full.get("imageUrl", "")
+                deduped.append(rec)
+            s["recommendations"] = deduped
+
+        return {
+            "success": True,
+            "skin_type": skin_type,
+            "concerns": concerns,
+            "overall_score": overall_score,
+            "skin_age": skin_age,
+            "sets_requested": n_sets,
+            **result,
+        }
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Google Places helpers
+# ---------------------------------------------------------------------------
+
+_GOOGLE_PLACES_API_BASE = "https://maps.googleapis.com/maps/api/place"
+_GOOGLE_GEOCODING_API_BASE = "https://maps.googleapis.com/maps/api/geocode"
+_NEARBY_INTENT_KEYWORDS = {"near", "nearby", "around", "close", "closest", "nearest"}
+
+
+def _google_geocode(location: str, api_key: str) -> tuple:
+    """Geocode a place name using Google Geocoding API. Returns (lat, lng)."""
+    try:
+        url = (
+            f"{_GOOGLE_GEOCODING_API_BASE}/json"
+            f"?address={urllib.parse.quote(location)}"
+            f"&region=PH&components=country:PH"
+            f"&key={api_key}"
+        )
+        data = _http_get_json(url)
+        results = data.get("results", [])
+        if results:
+            loc = results[0]["geometry"]["location"]
+            return (loc["lat"], loc["lng"])
+    except Exception as e:
+        logging.warning(f"[google_geocode] failed for '{location}': {e}")
+    return (_DEFAULT_LAT, _DEFAULT_LON)
+
+
+def _search_single_location(api_key: str, lat: float, lng: float, query: str, radius: int, location_label: str) -> dict:
+    """Execute one Google Places search for a single lat/lng and return a result dict."""
+    query_lower = query.lower()
+    use_nearby = any(kw in query_lower for kw in _NEARBY_INTENT_KEYWORDS) or len(query.split()) <= 4
+
+    if use_nearby:
+        url = (
+            f"{_GOOGLE_PLACES_API_BASE}/nearbysearch/json"
+            f"?location={lat},{lng}"
+            f"&radius={radius}"
+            f"&keyword={urllib.parse.quote(query)}"
+            f"&key={api_key}"
+        )
+    else:
+        url = (
+            f"{_GOOGLE_PLACES_API_BASE}/textsearch/json"
+            f"?query={urllib.parse.quote(query)}"
+            f"&location={lat},{lng}"
+            f"&radius={radius}"
+            f"&key={api_key}"
+        )
+
+    data = _http_get_json(url)
+    status = data.get("status")
+    if status not in ("OK", "ZERO_RESULTS"):
+        return {"success": False, "location_label": location_label, "error": f"Google Places API error: {status}"}
+
+    places = []
+    for p in data.get("results", [])[:20]:
+        loc = p.get("geometry", {}).get("location", {})
+        photos = p.get("photos", [])
+        opening = p.get("opening_hours", {})
+        photo_ref = photos[0].get("photo_reference", "") if photos else ""
+        photo_url = (
+            f"{_GOOGLE_PLACES_API_BASE}/photo?maxwidth=400"
+            f"&photo_reference={photo_ref}&key={api_key}"
+        ) if photo_ref else ""
+        places.append({
+            "name": p.get("name", ""),
+            "address": p.get("vicinity") or p.get("formatted_address", ""),
+            "rating": p.get("rating"),
+            "user_ratings_total": p.get("user_ratings_total"),
+            "place_id": p.get("place_id", ""),
+            "types": p.get("types", []),
+            "lat": loc.get("lat"),
+            "lng": loc.get("lng"),
+            "open_now": opening.get("open_now"),
+            "photo_url": photo_url,
+            "price_level": p.get("price_level"),
+            "phone_number": None,
+            "website": None,
+        })
+
+    return {
+        "success": True,
+        "query": query,
+        "location_label": location_label,
+        "lat": lat,
+        "lng": lng,
+        "radius": radius,
+        "search_mode": "nearby" if use_nearby else "text",
+        "total_results": len(places),
+        "places": places,
+    }
+
+
+def search_nearby_places(
+    query: str,
+    lat: float = 0.0,
+    lng: float = 0.0,
+    radius: int = 1500,
+    location_name: str = None,
+) -> dict:
+    """Search for nearby places using Google Places API (Nearby Search or Text Search).
+
+    location_name can be a single place name (e.g. "SM Baguio") or a comma-separated
+    list of names (e.g. "SM Baguio, La Union, Vigan City") for multi-location queries.
+    When provided, GPS lat/lng is ignored and each name is geocoded automatically.
+    """
+    api_key = os.getenv("GOOGLE_PLACES_API_KEY", "")
+    if not api_key:
+        return {"success": False, "error": "GOOGLE_PLACES_API_KEY not configured."}
+
+    try:
+        # Multi-location: comma-separated names → search each and return array
+        if location_name and "," in location_name:
+            names = [n.strip() for n in location_name.split(",") if n.strip()]
+            results = []
+            for name in names:
+                try:
+                    glat, glng = _google_geocode(name, api_key)
+                    logging.info(f"[search_nearby_places] geocoded '{name}' -> ({glat}, {glng})")
+                    result = _search_single_location(api_key, glat, glng, query, radius, name)
+                except Exception as e:
+                    result = {"success": False, "location_label": name, "error": str(e)}
+                results.append(result)
+            total = sum(r.get("total_results", 0) for r in results if r.get("success"))
+            return {
+                "success": True,
+                "query": query,
+                "multi_location": True,
+                "total_results": total,
+                "results": results,
+            }
+
+        # Single named destination: embed location in the text search query directly.
+        # This avoids geocoding ambiguity (e.g. "La Union" geocoding to a barangay
+        # instead of La Union Province).
+        if location_name:
+            full_query = f"{query} in {location_name}"
+            url = (
+                f"{_GOOGLE_PLACES_API_BASE}/textsearch/json"
+                f"?query={urllib.parse.quote(full_query)}"
+                f"&key={api_key}"
+            )
+            logging.info(f"[search_nearby_places] text search '{full_query}'")
+            data = _http_get_json(url)
+            status = data.get("status")
+            if status not in ("OK", "ZERO_RESULTS"):
+                return {"success": False, "location_label": location_name, "error": f"Google Places API error: {status}"}
+            places = []
+            for p in data.get("results", [])[:20]:
+                loc = p.get("geometry", {}).get("location", {})
+                photos = p.get("photos", [])
+                opening = p.get("opening_hours", {})
+                photo_ref = photos[0].get("photo_reference", "") if photos else ""
+                photo_url = (
+                    f"{_GOOGLE_PLACES_API_BASE}/photo?maxwidth=400"
+                    f"&photo_reference={photo_ref}&key={api_key}"
+                ) if photo_ref else ""
+                places.append({
+                    "name": p.get("name", ""),
+                    "address": p.get("vicinity") or p.get("formatted_address", ""),
+                    "rating": p.get("rating"),
+                    "user_ratings_total": p.get("user_ratings_total"),
+                    "place_id": p.get("place_id", ""),
+                    "types": p.get("types", []),
+                    "lat": loc.get("lat"),
+                    "lng": loc.get("lng"),
+                    "open_now": opening.get("open_now"),
+                    "photo_url": photo_url,
+                    "price_level": p.get("price_level"),
+                    "phone_number": None,
+                    "website": None,
+                })
+            return {
+                "success": True,
+                "query": full_query,
+                "location_label": location_name,
+                "search_mode": "text",
+                "total_results": len(places),
+                "places": places,
+            }
+
+        location_label = f"{lat:.4f},{lng:.4f}"
+        return _search_single_location(api_key, lat, lng, query, radius, location_label)
+
+    except Exception as e:
+        logging.error(f"[search_nearby_places] failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Stylist — navigate_app tool
+# ---------------------------------------------------------------------------
+
+_WAYFINDER_SYSTEM_PROMPT = (
+    "You are Wayfinder, a concise navigation assistant. Your only job is to map the user's query to a URL path.\n\n"
+    "SITEMAP: You will receive a JSON array of valid URL paths. These are the ONLY valid destinations. "
+    "Never invent paths not in this list.\n\n"
+    "OUTPUT: Respond with a single raw JSON object and nothing else. "
+    "No markdown, no code fences, no explanation before or after the JSON.\n\n"
+    "SCHEMA:\n"
+    "{\n"
+    '  "target_url": string | null,\n'
+    '  "confidence": number,\n'
+    '  "extracted_entities": {"name": string, "category": string} | null,\n'
+    '  "system_message": string\n'
+    "}\n\n"
+    "RULES:\n"
+    "- target_url: the best matching path from the sitemap, or null if no match exists.\n"
+    "- confidence: 0.0 to 1.0. How certain you are this path satisfies the query.\n"
+    "- extracted_entities: if the query names a specific person or product type, extract it. Otherwise null.\n"
+    "- system_message: one short sentence confirming the action or declining politely. No filler.\n\n"
+    "Never show or mention the sitemap in your system_message — it is internal data only."
+)
+
+
+def navigate_app(target_url: str, session_id: str = None) -> dict:
+    """Validate target_url against the session's sitemap and return a nav result."""
+    sitemap: list = []
+    if session_id:
+        try:
+            import sys
+            server_module = None
+            for _mod_name in ("the_server", "__main__"):
+                _candidate = sys.modules.get(_mod_name)
+                if _candidate and hasattr(_candidate, "_context"):
+                    server_module = _candidate
+                    break
+            if server_module:
+                state = server_module._context.sessions.get(session_id)
+                if state is not None:
+                    sitemap = state.sitemap_context or []
+        except Exception as e:
+            logging.warning(f"[navigate_app] failed to read sitemap from session: {e}")
+
+    if not sitemap:
+        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": "No sitemap available to navigate."}
+
+    if target_url not in sitemap:
+        return {"target_url": None, "confidence": 0.0, "extracted_entities": None, "system_message": f"'{target_url}' is not a valid app route."}
+
+    return {"target_url": target_url, "confidence": 1.0, "extracted_entities": None, "system_message": ""}
+
+
+# ---------------------------------------------------------------------------
+# Garments helpers
+# ---------------------------------------------------------------------------
+
+
+def _fetch_all_garments(search: str = None) -> list:
+    api_key = os.getenv("GARMENTS_API_KEY", "")
+    if search:
+        query = urllib.parse.quote(search.strip())
+        try:
+            resp = _http_get_json(f"{_GARMENTS_API_BASE}?search={query}&page=1&limit=100", {"x-api-key": api_key})
+            if resp.get("status") == "success":
+                return resp["data"]["items"]
+            logging.warning(f"[garments] search '{search}' returned non-success, falling back to full fetch")
+        except Exception as e:
+            logging.warning(f"[garments] search fetch failed: {e}, falling back to full fetch")
+    if _garments_cache["data"] and (time.time() - _garments_cache["timestamp"]) < _GARMENTS_CACHE_TTL:
+        return _garments_cache["data"]
+    try:
+        first = _http_get_json(f"{_GARMENTS_API_BASE}?page=1&limit=100", {"x-api-key": api_key})
+        if first.get("status") != "success":
+            return _garments_cache["data"] or []
+        data = first["data"]
+        items = list(data["items"])
+        for page in range(2, data["totalPages"] + 1):
+            try:
+                pd = _http_get_json(f"{_GARMENTS_API_BASE}?page={page}&limit=100", {"x-api-key": api_key})
+                if pd.get("status") == "success":
+                    items.extend(pd["data"]["items"])
+            except Exception as e:
+                logging.warning(f"[garments] page {page} fetch failed: {e}")
+        _garments_cache["data"] = items
+        _garments_cache["timestamp"] = time.time()
+        return items
+    except Exception as e:
+        logging.error(f"[garments] catalogue fetch failed: {e}")
+        return _garments_cache["data"] or []
+
+
+def _fetch_outfits(
+    meta_gender: str = None,
+    meta_category: str = None,
+    meta_silhouette: str = None,
+    meta_garment_type: str = None,
+    meta_tags: str = None,
+) -> list:
+    """Fetch outfits using structured API params.
+    Priority: filtered → gender-only → cached full catalogue."""
+    api_key = os.getenv("GARMENTS_API_KEY", "")
+
+    def _call(params: dict) -> list:
+        qs = "&".join(
+            f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v
+        )
+        url = f"{_OUTFITS_API_BASE}?{qs}&page=1&limit=100" if qs else f"{_OUTFITS_API_BASE}?page=1&limit=100"
+        try:
+            resp = _http_get_json(url, {"x-api-key": api_key})
+            if resp.get("status") == "success":
+                return resp["data"]["items"]
+        except Exception as e:
+            logging.warning(f"[outfits] fetch failed {params}: {e}")
+        return []
+
+    # 1. Try with all structured filters
+    has_filters = any([meta_category, meta_silhouette, meta_garment_type, meta_tags])
+    if has_filters:
+        params = {}
+        if meta_gender: params["metaGender"] = meta_gender
+        if meta_category: params["metaCategory"] = meta_category
+        if meta_silhouette: params["metaSilhouette"] = meta_silhouette
+        if meta_garment_type: params["metaGarmentType"] = meta_garment_type
+        if meta_tags: params["metaTags"] = meta_tags
+        items = _call(params)
+        if items:
+            logging.info(f"[outfits] filtered fetch: {len(items)} item(s)")
+            return items
+        logging.info("[outfits] filtered fetch empty, falling back to gender-only")
+
+    # 2. Gender-only API call
+    if meta_gender:
+        items = _call({"metaGender": meta_gender})
+        if items:
+            logging.info(f"[outfits] gender-only fetch: {len(items)} item(s)")
+            return items
+
+    # 3. Full catalogue fallback (cached, paginated)
+    if _outfits_cache["data"] and (time.time() - _outfits_cache["timestamp"]) < _OUTFITS_CACHE_TTL:
+        return _outfits_cache["data"]
+    try:
+        first = _http_get_json(f"{_OUTFITS_API_BASE}?page=1&limit=100", {"x-api-key": api_key})
+        if first.get("status") != "success":
+            return _outfits_cache["data"] or []
+        data = first["data"]
+        items = list(data["items"])
+        for page in range(2, data["totalPages"] + 1):
+            try:
+                pd = _http_get_json(f"{_OUTFITS_API_BASE}?page={page}&limit=100", {"x-api-key": api_key})
+                if pd.get("status") == "success":
+                    items.extend(pd["data"]["items"])
+            except Exception as e:
+                logging.warning(f"[outfits] page {page} fetch failed: {e}")
+        _outfits_cache["data"] = items
+        _outfits_cache["timestamp"] = time.time()
+        return items
+    except Exception as e:
+        logging.error(f"[outfits] catalogue fetch failed: {e}")
+        return _outfits_cache["data"] or []
+
+
+def _outfit_gender(outfit: dict) -> str:
+    """Derive outfit gender from its garments. Returns MALE, FEMALE, or UNISEX."""
+    genders = {g["garment"]["gender"] for g in outfit.get("items", []) if g.get("garment")}
+    if genders == {"MALE"}:
+        return "MALE"
+    if genders == {"FEMALE"}:
+        return "FEMALE"
+    return "UNISEX"
+
+
+def _geocode_location(location: str) -> tuple:
+    if not location:
+        return (_DEFAULT_LAT, _DEFAULT_LON)
+    parts = location.replace(" ", "").split(",")
+    if len(parts) == 2:
+        try:
+            return (float(parts[0]), float(parts[1]))
+        except ValueError:
+            pass
+    try:
+        data = _http_get_json(
+            f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(location)}&count=1&format=json"
+        )
+        results = data.get("results", [])
+        if results:
+            return (results[0]["latitude"], results[0]["longitude"])
+    except Exception as e:
+        logging.warning(f"[garments] geocode failed for '{location}': {e}")
+    return (_DEFAULT_LAT, _DEFAULT_LON)
+
+
+def _fetch_weather(lat: float, lon: float, event_date_str: str) -> dict:
+    today = date.today()
+    try:
+        event_date = datetime.strptime(event_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        event_date = today
+    days_ahead = (event_date - today).days
+    if days_ahead > 16 or days_ahead < 0:
+        from calendar import month_name as _mn
+        return {"estimated": True, "date": event_date_str, "month": event_date.month, "month_name": _mn[event_date.month]}
+    try:
+        if days_ahead == 0:
+            url = (
+                f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                "&current=temperature_2m,weathercode,precipitation,relative_humidity_2m&timezone=auto"
+            )
+            d = _http_get_json(url).get("current", {})
+            wmo = d.get("weathercode", 0)
+            temp = d.get("temperature_2m")
+            precip = d.get("precipitation", 0)
+        else:
+            url = (
+                f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                f"&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum"
+                f"&timezone=auto&start_date={event_date_str}&end_date={event_date_str}"
+            )
+            daily = _http_get_json(url).get("daily", {})
+            wmo = (daily.get("weathercode") or [0])[0]
+            tmax = (daily.get("temperature_2m_max") or [None])[0]
+            tmin = (daily.get("temperature_2m_min") or [None])[0]
+            temp = round(((tmax or 0) + (tmin or 0)) / 2, 1) if tmax and tmin else None
+            precip = (daily.get("precipitation_sum") or [0])[0]
+        desc, cond = _WMO_DESCRIPTIONS.get(wmo, ("unknown conditions", "unknown"))
+        return {
+            "estimated": False, "date": event_date_str,
+            "temperature_c": temp, "weathercode": wmo,
+            "description": desc, "condition": cond,
+            "precipitation_mm": precip or 0,
+            "is_rainy": wmo in _RAINY_CODES or (precip or 0) > 1,
+            "is_hot": (temp or 0) >= 32,
+            "is_cold": (temp or 99) <= 20,
+        }
+    except Exception as e:
+        logging.error(f"[garments] weather fetch failed: {e}")
+        return {"estimated": True, "date": event_date_str, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Garment recommendation function
+# ---------------------------------------------------------------------------
+
+_HOT_THRESHOLD_C = 20.0
+_OUTER_LAYER_LEVELS = {"OUTER", "OUTERWEAR"}
+_OUTER_NAME_KEYWORDS = {"jacket", "coat", "parka", "trench", "anorak", "windbreaker", "overcoat", "blazer"}
+
+
+def _has_heavy_outerwear(outfit: dict) -> bool:
+    for item in outfit.get("items", []):
+        garment = item.get("garment", {})
+        layer = (garment.get("layerLevel") or "").strip().upper()
+        if layer in _OUTER_LAYER_LEVELS:
+            return True
+        name = (garment.get("name") or "").lower()
+        gtype_raw = garment.get("garmentType") or []
+        gtype = " ".join(gtype_raw if isinstance(gtype_raw, list) else [str(gtype_raw)]).lower()
+        if any(kw in name or kw in gtype for kw in _OUTER_NAME_KEYWORDS):
+            return True
+    return False
+
+
+def _parse_temp_c(weather_json_str: str):
+    try:
+        w = json.loads(weather_json_str)
+        for key in ("temp", "temperature_2m", "temperature_c", "feels_like"):
+            v = w.get(key)
+            if v is not None:
+                return float(v)
+    except Exception:
+        pass
+    return None
+
+
+def get_outfits_by_category(
+    category: str,
+    gender: str,
+    weather_json: str = None,
+) -> dict:
+    """Fetch outfits from the catalogue filtered by a specific category and gender. No AI selection — returns all matching outfits directly."""
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {
+            "success": False,
+            "error": (
+                "Gender is required to fetch outfits. "
+                "Ask the user: 'Could you tell me your gender so I can recommend the right outfits for you?'"
+            ),
+        }
+
+    all_outfits = _fetch_outfits(
+        meta_gender=gender_upper,
+        meta_category=category or None,
+    )
+    if not all_outfits:
+        return {"success": False, "error": f"No outfits found for category: {category}"}
+
+    import random
+    filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
+    if not filtered:
+        filtered = all_outfits
+
+    if weather_json:
+        temp_c = _parse_temp_c(weather_json)
+        if temp_c is not None and temp_c >= _HOT_THRESHOLD_C:
+            cool_only = [o for o in filtered if not _has_heavy_outerwear(o)]
+            if cool_only:
+                filtered = cool_only
+
+    random.shuffle(filtered)
+
+    return {
+        "success": True,
+        "gender": gender_upper,
+        "category": category,
+        "ids": [o["id"] for o in filtered[:4]],
+    }
+
+
+def recommend_garments(
+    gender: str,
+    event_type: str = None,
+    event_date: str = None,
+    location: str = None,
+    sets: int = 4,
+    weather_json: str = None,
+    category: str = None,
+    silhouette: str = None,
+    garment_type: str = None,
+    tags: str = None,
+) -> dict:
+    """Fetch live weather and pre-composed outfit catalogue, then return AI-selected outfit sets as JSON.
+
+    AI selects the best pre-composed outfits from the external catalogue based on weather,
+    event type, gender, and local fashion trends. Each set maps to one complete outfit with
+    an outfit-level hero image and individual garment breakdown.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {
+            "success": False,
+            "error": (
+                "Gender is required to fetch outfits. "
+                "Ask the user: 'Could you tell me your gender so I can recommend the right outfits for you?'"
+            ),
+        }
+
+    n_sets = max(1, min(int(sets or 1), 4))
+
+    resolved_date = date.today().isoformat()
+    if event_date:
+        try:
+            datetime.strptime(event_date, "%Y-%m-%d")
+            resolved_date = event_date
+        except ValueError:
+            pass
+
+    frontend_weather: dict = {}
+    frontend_lat, frontend_lon = None, None
+    if weather_json:
+        try:
+            frontend_weather = json.loads(weather_json)
+            frontend_weather.setdefault("estimated", False)
+            frontend_lat = frontend_weather.pop("lat", None)
+            frontend_lon = frontend_weather.pop("lon", None)
+        except Exception as e:
+            logging.warning(f"[outfits] weather_json parse failed: {e}")
+
+    if location:
+        location_label = location
+        lat, lon = _geocode_location(location)
+        weather = _fetch_weather(lat, lon, resolved_date)
+    elif frontend_lat is not None and frontend_lon is not None:
+        location_label = "your current location"
+        lat, lon = float(frontend_lat), float(frontend_lon)
+        weather = frontend_weather or _fetch_weather(lat, lon, resolved_date)
+    else:
+        location_label = "Manila, Philippines"
+        lat, lon = _DEFAULT_LAT, _DEFAULT_LON
+        weather = _fetch_weather(lat, lon, resolved_date)
+
+    all_outfits = _fetch_outfits(
+        meta_gender=gender_upper,
+        meta_category=category or None,
+        meta_silhouette=silhouette or None,
+        meta_garment_type=garment_type or None,
+        meta_tags=tags or None,
+    )
+    if not all_outfits:
+        return {"success": False, "error": "Outfit catalogue is unavailable. Please try again later."}
+
+    filtered = [o for o in all_outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
+    if not filtered:
+        filtered = all_outfits
+
+    outfit_lookup = {o["id"]: o for o in filtered}
+
+    # Slim catalogue for GPT — no imageUrls to save tokens
+    slim = [
+        {
+            "id": o["id"],
+            "name": o["name"],
+            "description": o["description"],
+            "garments": [
+                {
+                    "name": g["garment"]["name"],
+                    "garmentType": g["garment"]["garmentType"],
+                    "fittingSlot": g["garment"]["fittingSlot"],
+                    "category": g["garment"]["category"],
+                    "layerLevel": g["garment"]["layerLevel"],
+                    "silhouette": g["garment"].get("silhouette", ""),
+                }
+                for g in o.get("items", [])
+                if g.get("garment")
+            ],
+        }
+        for o in filtered
+    ]
+
+    if weather.get("estimated"):
+        month_label = weather.get("month_name", "this time of year")
+        weather_ctx = (
+            f"No live forecast available for {resolved_date}. "
+            f"Use your knowledge of typical {month_label} climate at {location_label} to guide recommendations."
+        )
+    else:
+        temp = weather.get("temperature_c")
+        temp_str = f"{temp:.1f}°C" if temp is not None else "unknown temperature"
+        weather_ctx = f"Weather on {resolved_date} at {location_label}: {weather['description']}, {temp_str}, precipitation {weather['precipitation_mm']}mm."
+        if weather.get("is_rainy"):
+            weather_ctx += " Rain expected — favor water-resistant or quick-dry outfits."
+        elif weather.get("is_hot"):
+            weather_ctx += " Hot — favor breathable, lightweight outfits in lighter colors."
+        elif weather.get("is_cold"):
+            weather_ctx += " Cool — favor layered or warmer outfits."
+
+    event_ctx = f"Event/occasion: {event_type}." if event_type else "No specific event — recommend versatile everyday outfits."
+
+    system_prompt = (
+        f"You are a personal stylist. Select exactly {n_sets} distinct pre-composed outfits from the provided catalogue "
+        f"based on weather, event, gender, and local fashion trends at the user's location.\n\n"
+        "CRITICAL RULES:\n"
+        f"1. Select EXACTLY {n_sets} distinct outfits. Do NOT select the same outfit twice.\n"
+        "2. Each selected outfit must have a distinct vibe reflecting different local fashion trends.\n"
+        "3. Only select outfit IDs from the provided catalogue — do not invent IDs.\n"
+        f"4. Each set must reflect a different sub-culture or style direction at {location_label}.\n\n"
+        "Return a JSON object with this exact structure:\n"
+        "{\n"
+        '  "sets": [\n'
+        '    {\n'
+        '      "set_number": 1,\n'
+        '      "outfit_id": "exact id from catalogue",\n'
+        '      "vibe": "Short vibe name e.g. BGC Smart Casual",\n'
+        '      "trend_note": "One sentence on how this vibe reflects local fashion culture at the location",\n'
+        '      "reason": "Why this outfit suits the weather and event"\n'
+        '    }\n'
+        '  ],\n'
+        '  "weather_note": "How weather conditions shaped these picks",\n'
+        '  "styling_tips": ["tip1", "tip2"]\n'
+        "}\n\n"
+        "Additional rules:\n"
+        "- Rain: prefer outfits with darker colors, avoid suede items\n"
+        "- Heat: prefer outfits with breathable fabrics and lighter colors\n"
+        "- Cold: prefer layered outfits\n"
+        "- Formal events: prefer outfits with Formal/Business category garments\n"
+        "- Casual events: prefer outfits with Casual/SmartCasual category garments\n"
+        f"- Return exactly {n_sets} set(s) in the sets array"
+    )
+    user_prompt = (
+        f"Gender: {gender_upper}\n"
+        f"Requested outfits: {n_sets}\n"
+        f"{weather_ctx}\n"
+        f"{event_ctx}\n\n"
+        f"Outfit catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct outfits and return the JSON."
+    )
+
+    client = make_openai_client(api_key=api_key)
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+
+        # Hydrate each set with full outfit data and garment breakdown
+        for s in result.get("sets", []):
+            outfit = outfit_lookup.get(s.get("outfit_id"), {})
+            s["outfit_name"] = outfit.get("name", "")
+            s["outfit_description"] = outfit.get("description", "")
+            s["outfit_imageUrl"] = outfit.get("imageUrl", "")
+            s["recommendations"] = [
+                {
+                    "id": g["garment"]["id"],
+                    "name": g["garment"]["name"],
+                    "description": g["garment"]["description"],
+                    "imageUrl": g["garment"]["imageUrl"],
+                    "fittingSlot": g["garment"]["fittingSlot"],
+                    "garmentType": g["garment"]["garmentType"],
+                    "category": g["garment"]["category"],
+                    "layerLevel": g["garment"]["layerLevel"],
+                    "silhouette": g["garment"].get("silhouette", ""),
+                }
+                for g in outfit.get("items", [])
+                if g.get("garment")
+            ]
+
+        return {
+            "success": True,
+            "gender": gender_upper,
+            "event_type": event_type,
+            "event_date": resolved_date,
+            "location": location_label,
+            "coordinates": {"lat": lat, "lon": lon},
+            "weather": weather,
+            "sets_requested": n_sets,
+            **result,
+        }
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def search_outfits_by_category(
+    gender: str,
+    meta_categories: str,
+    location: dict = None,
+    weather: dict = None,
+    sets: int = 4,
+) -> dict:
+    """Filter outfits by metacategory + gender, use LLM to select UUIDs, return ids only.
+
+    Designed for structured signals from mirror-api where the user has already chosen
+    a greater category (casual/formal/outdoor) and its metacategories. Skips the outer
+    Miraj persona LLM — only the selection LLM runs, against a pre-filtered catalogue.
+    """
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+
+    gender_upper = (gender or "").strip().upper()
+    if gender_upper not in ("MALE", "FEMALE"):
+        return {"success": False, "error": "gender must be MALE or FEMALE."}
+
+    n_sets = max(1, min(4, sets or 4))
+
+    # Resolve location → lat/lon
+    lat, lon = _DEFAULT_LAT, _DEFAULT_LON
+    location_label = "Manila, Philippines"
+    if location:
+        _lat = location.get("lat") or location.get("latitude")
+        _lon = location.get("lon") or location.get("longitude")
+        _city = location.get("city") or location.get("name")
+        if _lat is not None and _lon is not None:
+            lat, lon = float(_lat), float(_lon)
+            location_label = _city or "your current location"
+        elif _city:
+            lat, lon = _geocode_location(_city)
+            location_label = _city
+
+    # Resolve weather — use provided dict or fetch live
+    resolved_weather = weather or _fetch_weather(lat, lon, date.today().strftime("%Y-%m-%d"))
+
+    # Fetch outfits filtered by metacategory + gender
+    outfits = _fetch_outfits(meta_gender=gender_upper, meta_category=meta_categories or None)
+    if not outfits:
+        return {"success": False, "error": "No outfits found for the given categories."}
+
+    # Post-process gender filter — guards against the full-catalogue fallback in _fetch_outfits
+    # which carries no gender filter. Mirrors the filter in get_outfits_by_category.
+    gender_filtered = [o for o in outfits if _outfit_gender(o) in (gender_upper, "UNISEX")]
+    if gender_filtered:
+        outfits = gender_filtered
+
+    # Hot-weather pre-filter: strip heavy outerwear before the LLM sees the catalogue
+    _hot_temp = None
+    if resolved_weather:
+        for _k in ("temperature_2m", "temp", "temperature_c"):
+            _v = resolved_weather.get(_k)
+            if _v is not None:
+                _hot_temp = float(_v)
+                break
+    if _hot_temp is not None and _hot_temp >= _HOT_THRESHOLD_C:
+        cool_outfits = [o for o in outfits if not _has_heavy_outerwear(o)]
+        if cool_outfits:
+            outfits = cool_outfits
+
+    # Slim catalogue — only what the LLM needs for selection
+    # Shuffle so repeated calls with the same query produce varied picks
+    import random
+    slim = [
+        {"id": o["id"], "name": o.get("name", ""), "description": o.get("description", "")}
+        for o in outfits
+    ]
+    random.shuffle(slim)
+
+    # Build weather context string
+    weather_parts = []
+    if resolved_weather:
+        temp = resolved_weather.get("temperature_2m")
+        if temp is not None:
+            weather_parts.append(f"{temp}°C")
+        if resolved_weather.get("is_rainy"):
+            weather_parts.append("rainy")
+        elif _hot_temp is not None and _hot_temp >= _HOT_THRESHOLD_C:
+            weather_parts.append("hot")
+        elif resolved_weather.get("is_cold"):
+            weather_parts.append("cold")
+    weather_ctx = f"Weather: {', '.join(weather_parts)}" if weather_parts else ""
+
+    system_prompt = (
+        f"You are a fashion stylist. Select exactly {n_sets} distinct outfit IDs from the catalogue "
+        f"that best suit the gender, weather, and location. "
+        f'Return JSON: {{"ids": ["<id1>", ...], "reply": "<one sentence explaining why these outfits suit the user>"}}. '
+        f"Only use IDs that appear in the catalogue."
+    )
+    user_prompt = (
+        f"Gender: {gender_upper}\n"
+        f"Location: {location_label}\n"
+        f"{weather_ctx}\n\n"
+        f"Outfit catalogue:\n{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"Select {n_sets} distinct outfit IDs."
+    )
+
+    model = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+    client = make_openai_client(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(resp.choices[0].message.content.strip())
+        ids = result.get("ids", [])
+        valid_ids = {o["id"] for o in outfits}
+        ids = [i for i in ids if i in valid_ids][:n_sets]
+        reply = result.get("reply", "")
+        return {"success": True, "ids": ids, "reply": reply, "gender": gender_upper}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def generate_outfit_image(garment_image_urls: list, gender: str = "MALE") -> dict:
+    """Generate a ghost mannequin outfit photograph from individual garment images using GPT image generation."""
+    import base64
+    import s3_storage
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OpenAI API key not configured."}
+    if not garment_image_urls:
+        return {"success": False, "error": "No garment images provided."}
+
+    gender_upper = (gender or "MALE").strip().upper()
+    gender_word = "female" if gender_upper == "FEMALE" else "male"
+
+    prompt = (
+        f"Using the provided garment images as the only reference, create a premium ghost mannequin "
+        f"fashion product photograph combining all garments into one complete outfit. "
+        f"Reproduce EVERY garment EXACTLY as shown — same color, same cut, same length, same fabric texture, "
+        f"same prints, logos, patterns, stitching, proportions, wrinkles, folds, and construction details. "
+        f"Do not substitute, redesign, replace, simplify, or generate alternative versions of any garment. "
+        f"Reconstruct the outfit on a completely invisible {gender_word} mannequin with realistic body volume, "
+        f"natural garment draping, and accurate layering. The mannequin must be entirely hidden — "
+        f"no visible head, neck, face, arms, hands, wrists, legs, feet, ankles, skin, mannequin parts, or display stands. "
+        f"Subtle luxury pose: one leg slightly forward, weight shifted to back leg, slight knee bend, "
+        f"relaxed shoulders, clean editorial silhouette. "
+        f"If shoes are present, they must appear naturally worn with no visible feet, ankles, or shoe interiors. "
+        f"If a trouser or skirt hem falls above the shoe collar, the gap between hem and shoe must be empty white space — never skin, ankle, or leg. "
+        f"If the hem reaches the shoe, it must meet the shoe collar with zero gap — no skin visible between hem and shoe. "
+        f"If a bag is present, it must hang from the shoulder strap alone — no visible hand, wrist, or fingers gripping the strap or the bag body. "
+        f"All accessories (belts, scarves, jewelry) must appear worn on the invisible mannequin with no body parts visible. "
+        f"If any top is a crop top, tube top, or tank top, any exposed midriff, torso, or armhole area must show empty space or the garment's interior edge — never skin, flesh, or body. "
+        f"Shoulder straps and armholes must not reveal shoulder skin, arm skin, or collarbone — the mannequin is entirely invisible beneath. "
+        f"Any gap between garments (e.g., between a crop top hem and a waistband) must be empty space, not skin. "
+        f"Studio-quality luxury e-commerce fashion photography. Centered full-body view. "
+        f"Pure white seamless background (#FFFFFF). Ultra-sharp focus. Professional catalog lighting. "
+        f"Negative: visible body parts, mannequin structure, display stand, floor reflection, "
+        f"extra garments, duplicated clothing, watermark, cropped outfit, redesigned clothing, "
+        f"visible hands, visible wrists, visible fingers, visible ankles, visible socks, skin at hem, skin at cuff, "
+        f"shoe interior visible, trouser hem floating above shoe, leg between hem and shoe, ankle between hem and shoe, garment color changed, garment style changed, "
+        f"hand gripping bag, hand on strap, wrist near bag, "
+        f"visible midriff skin, visible torso skin, visible shoulder skin, visible collarbone, visible armhole skin, "
+        f"skin between garments, flesh gap, exposed body between top and bottom."
+    )
+
+    image_files = []
+    loaded_count = 0
+    for i, url in enumerate(garment_image_urls[:6]):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                img_bytes = resp.read()
+            ext = os.path.splitext(url.split("?")[0])[1].lower().lstrip(".") or "jpeg"
+            if ext == "jpg":
+                ext = "jpeg"
+            mime = f"image/{ext}" if ext in ("jpeg", "png", "webp", "gif") else "image/jpeg"
+            image_files.append((f"garment_{i}.png", img_bytes, mime))
+            loaded_count += 1
+        except Exception as e:
+            _logger.warning(f"[generate_outfit_image] Could not load image {url}: {e}")
+
+    if loaded_count == 0:
+        return {"success": False, "error": "Could not download any garment images."}
+
+    client = make_openai_client(api_key=api_key)
+    try:
+        gen = client.images.edit(
+            model="gpt-image-1",
+            image=image_files,
+            prompt=prompt,
+            n=1,
+        )
+
+        image_b64 = gen.data[0].b64_json if gen.data else None
+
+        if not image_b64:
+            return {"success": False, "error": "No image returned by gpt-image-1."}
+
+        result_bytes = base64.b64decode(image_b64)
+
+        tailor_bucket = os.getenv("TAILOR_S3_BUCKET_NAME")
+        tailor_region = os.getenv("TAILOR_AWS_REGION")
+        s3_key = f"tailor/generated/{uuid.uuid4()}.png"
+        uploaded = s3_storage.upload_bytes_to_s3(
+            result_bytes, s3_key, content_type="image/png",
+            bucket_name=tailor_bucket, region=tailor_region
+        )
+        if not uploaded:
+            return {"success": False, "error": "Failed to upload generated outfit image to S3."}
+
+        image_url = s3_storage.generate_presigned_get(s3_key, bucket_name=tailor_bucket, region=tailor_region)
+        if not image_url:
+            return {"success": False, "error": "Failed to generate presigned URL for generated image."}
+
+        return {
+            "success": True,
+            "image_url": image_url,
+            "s3_key": s3_key,
+            "gender": gender_upper,
+            "garment_count": loaded_count,
+        }
+
+    except Exception as e:
+        _logger.error(f"[generate_outfit_image] Failed: {e}")
+        return {"success": False, "error": str(e)}
