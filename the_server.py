@@ -32,9 +32,8 @@ from llm_usage import make_openai_client
 import model_registry
 import model_router
 import routing_overrides
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query, Header
+from fastapi import HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Query, Header
 from starlette.websockets import WebSocketState
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from duckduckgo_search import DDGS
