@@ -1,0 +1,10 @@
+---
+description: Never add Co-authored-by or other AI co-authorship trailers to commits, PRs, or messages
+alwaysApply: true
+---
+
+# No co-authorship
+
+Never add `Co-authored-by`, `Co-Authored-By`, or any similar trailer to git commits, pull requests, or commit message bodies.
+
+Commit messages must name only the human author already configured in git. Do not attribute work to Cursor, Claude, Composer, or any other model or tool in trailers or footers.
