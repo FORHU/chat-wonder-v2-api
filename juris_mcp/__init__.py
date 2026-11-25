@@ -1,5 +1,2 @@
-"""Juris.ph MCP client for live Philippine legal retrieval."""
-
-from .client import JurisMcpClient, JurisMcpError, get_client
-
-__all__ = ["JurisMcpClient", "JurisMcpError", "get_client"]
+"""Compatibility shim — implementation lives in mcp.legal.juris_mcp."""
+from mcp.legal.juris_mcp import *  # noqa: F401,F403
