@@ -51,6 +51,8 @@ from app.styleos.tools import (  # noqa: E402
 
 # Legal tools live in app.legal.tools; re-export so the dynamic loader still finds them.
 from app.legal.tools import (  # noqa: E402
+    _UK_ANALYSIS_CHAR_LIMIT,
+    _UK_ANALYSIS_MAX_BYTES,
     DOCUMENT_TEMPLATES,
     UK_DOCUMENT_TEMPLATES,
     _CASE_DOCUMENT_CHAR_CAP,

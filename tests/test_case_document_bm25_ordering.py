@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from resources.functions import user_functions as uf
+import app.legal.tools as lt
 
 # get_case_document reads these at call time.
 os.environ.setdefault("ILOVELAWYER_API_BASE", "http://example.invalid")
@@ -34,7 +35,7 @@ class Bm25ReorderingTests(unittest.TestCase):
         ]
 
     def test_relevant_chunk_survives_truncation_when_query_given(self):
-        with patch.object(uf, "_http_get_json", return_value=_fake_response(self.chunks)):
+        with patch.object(lt, "_http_get_json", return_value=_fake_response(self.chunks)):
             result = uf.get_case_document("doc1", query="clause 1.7 specified default")
         self.assertTrue(result["success"])
         self.assertIn("clause 1.7", result["text"])
@@ -42,32 +43,32 @@ class Bm25ReorderingTests(unittest.TestCase):
 
     def test_relevant_chunk_lost_without_query_natural_order(self):
         """Control: same document, no query — old behaviour (chunkIndex order) drops c1."""
-        with patch.object(uf, "_http_get_json", return_value=_fake_response(self.chunks)):
+        with patch.object(lt, "_http_get_json", return_value=_fake_response(self.chunks)):
             result = uf.get_case_document("doc1")
         self.assertTrue(result["success"])
         self.assertNotIn("clause 1.7", result["text"])
 
     def test_document_under_cap_keeps_natural_chunk_index_order(self):
         small_chunks = [_chunk("a", 0, "first part"), _chunk("b", 1, "second part")]
-        with patch.object(uf, "_http_get_json", return_value=_fake_response(small_chunks)):
+        with patch.object(lt, "_http_get_json", return_value=_fake_response(small_chunks)):
             result = uf.get_case_document("doc1", query="second")
         self.assertEqual(result["text"], "first part\n\nsecond part")
 
     def test_case_document_chunk_ids_filter_bypasses_bm25_branch(self):
         """A pre-filtered read must stay exactly as before — no BM25 reordering applied."""
-        with patch.object(uf, "_http_get_json", return_value=_fake_response(self.chunks)):
+        with patch.object(lt, "_http_get_json", return_value=_fake_response(self.chunks)):
             result = uf.get_case_document("doc1", case_document_chunk_ids=["c0"], query="clause 1.7")
         self.assertNotIn("clause 1.7", result["text"])
 
     def test_explicit_paging_bypasses_bm25_branch(self):
         """limit implies sequential paging by chunkIndex — BM25 must not reorder mid-page."""
-        with patch.object(uf, "_http_get_json", return_value=_fake_response(self.chunks)):
+        with patch.object(lt, "_http_get_json", return_value=_fake_response(self.chunks)):
             result = uf.get_case_document("doc1", query="clause 1.7", limit=1)
         # Natural order: chunk 0 (the filler) comes first regardless of query relevance.
         self.assertNotIn("clause 1.7", result["text"])
 
     def test_no_query_no_reorder_even_over_cap(self):
-        with patch.object(uf, "_http_get_json", return_value=_fake_response(self.chunks)):
+        with patch.object(lt, "_http_get_json", return_value=_fake_response(self.chunks)):
             result = uf.get_case_document("doc1")
         self.assertTrue(result["text"].startswith("irrelevant padding"))
 

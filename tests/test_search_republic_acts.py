@@ -5,11 +5,15 @@ import unittest
 from unittest.mock import patch
 
 import resources.functions.user_functions as uf
+import app.legal.tools as lt
 
 
 class SearchRepublicActsTests(unittest.TestCase):
     def setUp(self):
-        uf._search_cache.clear()
+        # Cache lives on the implementation module after the tools move.
+        lt._search_cache.clear()
+        if hasattr(uf, "_search_cache"):
+            uf._search_cache.clear()
 
     def _mock_juris_call(self, by_query):
         def fake(tool_name, args):
@@ -28,7 +32,7 @@ class SearchRepublicActsTests(unittest.TestCase):
             calls.append(q)
             return [{"id": "a", "ra_number": "1"}]
 
-        with patch.object(uf, "_juris_call", side_effect=self._mock_juris_call(by_query)):
+        with patch.object(lt, "_juris_call", side_effect=self._mock_juris_call(by_query)):
             res = uf.search_republic_acts(query="violence against women", limit=5)
 
         self.assertEqual(calls, ["violence against women"])
@@ -49,7 +53,7 @@ class SearchRepublicActsTests(unittest.TestCase):
                 ]
             return [{"id": "amend", "ra_number": "10398", "score": 0.8}]
 
-        with patch.object(uf, "_juris_call", side_effect=self._mock_juris_call(by_query)):
+        with patch.object(lt, "_juris_call", side_effect=self._mock_juris_call(by_query)):
             res = uf.search_republic_acts(query="VAWC", limit=5)
 
         self.assertEqual(
@@ -72,13 +76,13 @@ class SearchRepublicActsTests(unittest.TestCase):
                 return [{"id": "ra9160", "ra_number": "9160"}]
             return [{"id": "x1", "ra_number": "1"}, {"id": "x2", "ra_number": "2"}]
 
-        with patch.object(uf, "_juris_call", side_effect=self._mock_juris_call(by_query)):
+        with patch.object(lt, "_juris_call", side_effect=self._mock_juris_call(by_query)):
             res = uf.search_republic_acts(query="AMLA", limit=2)
 
         self.assertEqual([r["id"] for r in res["results"]], ["ra9160", "x1"])
 
     def test_eo_pd_ao_mo_return_no_results_and_never_call_juris(self):
-        with patch.object(uf, "_juris_call") as mocked:
+        with patch.object(lt, "_juris_call") as mocked:
             for q, label in [
                 ("PD 442", "Presidential Decree No. 442"),
                 ("EO 209", "Executive Order No. 209"),
@@ -99,7 +103,7 @@ class SearchRepublicActsTests(unittest.TestCase):
             calls.append(q)
             return [{"id": "ra9262", "ra_number": "9262"}]
 
-        with patch.object(uf, "_juris_call", side_effect=self._mock_juris_call(by_query)):
+        with patch.object(lt, "_juris_call", side_effect=self._mock_juris_call(by_query)):
             uf.search_republic_acts(query="VAWC", limit=5)
             call_count_after_first = len(calls)
             res2 = uf.search_republic_acts(query="vawc", limit=5)  # same expansion, different case
@@ -116,7 +120,7 @@ class SearchRepublicActsTests(unittest.TestCase):
             calls.append(q)
             return [{"id": "ra9262", "ra_number": "9262"}]
 
-        with patch.object(uf, "_juris_call", side_effect=self._mock_juris_call(by_query)):
+        with patch.object(lt, "_juris_call", side_effect=self._mock_juris_call(by_query)):
             uf.search_republic_acts(query="VAWC", limit=5)
             res2 = uf.search_republic_acts(query="RA 9262", limit=5)
 
@@ -127,7 +131,7 @@ class SearchRepublicActsTests(unittest.TestCase):
         def by_query(q):
             return "down"
 
-        with patch.object(uf, "_juris_call", side_effect=self._mock_juris_call(by_query)):
+        with patch.object(lt, "_juris_call", side_effect=self._mock_juris_call(by_query)):
             res = uf.search_republic_acts(query="violence against women", limit=5)
 
         self.assertFalse(res["success"])

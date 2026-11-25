@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import resources.functions.user_functions as uf
+import app.legal.tools as lt
 
 
 class KoreanLawWrapperTests(unittest.TestCase):
@@ -22,7 +23,7 @@ class KoreanLawWrapperTests(unittest.TestCase):
             captured["args"] = args
             return {"results": [{"lawId": "001234"}]}
 
-        with patch.object(uf, "_kr_call", side_effect=fake):
+        with patch.object(lt, "_kr_call", side_effect=fake):
             res = uf.search_law(query="관세법", display=10)
 
         self.assertTrue(res["success"])
@@ -40,7 +41,7 @@ class KoreanLawWrapperTests(unittest.TestCase):
             captured["args"] = args
             return {"text": "..."}
 
-        with patch.object(uf, "_kr_call", side_effect=fake):
+        with patch.object(lt, "_kr_call", side_effect=fake):
             res = uf.get_law_text(mst="123", jo="제38조", efYd="20230101")
 
         self.assertTrue(res["success"])
@@ -63,7 +64,7 @@ class KoreanLawWrapperTests(unittest.TestCase):
         self.assertFalse(res["success"])
 
     def test_legal_research_document_review_with_text_succeeds(self):
-        with patch.object(uf, "_kr_call", return_value={"analysis": []}):
+        with patch.object(lt, "_kr_call", return_value={"analysis": []}):
             res = uf.legal_research(task="document_review", text="some contract text")
         self.assertTrue(res["success"])
 
@@ -78,7 +79,7 @@ class KoreanLawWrapperTests(unittest.TestCase):
             captured["args"] = args
             return {"verified": []}
 
-        with patch.object(uf, "_kr_call", side_effect=fake):
+        with patch.object(lt, "_kr_call", side_effect=fake):
             res = uf.legal_analysis(mode="verify_citations", text="민법 제750조")
 
         self.assertTrue(res["success"])
@@ -95,7 +96,7 @@ class KoreanLawWrapperTests(unittest.TestCase):
             captured["args"] = args
             return {"results": []}
 
-        with patch.object(uf, "_kr_call", side_effect=fake):
+        with patch.object(lt, "_kr_call", side_effect=fake):
             res = uf.search_decisions(domain="precedent", query="negligence")
 
         self.assertTrue(res["success"])
@@ -116,7 +117,7 @@ class KoreanLawWrapperTests(unittest.TestCase):
         self.assertFalse(res["success"])
 
     def test_wrapper_reports_kr_call_exception_as_failure(self):
-        with patch.object(uf, "_kr_call", side_effect=RuntimeError("boom")):
+        with patch.object(lt, "_kr_call", side_effect=RuntimeError("boom")):
             res = uf.search_law(query="민법")
         self.assertFalse(res["success"])
         self.assertIn("boom", res["error"])

@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import resources.functions.user_functions as uf
+import app.legal.tools as lt
 from uk_legal_mcp import direct
 from uk_legal_mcp.client import UkLegalMcpToolError
 
@@ -278,7 +279,7 @@ class FallbackWiringTests(unittest.TestCase):
                "url": "https://www.legislation.gov.uk/ukpga/1953/20/section/29", "truncated": False}
 
     def _mcp_fails(self):
-        return patch.object(uf, "_uk_call", side_effect=UkLegalMcpToolError(WAF_TEXT))
+        return patch.object(lt, "_uk_call", side_effect=UkLegalMcpToolError(WAF_TEXT))
 
     def test_search_falls_back_to_legislation_gov_uk(self):
         with self._mcp_fails(), patch.object(direct, "search_legislation", return_value={"results": [dict(r) for r in self.ROWS]}) as d:
@@ -299,7 +300,7 @@ class FallbackWiringTests(unittest.TestCase):
         d.assert_called_once()
 
     def test_the_mcp_result_is_used_when_it_works(self):
-        with patch.object(uf, "_uk_call", return_value={"results": [dict(self.ROWS[0])]}), \
+        with patch.object(lt, "_uk_call", return_value={"results": [dict(self.ROWS[0])]}), \
                 patch.object(direct, "search_legislation") as d:
             res = uf.legislation_search(query="Births and Deaths Registration Act 1953")
         self.assertTrue(res["success"])

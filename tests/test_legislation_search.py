@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import resources.functions.user_functions as uf
+import app.legal.tools as lt
 
 
 class LegislationSearchTests(unittest.TestCase):
@@ -23,7 +24,7 @@ class LegislationSearchTests(unittest.TestCase):
             sent.append(q)
             return [{"title": "Consumer Rights Act 2015", "type": "ukpga", "year": 2015, "number": 15}]
 
-        with patch.object(uf, "_uk_call", side_effect=self._mock_uk_call(handler)):
+        with patch.object(lt, "_uk_call", side_effect=self._mock_uk_call(handler)):
             res = uf.legislation_search(query="consumer protection for faulty goods", limit=5)
 
         self.assertEqual(sent, ["consumer protection for faulty goods"])
@@ -36,7 +37,7 @@ class LegislationSearchTests(unittest.TestCase):
             sent.append(q)
             return [{"title": "Human Rights Act 1998", "type": "ukpga", "year": 1998, "number": 42}]
 
-        with patch.object(uf, "_uk_call", side_effect=self._mock_uk_call(handler)):
+        with patch.object(lt, "_uk_call", side_effect=self._mock_uk_call(handler)):
             res = uf.legislation_search(query="HRA", limit=5)
 
         self.assertEqual(sent, ["Human Rights Act 1998"])
@@ -49,7 +50,7 @@ class LegislationSearchTests(unittest.TestCase):
                 {"title": "Equality Act 2010", "type": "ukpga", "year": 2010, "number": 15},
             ]
 
-        with patch.object(uf, "_uk_call", side_effect=self._mock_uk_call(handler)):
+        with patch.object(lt, "_uk_call", side_effect=self._mock_uk_call(handler)):
             res = uf.legislation_search(query="EA", limit=5)
 
         self.assertEqual(res["results"][0]["title"], "Equality Act 2010")
@@ -62,7 +63,7 @@ class LegislationSearchTests(unittest.TestCase):
             sent.append(q)
             return []
 
-        with patch.object(uf, "_uk_call", side_effect=self._mock_uk_call(handler)):
+        with patch.object(lt, "_uk_call", side_effect=self._mock_uk_call(handler)):
             uf.legislation_search(query="HRA damages claim", limit=5)
 
         self.assertEqual(sent, ["HRA damages claim"])
@@ -70,13 +71,13 @@ class LegislationSearchTests(unittest.TestCase):
     def test_a_transport_failure_surfaces_as_a_normal_tool_error(self):
         # With the legislation.gov.uk fallback off (tests/test_uk_direct_legislation.py covers it on), a service
         # failure is reported as a failed tool call.
-        with patch.dict(os.environ, {"UK_LEGISLATION_DIRECT_FALLBACK": "false"}),                 patch.object(uf, "_uk_call", side_effect=RuntimeError("uk-legal-mcp unreachable")):
+        with patch.dict(os.environ, {"UK_LEGISLATION_DIRECT_FALLBACK": "false"}),                 patch.object(lt, "_uk_call", side_effect=RuntimeError("uk-legal-mcp unreachable")):
             res = uf.legislation_search(query="HRA", limit=5)
         self.assertFalse(res["success"])
         self.assertIn("error", res)
 
     def test_missing_query_is_still_rejected_before_any_call(self):
-        with patch.object(uf, "_uk_call") as mocked:
+        with patch.object(lt, "_uk_call") as mocked:
             res = uf.legislation_search(query="   ", limit=5)
         self.assertFalse(res["success"])
         mocked.assert_not_called()

@@ -15,7 +15,8 @@ from legal_citations import format_legal_citation_links, split_bundle_refs_out_o
 from legal_fact_boost import append_critical_doctrine_guards, append_uk_doctrine_guards
 
 srv._load_user_functions(overwrite_globals=True)
-import resources.functions.user_functions as uf  # noqa: E402  (loaded above)
+import resources.functions.user_functions as uf
+import app.legal.tools as lt  # noqa: E402  (loaded above)
 
 
 def _fake_api(chunks):
@@ -27,7 +28,7 @@ CHUNKS = [{"id": f"c{i}", "chunkIndex": i, "chunkText": f"para {i}"} for i in ra
 
 class GetCaseDocumentPartialTests(unittest.TestCase):
     def test_full_read_is_not_partial(self):
-        with patch.object(uf, "_http_get_json", return_value=_fake_api(CHUNKS)), \
+        with patch.object(lt, "_http_get_json", return_value=_fake_api(CHUNKS)), \
              patch.dict("os.environ", {"ILOVELAWYER_API_BASE": "http://x", "CHAT_WONDER_API_KEY": "k"}):
             r = uf.get_case_document("d1")
         self.assertTrue(r["success"])
@@ -36,7 +37,7 @@ class GetCaseDocumentPartialTests(unittest.TestCase):
         self.assertNotIn("note", r)
 
     def test_chunk_filtered_read_is_partial_with_note(self):
-        with patch.object(uf, "_http_get_json", return_value=_fake_api(CHUNKS)), \
+        with patch.object(lt, "_http_get_json", return_value=_fake_api(CHUNKS)), \
              patch.dict("os.environ", {"ILOVELAWYER_API_BASE": "http://x", "CHAT_WONDER_API_KEY": "k"}):
             r = uf.get_case_document("d1", case_document_chunk_ids=["c1", "c4"])
         self.assertTrue(r["partial"])
@@ -46,7 +47,7 @@ class GetCaseDocumentPartialTests(unittest.TestCase):
         self.assertIn("WITHOUT case_document_chunk_ids", r["note"])
 
     def test_paged_read_is_partial_until_last_page(self):
-        with patch.object(uf, "_http_get_json", return_value=_fake_api(CHUNKS)), \
+        with patch.object(lt, "_http_get_json", return_value=_fake_api(CHUNKS)), \
              patch.dict("os.environ", {"ILOVELAWYER_API_BASE": "http://x", "CHAT_WONDER_API_KEY": "k"}):
             first = uf.get_case_document("d1", offset=0, limit=4)
             last = uf.get_case_document("d1", offset=4, limit=4)

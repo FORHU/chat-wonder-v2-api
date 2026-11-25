@@ -14,7 +14,8 @@ from unittest.mock import patch
 import the_server as srv
 
 srv._load_user_functions(overwrite_globals=True)
-import resources.functions.user_functions as uf  # noqa: E402  (loaded above)
+import resources.functions.user_functions as uf
+import app.legal.tools as lt  # noqa: E402  (loaded above)
 
 TOOL = "analyze_document_uk"
 
@@ -96,7 +97,7 @@ class AnalyzeDocumentUkTests(unittest.TestCase):
         self.assertIn("not found", result["error"])
 
     def test_oversize_file_is_refused(self):
-        with _FakeS3(b"x"), patch.object(uf, "_UK_ANALYSIS_MAX_BYTES", 0):
+        with _FakeS3(b"x"), patch.object(lt, "_UK_ANALYSIS_MAX_BYTES", 0):
             result = uf.analyze_document_uk("uploads/big.txt")
         self.assertFalse(result["success"])
         self.assertIn("too large", result["error"])

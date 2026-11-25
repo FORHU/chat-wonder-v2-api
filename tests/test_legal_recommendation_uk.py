@@ -13,7 +13,8 @@ from unittest.mock import patch
 import the_server as srv
 
 srv._load_user_functions(overwrite_globals=True)
-import resources.functions.user_functions as uf  # noqa: E402  (loaded above)
+import resources.functions.user_functions as uf
+import app.legal.tools as lt  # noqa: E402  (loaded above)
 
 TOOL = "get_legal_recommendation_uk"
 
@@ -46,8 +47,8 @@ class _Searches:
     def __init__(self, legislation, case_law):
         self.calls = {"legislation": [], "case_law": []}
         self._patches = [
-            patch.object(uf, "legislation_search", lambda **kw: (self.calls["legislation"].append(kw), legislation)[1]),
-            patch.object(uf, "case_law_search", lambda **kw: (self.calls["case_law"].append(kw), case_law)[1]),
+            patch.object(lt, "legislation_search", lambda **kw: (self.calls["legislation"].append(kw), legislation)[1]),
+            patch.object(lt, "case_law_search", lambda **kw: (self.calls["case_law"].append(kw), case_law)[1]),
         ]
 
     def __enter__(self):

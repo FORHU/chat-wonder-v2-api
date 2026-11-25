@@ -111,7 +111,7 @@ class EveryTraceSiteIsCoveredTests(unittest.TestCase):
     def test_every_proposed_tool_call_trace_is_preceded_by_the_prefill(self):
         import pathlib
         root = pathlib.Path(__file__).resolve().parent.parent
-        for name in ("the_server.py", "legal_responses_chain.py"):
+        for name in ("the_server.py", "app/legal/legal_responses_chain.py"):
             lines = (root / name).read_text(encoding="utf-8").splitlines()
             sites = [i for i, ln in enumerate(lines) if "Proposed tool call:" in ln]
             self.assertTrue(sites, f"no trace sites found in {name}")

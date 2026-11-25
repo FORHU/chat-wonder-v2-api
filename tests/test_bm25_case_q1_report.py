@@ -23,6 +23,7 @@ import unittest
 from unittest.mock import patch
 
 from resources.functions import user_functions as uf
+import app.legal.tools as lt
 from bm25 import BM25
 
 os.environ.setdefault("ILOVELAWYER_API_BASE", "http://example.invalid")
@@ -95,7 +96,7 @@ class Bm25Q1CaseStudy(unittest.TestCase):
         raw_scores = bm25.scores(_Q1)
         order = sorted(range(len(raw_scores)), key=lambda i: raw_scores[i], reverse=True)
 
-        with patch.object(uf, "_http_get_json", return_value=_fake_response(_CHUNKS)):
+        with patch.object(lt, "_http_get_json", return_value=_fake_response(_CHUNKS)):
             result = uf.get_case_document("whitfield-bundle", query=_Q1)
 
         gold_rank = order.index(ids.index(_GOLD_ID)) + 1  # 1-based
