@@ -1,0 +1,1001 @@
+# -*- coding: utf-8 -*-
+"""Legal-persona tool-calling loop on OpenAI's Responses API.
+
+Exists because gpt-5.6-terra rejects function tools combined with any
+reasoning_effort other than 'none' on /v1/chat/completions (confirmed live):
+"Function tools with reasoning_effort are not supported for gpt-5.6-terra in
+/v1/chat/completions. To use function tools, use /v1/responses or set
+reasoning_effort to 'none'." This module is the /v1/responses path, used only
+for the legal persona so every other persona keeps using Chat Completions
+unchanged.
+
+Confirmed live (Stage 0 spike) before writing this:
+- No `reasoning` output items are returned by gpt-5.6-terra even at
+  effort='high', and replaying only function_call/function_call_output pairs
+  (no reasoning item) round-trips into a coherent next answer. No reasoning
+  item persistence is implemented here because there is nothing to persist.
+- temperature is rejected outright ("Unsupported parameter: 'temperature' is
+  not supported with this model.") -- never pass it to responses.create for
+  this model.
+- The inline `REASON: ...` prompt convention (see prepare_chat_messages's
+  [XAI Transparency Requirement] block) still works verbatim as plain
+  message text under effort='high' -- reused unchanged by the caller.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from types import SimpleNamespace
+from typing import List, Optional
+
+import decisions_research
+import llm_usage
+import routing_overrides
+import model_registry
+import model_router
+from legal_verify import DRAFT_DISCARD, Verifier, inject_verifier_feedback, verifier_trace_text
+
+
+def create_response(client, **args):
+    """The only place this app calls the Responses API.
+
+    The Responses API stores every response on OpenAI's side unless told not to, and
+    this app sends client documents and case facts through it. store=False is forced
+    here, after the caller's arguments, so no call site can switch it back on. The loop
+    in this module resends the whole conversation on every call (it never uses
+    previous_response_id), so nothing depends on a stored response.
+
+    This does not remove OpenAI's own short-lived abuse-monitoring copy; that needs
+    Zero Data Retention on the OpenAI account. test_responses_store.py fails if a
+    direct responses.create call is added anywhere else.
+    """
+    turn = llm_usage.current()  # captured now: a stream may be consumed on another thread
+    result = client.responses.create(**{**args, "store": False})
+    try:
+        if args.get("stream"):
+            return _tracked_events(result, turn)
+        turn.add(getattr(result, "usage", None), getattr(result, "model", None) or args.get("model"))
+    except Exception:
+        pass
+    return result
+
+
+def _tracked_events(stream, turn):
+    """Pass every event through unchanged, recording usage from response.completed."""
+    for event in stream:
+        llm_usage.record_response_event(turn, event)
+        yield event
+
+
+def to_responses_tools(chat_completions_tools: Optional[list]) -> list:
+    """Flatten {"type": "function", "function": {...}} -> Responses tool shape."""
+    if not chat_completions_tools:
+        return []
+    flattened = []
+    for t in chat_completions_tools:
+        fn = t.get("function") if isinstance(t, dict) and "function" in t else t
+        if not isinstance(fn, dict) or "name" not in fn:
+            continue
+        flattened.append(
+            {
+                "type": "function",
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+            }
+        )
+    return flattened
+
+
+def chat_messages_to_input_items(messages: List[dict]) -> List[dict]:
+    """Convert prepare_chat_messages()'s flat role/content list into Responses
+    input items. Confirmed live: role/content items (including 'system' mid-list,
+    which this app uses for synthetic [Memory Fact]/[Constraints] narration)
+    pass through Responses API unchanged -- this is intentionally a thin,
+    named passthrough rather than dead identity code, so the seam exists if
+    that ever stops being true for a future model.
+    """
+    return [dict(m) for m in messages]
+
+
+def items_to_chat_messages(input_items: List[dict]) -> List[dict]:
+    """One-way, call-time-only translation of this module's Responses-shaped input_items into
+    Chat Completions messages, for a CW-7 tool override that resolves to a deepseek-* model
+    (model_registry.is_deepseek_model) -- DeepSeek has no /v1/responses endpoint, only an
+    OpenAI-compatible /v1/chat/completions one.
+
+    Never persisted: input_items itself always stays in Responses shape regardless of which
+    vendor actually served a given step (append_function_call_round_trip writes every tool
+    result back the same way either way), so this is rebuilt fresh immediately before each
+    DeepSeek call rather than carried forward.
+    """
+    messages: List[dict] = []
+    pending_calls: dict = {}  # call_id -> {"name", "arguments"}, filled by a function_call item
+    for item in input_items:
+        itype = item.get("type")
+        if itype == "function_call":
+            pending_calls[item["call_id"]] = {"name": item["name"], "arguments": item.get("arguments", "")}
+        elif itype == "function_call_output":
+            call = pending_calls.pop(item["call_id"], None)
+            if call is None:
+                continue  # malformed pairing -- drop rather than send a broken tool_call upstream
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": item["call_id"],
+                    "type": "function",
+                    "function": {"name": call["name"], "arguments": call["arguments"]},
+                }],
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": item["call_id"],
+                "content": item.get("output", ""),
+            })
+        else:
+            messages.append(dict(item))
+    return messages
+
+
+def _deepseek_completions_events(client, model: str, messages: List[dict], chat_completions_tools: Optional[list]):
+    """Runs one call on DeepSeek's Chat Completions endpoint and yields synthetic events in the
+    same two shapes apply_responses_event already understands (response.output_item.added /
+    response.function_call_arguments.delta / response.output_text.delta) -- so the loop in
+    run_function_chain_responses/streaming_run_function_chain_responses never needs to know which
+    vendor actually served a call. This is the CW-7 bridge: a tool override that resolves to a
+    deepseek-* model reaches here instead of being refused.
+
+    Confirmed live against api.deepseek.com before writing this: a tool call's `id` and
+    `function.name` arrive only on its first delta chunk (keyed by `index`); every later chunk
+    for that same call carries only an `arguments` piece to append -- no closing/.done event is
+    sent, so (unlike the Responses API) there is nothing to reconcile against; the added+delta
+    events below already fully reconstruct each call.
+    """
+    args = {"model": model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+    if chat_completions_tools:
+        args["tools"] = chat_completions_tools
+        args["tool_choice"] = "auto"
+        args["parallel_tool_calls"] = False
+    args = model_registry.shape_chat_args(model, args)
+
+    calls: dict = {}  # output_index -> {"call_id", "name"}
+    for chunk in client.chat.completions.create(**args):
+        if not getattr(chunk, "choices", None):
+            continue
+        delta = chunk.choices[0].delta
+        tool_calls = getattr(delta, "tool_calls", None)
+        if tool_calls:
+            for tc in tool_calls:
+                idx = tc.index
+                if idx not in calls:
+                    calls[idx] = {"call_id": tc.id, "name": tc.function.name}
+                    yield SimpleNamespace(
+                        type="response.output_item.added",
+                        output_index=idx,
+                        item=SimpleNamespace(type="function_call", call_id=calls[idx]["call_id"], name=calls[idx]["name"]),
+                    )
+                piece = getattr(tc.function, "arguments", None) or ""
+                if piece:
+                    yield SimpleNamespace(type="response.function_call_arguments.delta", output_index=idx, delta=piece)
+        content = getattr(delta, "content", None)
+        if content:
+            yield SimpleNamespace(type="response.output_text.delta", delta=content)
+
+
+def append_function_call_round_trip(
+    input_items: List[dict],
+    *,
+    call_id: str,
+    name: str,
+    arguments: str,
+    result,
+) -> List[dict]:
+    """Append the function_call + function_call_output item pair, replacing
+    the Chat-Completions-loop's synthetic '[Memory Fact]' system-message trick.
+    """
+    try:
+        output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+    except Exception:
+        output = str(result)
+    input_items.append(
+        {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments,
+        }
+    )
+    input_items.append(
+        {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        }
+    )
+    return input_items
+
+
+def _first_pending_call(pending_calls: dict):
+    """pending_calls is keyed by output_index; we only ever act on one call per
+    turn (matching the existing single-call-per-turn assumption used throughout
+    the_server.py's dedup/trace/HITL logic). Take the lowest index; warn if more
+    than one arrived so a future model that does parallelize here is visible in
+    logs rather than silently dropping calls -- same posture as the
+    parallel_tool_calls=False comment on the Chat Completions loop.
+    """
+    if not pending_calls:
+        return None
+    if len(pending_calls) > 1:
+        import logging
+
+        logging.warning(
+            "[legal-responses] model emitted %d parallel tool calls in one turn; "
+            "only the first is executed (matches existing single-call assumption)",
+            len(pending_calls),
+        )
+    first_index = min(pending_calls.keys())
+    return pending_calls[first_index]
+
+
+def apply_responses_event(event, pending_calls: dict) -> Optional[str]:
+    """Process one Responses API stream event, mutating pending_calls in place
+    (keyed by output_index -- item-indexed, unlike Chat Completions' flat
+    delta.tool_calls[0]). Returns a text delta string if this event carried
+    visible text, else None. Used identically by the sync and async loops.
+    """
+    et = event.type
+    if et == "response.output_item.added" and getattr(event.item, "type", None) == "function_call":
+        pending_calls[event.output_index] = {
+            "call_id": event.item.call_id,
+            "name": event.item.name,
+            "arguments": "",
+        }
+    elif et == "response.function_call_arguments.delta":
+        if event.output_index in pending_calls:
+            pending_calls[event.output_index]["arguments"] += event.delta
+    elif et == "response.output_item.done" and getattr(event.item, "type", None) == "function_call":
+        # .done's item.arguments is the authoritative complete string;
+        # reconcile in case any delta was dropped (defensive, .added already
+        # carries call_id/name per the Stage 0 spike).
+        pending_calls[event.output_index] = {
+            "call_id": event.item.call_id,
+            "name": event.item.name,
+            "arguments": event.item.arguments,
+        }
+    elif et == "response.output_text.delta":
+        return event.delta
+    return None
+
+
+def _strip_reason_line(text: str):
+    """Same convention as the Chat Completions loop: a leading 'REASON: ...'
+    line is system-logging only and never shown to the user. Operates on a
+    fully-accumulated string (sync loop calls this once per iteration; the
+    streaming loop buffers the first line itself before deciding what to
+    yield -- see streaming_run_function_chain_responses).
+    """
+    if not text:
+        return text, None
+    lines = text.split("\n")
+    if lines[0].strip().startswith("REASON:"):
+        return "\n".join(lines[1:]).strip(), lines[0].strip()[7:].strip()
+    return text, None
+
+
+def _manifest_has_tool(manifest: list, name: Optional[str]) -> bool:
+    """True if `name` is one of the tools offered to the model (Responses or Chat Completions manifest shape)."""
+    if not name:
+        return False
+    return any((t.get("name") or (t.get("function") or {}).get("name")) == name for t in manifest or [])
+
+
+def _tool_choice_for(force: list) -> object:
+    """`tool_choice` for the next model call. `force` is a one-item holder ([name] or [None]) that is emptied when
+    used, so only the first call of a turn is forced and later calls go back to "auto"."""
+    name, force[0] = force[0], None
+    return {"type": "function", "name": name} if name else "auto"
+
+
+def _decisions_prefetch(state, function_call: dict, result, query: str, session_id, execute_function_call) -> list:
+    """R2 prototype (decisions_research.py): after a legislation search, choose and fetch the most
+    useful sections with OpenAI's Decisions API. Returns [{"args", "result", "label"}] (empty when off,
+    not applicable, or on any failure). Off unless LEGAL_DECISIONS_PREFETCH=true; never raises."""
+    if not decisions_research.prefetch_enabled():
+        return []
+
+    def run_tool(name: str, args: dict):
+        return execute_function_call({"name": name, "arguments": json.dumps(args)}, session_id=session_id)
+
+    out = decisions_research.prefetch_sections(
+        function_call.get("name"), result, query, getattr(state, "openai_client", None), run_tool
+    )
+    if not out:
+        return []
+    log = getattr(state, "decisions_prefetch_log", None)
+    if not isinstance(log, list):
+        log = []
+        state.decisions_prefetch_log = log
+    log.append(out["metrics"])
+    return out["fetched"]
+
+
+def _deliver_prefetched(fetched: list, input_items: list, funcall_chains: list, tool_log: list,
+                        prefetched_keys: set, summarize) -> list:
+    """Hand each prefetched section to the model as a real legislation_get_section call + result in
+    its history (no model call spent), and register it with the duplicate guard and the tool log --
+    exactly what the model's own fetch would have left behind. Returns the delivered entries."""
+    delivered = []
+    for i, f in enumerate(fetched):
+        key = decisions_research.section_key(f["args"])
+        if key is None or key in prefetched_keys:
+            continue
+        prefetched_keys.add(key)
+        call_id = f"prefetch_{len(prefetched_keys)}_{uuid.uuid4().hex[:8]}"
+        append_function_call_round_trip(
+            input_items, call_id=call_id, name="legislation_get_section",
+            arguments=json.dumps(f["args"]), result=f["result"],
+        )
+        funcall_chains.append({"name": "legislation_get_section", "args": f["args"]})
+        tool_log.append({"name": "legislation_get_section", "args": f["args"],
+                         "summary": summarize("legislation_get_section", f["result"]), "prefetched": True})
+        delivered.append({**f, "call_id": call_id})
+    return delivered
+
+
+def run_function_chain_responses(
+    state,
+    messages: list,
+    max_chains: int = 12,
+    session_id: str = None,
+    tools: list = None,
+    query: str = "",
+    model: str = None,
+    reasoning_effort: str = None,
+    temperature: float = None,
+    auto_approval: bool = False,
+    verify: Optional[Verifier] = None,
+    force_first_tool: Optional[str] = None,
+    persona: str = None,
+):
+    """Legal-persona equivalent of the_server.run_function_chain(), on /v1/responses
+    instead of /v1/chat/completions, so real reasoning_effort can be combined
+    with tool calling (gpt-5.6-terra rejects that combination on Chat Completions).
+
+    temperature is accepted for call-site signature symmetry with the Chat
+    Completions loop but never sent -- confirmed live that this model rejects
+    it outright ("Unsupported parameter: 'temperature' is not supported with
+    this model.").
+    """
+    from the_server import (
+        _context,
+        _describe_tool_args,
+        _summarize_tool_result,
+        broadcast_trace,
+        execute_function_call,
+        _prefill_uk_pleading_authorities,
+    )
+
+    available_manifest = to_responses_tools(tools if tools is not None else _context.fun_manifest)
+    # Require this tool on the first model call only (see the_server._uk_forced_first_tool).
+    _force_first = [force_first_tool if _manifest_has_tool(available_manifest, force_first_tool) else None]
+    input_items = chat_messages_to_input_items(messages)
+    funcall_chains = []
+    prefetched_keys: set = set()
+    full_response = ""
+    last_tool = None
+    tool_log = []
+    state.last_turn_tool_log = tool_log
+    # CW-7: this path runs the Responses API, which DeepSeek has no endpoint for at all -- a tool
+    # override that resolves to a deepseek-* model is bridged to DeepSeek's Chat Completions
+    # endpoint instead (_deepseek_completions_events), never to state.openai_client. The turn's
+    # own starting model is never deepseek here (the_server.py's _force_completions routes a
+    # deepseek-default persona to run_function_chain/Chat Completions before this module ever
+    # runs), so this only ever applies from the second model call onward, after a tool override
+    # has switched _current_model -- _tool_choice_for's forced-first-tool call is unaffected.
+    _current_model = model
+
+    def perform_responses_call(items):
+        if model_registry.is_deepseek_model(_current_model):
+            client = model_registry.get_client(_current_model, state.openai_client)
+            chat_tools = tools if tools is not None else _context.fun_manifest
+            llm_usage.current().add_pass()
+            return _deepseek_completions_events(client, _current_model, items_to_chat_messages(items), chat_tools)
+        args = {
+            "model": _current_model or _context.model,
+            "input": items,
+            "stream": True,
+        }
+        if reasoning_effort and reasoning_effort != "none":
+            args["reasoning"] = {"effort": reasoning_effort}
+        if available_manifest:
+            args["tools"] = available_manifest
+            args["tool_choice"] = _tool_choice_for(_force_first)
+            args["parallel_tool_calls"] = False
+        llm_usage.current().add_pass()
+        return create_response(state.openai_client, **args)
+
+    refine_round = 0
+    # One extra iteration is reserved for a verify->refine round only: a draft produced
+    # on the last research iteration can still be audited and revised, while the
+    # tool-call cap itself stays at max_chains.
+    _budget = max_chains + (1 if verify else 0)
+    for iteration in range(_budget):
+        if iteration >= max_chains and refine_round == 0:
+            break
+        if last_tool:
+            _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
+        else:
+            _cycle_summary = "The AI is working through the question, deciding whether it needs to use a tool or can answer directly."
+        broadcast_trace(
+            "cognition",
+            f"Cycle {iteration + 1} — reasoning over {len(input_items)} items (model: {model}, reasoning_effort: {reasoning_effort})",
+            session_id,
+            summary=_cycle_summary,
+        )
+
+        pending_calls: dict = {}
+        last_response = ""
+        for event in perform_responses_call(input_items):
+            delta_text = apply_responses_event(event, pending_calls)
+            if delta_text:
+                last_response += delta_text
+        # One-shot: a tool override only pins the ONE call that processes that tool's result
+        # (model_router.decide_tool_model's own docstring -- "a per-tool pin", not "every call
+        # for the rest of the turn"). _current_model was already read into this call's request
+        # above, so it's safe to revert to the turn's own default now; the tool-execution branch
+        # below sets it again, for the next call only, if the NEXT tool call is itself overridden.
+        _current_model = model
+
+        function_call = _first_pending_call(pending_calls)
+        last_response, _xai_reason = _strip_reason_line(last_response.strip())
+
+        if not function_call and last_response:
+            preview = last_response[:200].replace("\n", " ")
+            broadcast_trace(
+                "cognition",
+                f"LLM produced final text ({len(last_response)} chars): \"{preview}{'…' if len(last_response) > 200 else ''}\"",
+                session_id,
+                summary="The AI has finished reasoning and is ready to deliver its response.",
+            )
+
+        if _xai_reason and function_call:
+            broadcast_trace(
+                "cognition",
+                f"Reasoning: {_xai_reason}",
+                session_id,
+                summary=f"In the AI's own words, it explained its decision: \"{_xai_reason}\"",
+            )
+
+        if function_call:
+            _prefill_uk_pleading_authorities(function_call, session_id)
+            _tool_desc = next(
+                (t["description"] for t in available_manifest if t["name"] == function_call["name"]), ""
+            )
+            _why_lines = [f"Proposed tool call: `{function_call['name']}`"]
+            if _tool_desc:
+                _why_lines.append(f"Why this tool: \"{_tool_desc[:200]}\"")
+            try:
+                _why_lines.append(f"Arguments passed: {json.dumps(json.loads(function_call['arguments']), ensure_ascii=False)}")
+            except Exception:
+                _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
+            _args_desc = _describe_tool_args(function_call["name"], function_call["arguments"])
+            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc}"
+            if _args_desc:
+                _tool_summary += f" {_args_desc}"
+            broadcast_trace("cognition", "\n".join(_why_lines), session_id, summary=_tool_summary)
+
+        if last_response.strip():
+            full_response = last_response.strip()
+
+        if not function_call:
+            # Verify→refine: give the model one chance to fix citations the finalizer
+            # would otherwise silently gate. Needs a spare iteration to revise in.
+            feedback = (
+                verify(full_response, refine_round)
+                if (verify and full_response and iteration < _budget - 1)
+                else None
+            )
+            if not feedback:
+                break
+            refine_round += 1
+            _vt, _vs = verifier_trace_text(feedback, refine_round)
+            broadcast_trace("control", _vt, session_id, summary=_vs)
+            inject_verifier_feedback(input_items, full_response, feedback)
+            continue
+
+        # HITL gate
+        if not (_context.manual_auto_approval or auto_approval):
+            return {"__hitl__": True, "function_call": function_call, "messages": input_items, "tools": tools}
+
+        try:
+            cur_args = json.loads(function_call["arguments"])
+        except Exception:
+            cur_args = function_call["arguments"]
+
+        if (function_call["name"] == "legislation_get_section"
+                and decisions_research.section_key(cur_args) in prefetched_keys):
+            input_items.append({
+                "role": "system",
+                "content": "That section was already fetched for you above (see the earlier legislation_get_section result). Use it; do not fetch it again.",
+            })
+            continue
+
+        is_dup = any(
+            fc["name"] == function_call["name"] and fc["args"] == cur_args for fc in funcall_chains
+        )
+        if is_dup:
+            broadcast_trace(
+                "control",
+                f"BLOCKED duplicate call: `{function_call['name']}` — injecting memory reminder",
+                session_id,
+                summary=f"Safety check: The AI proposed to use '{function_call['name']}' again with the same inputs. This was blocked to prevent a redundant loop.",
+            )
+            input_items.append({
+                "role": "system",
+                "content": f"Function `{function_call['name']}` already called with same args. Do not repeat.",
+            })
+            continue
+
+        broadcast_trace(
+            "control",
+            f"APPROVED: `{function_call['name']}` — no prior identical call found",
+            session_id,
+            summary=f"Safety check passed. The AI's proposed action is new — it has not taken this exact step before. Proceeding to execute '{function_call['name']}'.",
+        )
+        broadcast_trace(
+            "action",
+            f"Executing `{function_call['name']}`...",
+            session_id,
+            summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.",
+        )
+
+        funcall_chains.append({"name": function_call["name"], "args": cur_args})
+        result = execute_function_call(function_call, session_id=session_id)
+        if result is None:
+            continue
+        _prefetched = _decisions_prefetch(state, function_call, result, query, session_id, execute_function_call)
+        last_tool = function_call["name"]
+        state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        _current_model = _tool_decision["model"]
+        llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
+
+        try:
+            _rp = json.dumps(result, ensure_ascii=False)
+        except Exception:
+            _rp = str(result)
+        _ctx = _summarize_tool_result(function_call["name"], result)
+        tool_log.append({"name": function_call["name"], "args": cur_args, "summary": _ctx})
+        broadcast_trace(
+            "action",
+            f"Result from `{function_call['name']}`:\n{_rp[:300]}",
+            session_id,
+            summary=f"'{function_call['name']}' completed. {_ctx}",
+        )
+        broadcast_trace(
+            "memory",
+            f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}",
+            session_id,
+            summary=f"The AI stored the result from '{function_call['name']}'. This confirmed knowledge will be used when composing the final response.",
+        )
+
+        append_function_call_round_trip(
+            input_items,
+            call_id=function_call["call_id"],
+            name=function_call["name"],
+            arguments=function_call["arguments"],
+            result=result,
+        )
+        if _prefetched:
+            _deliver_prefetched(_prefetched, input_items, funcall_chains, tool_log, prefetched_keys, _summarize_tool_result)
+        input_items.append({
+            "role": "system",
+            "content": "[Constraints]\nIf a complete response has been produced, TERMINATE. Only execute new actions if their conditions are fully satisfied.",
+        })
+
+    if not full_response and funcall_chains:
+        # Exhausted max_chains while the model still wanted to call tools --
+        # force one final tool-free completion instead of returning nothing
+        # (same posture as the Chat Completions loop's identical fallback).
+        try:
+            args = {
+                "model": model or _context.model,
+                "input": input_items + [{
+                    "role": "system",
+                    "content": (
+                        "[Constraints]\nYou have reached the maximum number of tool calls "
+                        "for this turn. Do NOT call any more tools, and do NOT narrate this "
+                        "limit anywhere in your prose answer. Write the best answer possible "
+                        "from the information already gathered above. If any document, "
+                        "authority, or issue could not be reviewed in time, list it under a "
+                        "final \"## Not Yet Reviewed\" section as a plain bullet list — do not "
+                        "mention tool calls, turn limits, or this constraint anywhere else in "
+                        "the answer."
+                    ),
+                }],
+            }
+            if reasoning_effort and reasoning_effort != "none":
+                args["reasoning"] = {"effort": reasoning_effort}
+            llm_usage.current().add_pass()
+            forced = create_response(state.openai_client, **args)
+            full_response = (forced.output_text or "").strip()
+        except Exception as e:
+            import logging
+
+            logging.warning("Forced final-answer completion (responses API) failed: %s", e)
+
+    return full_response
+
+
+async def streaming_run_function_chain_responses(
+    state,
+    messages: list,
+    max_chains: int = 12,
+    session_id: str = None,
+    tools: list = None,
+    query: str = "",
+    model: str = None,
+    reasoning_effort: str = None,
+    temperature: float = None,
+    auto_approval: bool = False,
+    verify: Optional[Verifier] = None,
+    force_first_tool: Optional[str] = None,
+    persona: str = None,
+):
+    """Streaming (async generator) counterpart of run_function_chain_responses,
+    structurally mirroring the_server.streaming_run_function_chain -- same
+    REASON:-line buffering/withholding behavior, same trace points, reusing
+    the_server._astream_llm (generic sync-stream-to-async-generator bridge,
+    not tied to Chat Completions' event shape) to bridge the Responses stream.
+    """
+    from the_server import (
+        _astream_llm,
+        _context,
+        _describe_tool_args,
+        _summarize_tool_result,
+        _trace_count_for_result,
+        _trace_label_for_call,
+        broadcast_trace,
+        execute_function_call,
+        _prefill_uk_pleading_authorities,
+    )
+
+    available_manifest = to_responses_tools(tools if tools is not None else _context.fun_manifest)
+    # Require this tool on the first model call only (see the_server._uk_forced_first_tool).
+    _force_first = [force_first_tool if _manifest_has_tool(available_manifest, force_first_tool) else None]
+    input_items = chat_messages_to_input_items(messages)
+    funcall_chains = []
+    prefetched_keys: set = set()
+    full_response = ""
+    last_tool = None
+    tool_log = []
+    state.last_turn_tool_log = tool_log
+    refine_round = 0
+    _verify_step_id = None  # open [TRACE] self-check step awaiting its 'result' frame
+    _discarded_draft = None  # draft the consumer dropped on DRAFT_DISCARD; re-yielded if no revision lands
+    # See run_function_chain_responses's identical comment -- CW-7, a tool override that resolves
+    # to a deepseek-* model is bridged to DeepSeek's Chat Completions endpoint rather than
+    # refused.
+    _current_model = model
+
+    def perform_responses_call(items):
+        if model_registry.is_deepseek_model(_current_model):
+            client = model_registry.get_client(_current_model, state.openai_client)
+            chat_tools = tools if tools is not None else _context.fun_manifest
+            llm_usage.current().add_pass()
+            return _deepseek_completions_events(client, _current_model, items_to_chat_messages(items), chat_tools)
+        args = {
+            "model": _current_model or _context.model,
+            "input": items,
+            "stream": True,
+        }
+        if reasoning_effort and reasoning_effort != "none":
+            args["reasoning"] = {"effort": reasoning_effort}
+        if available_manifest:
+            args["tools"] = available_manifest
+            args["tool_choice"] = _tool_choice_for(_force_first)
+            args["parallel_tool_calls"] = False
+        llm_usage.current().add_pass()
+        return create_response(state.openai_client, **args)
+
+    # One extra iteration is reserved for a verify->refine round only: a draft produced
+    # on the last research iteration can still be audited and revised, while the
+    # tool-call cap itself stays at max_chains.
+    _budget = max_chains + (1 if verify else 0)
+    for iteration in range(_budget):
+        if iteration >= max_chains and refine_round == 0:
+            break
+        if last_tool:
+            _cycle_summary = f"The AI received results from '{last_tool}' and is deciding whether it has enough information to answer or needs to take another step."
+        else:
+            _cycle_summary = "The AI is working through the question, deciding whether it needs to use a tool or can answer directly."
+        broadcast_trace(
+            "cognition",
+            f"Cycle {iteration + 1} — reasoning over {len(input_items)} items (model: {model}, reasoning_effort: {reasoning_effort})",
+            session_id,
+            summary=_cycle_summary,
+        )
+        await asyncio.sleep(0)
+
+        pending_calls: dict = {}
+        _xai_buffer = ""
+        _xai_first_line_done = False
+        _xai_reason = None
+        last_response = ""
+
+        async for event in _astream_llm(perform_responses_call, input_items):
+            delta_text = apply_responses_event(event, pending_calls)
+            if not delta_text:
+                continue
+            part = delta_text.replace("~", "-")
+            if not _xai_first_line_done:
+                _xai_buffer += part
+                if "\n" in _xai_buffer:
+                    _xai_first_line_done = True
+                    newline_pos = _xai_buffer.index("\n")
+                    first_line = _xai_buffer[:newline_pos]
+                    remainder = _xai_buffer[newline_pos + 1:]
+                    # The model is supposed to write REASON: as its own clean line with nothing
+                    # else, but doesn't always honor that — sometimes it runs straight on from
+                    # the answer text with no line break first. Strip it wherever it starts on
+                    # this line, not only when it's the very first character, so visible text
+                    # before it still reaches the client and the REASON clause never does.
+                    reason_pos = first_line.find("REASON:")
+                    if reason_pos != -1:
+                        visible = first_line[:reason_pos]
+                        _xai_reason = first_line[reason_pos + len("REASON:"):].strip()
+                        if visible:
+                            last_response += visible
+                            yield visible
+                    else:
+                        last_response += first_line + "\n"
+                        yield first_line + "\n"
+                    if remainder:
+                        last_response += remainder
+                        yield remainder
+                    _xai_buffer = ""
+            else:
+                last_response += part
+                yield part
+        # One-shot: see run_function_chain_responses's identical comment -- a tool override only
+        # pins the ONE call that processes that tool's result, not every call for the rest of the
+        # turn. _current_model was already read into this call's request inside perform_responses_call
+        # above, so it's safe to revert to the turn's own default now.
+        _current_model = model
+
+        if _xai_buffer and not _xai_first_line_done:
+            reason_pos = _xai_buffer.find("REASON:")
+            if reason_pos != -1:
+                visible = _xai_buffer[:reason_pos]
+                _xai_reason = _xai_buffer[reason_pos + len("REASON:"):].strip()
+                if visible:
+                    last_response += visible
+                    yield visible
+            else:
+                last_response += _xai_buffer
+                yield _xai_buffer
+
+        function_call = _first_pending_call(pending_calls)
+
+        if function_call:
+            import logging
+
+            logging.info("chain[%d] LLM→tool=%s session=%s", iteration, function_call["name"], session_id)
+        else:
+            import logging
+
+            logging.info("chain[%d] LLM→text chars=%d session=%s", iteration, len(last_response), session_id)
+
+        if not function_call and last_response:
+            preview = last_response[:200].replace("\n", " ")
+            broadcast_trace(
+                "cognition",
+                f"LLM produced final text ({len(last_response)} chars): \"{preview}{'…' if len(last_response) > 200 else ''}\"",
+                session_id,
+                summary="The AI has finished reasoning and is ready to deliver its response.",
+            )
+            await asyncio.sleep(0)
+
+        if _xai_reason and function_call:
+            broadcast_trace(
+                "cognition",
+                f"Reasoning: {_xai_reason}",
+                session_id,
+                summary=f"In the AI's own words, it explained its decision: \"{_xai_reason}\"",
+            )
+            await asyncio.sleep(0)
+
+        if function_call:
+            _prefill_uk_pleading_authorities(function_call, session_id)
+            _tool_desc = next(
+                (t["description"] for t in available_manifest if t["name"] == function_call["name"]), ""
+            )
+            _why_lines = [f"Proposed tool call: `{function_call['name']}`"]
+            if _tool_desc:
+                _why_lines.append(f"Why this tool: \"{_tool_desc[:200]}\"")
+            try:
+                _why_lines.append(f"Arguments passed: {json.dumps(json.loads(function_call['arguments']), ensure_ascii=False)}")
+            except Exception:
+                _why_lines.append(f"Arguments passed: {function_call['arguments'][:200]}")
+            _args_desc = _describe_tool_args(function_call["name"], function_call["arguments"])
+            _tool_summary = f"The AI decided it needs to use '{function_call['name']}' to answer this question. {_tool_desc}"
+            if _args_desc:
+                _tool_summary += f" {_args_desc}"
+            broadcast_trace("cognition", "\n".join(_why_lines), session_id, summary=_tool_summary)
+            await asyncio.sleep(0)
+
+        if last_response.strip():
+            full_response = last_response.strip()
+
+        if _verify_step_id and last_response.strip():
+            # Revised text arrived — flip the self-check research step to done.
+            yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'result', 'tool': 'self_check'})}[/TRACE]"
+            _verify_step_id = None
+            _discarded_draft = None
+
+        if not function_call:
+            # Verify→refine: give the model one chance to fix citations the finalizer
+            # would otherwise silently gate. Needs a spare iteration to revise in.
+            feedback = (
+                verify(full_response, refine_round)
+                if (verify and full_response and iteration < _budget - 1)
+                else None
+            )
+            if not feedback:
+                break
+            refine_round += 1
+            _vt, _vs = verifier_trace_text(feedback, refine_round)
+            broadcast_trace("control", _vt, session_id, summary=_vs)
+            await asyncio.sleep(0)
+            # The draft was already yielded; chat_stream buffers legal text server-side,
+            # so tell it to drop that buffer before the revised answer streams in.
+            yield DRAFT_DISCARD
+            _discarded_draft = full_response
+            _verify_step_id = f"verify:{refine_round}"
+            yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'start', 'tool': 'self_check', 'label': f'Self-check: revising {feedback.summary}'})}[/TRACE]"
+            inject_verifier_feedback(input_items, full_response, feedback)
+            continue
+
+        # HITL gate: emit pending_approval event and stop streaming
+        if not (_context.manual_auto_approval or auto_approval):
+            yield f"__HITL__{json.dumps({'function_call': function_call, 'messages': input_items, 'tools': [t['name'] for t in (available_manifest or [])]})}"
+            return
+
+        try:
+            cur_args = json.loads(function_call["arguments"])
+        except Exception:
+            cur_args = function_call["arguments"]
+
+        if (function_call["name"] == "legislation_get_section"
+                and decisions_research.section_key(cur_args) in prefetched_keys):
+            input_items.append({
+                "role": "system",
+                "content": "That section was already fetched for you above (see the earlier legislation_get_section result). Use it; do not fetch it again.",
+            })
+            continue
+
+        is_dup = any(
+            fc["name"] == function_call["name"] and fc["args"] == cur_args for fc in funcall_chains
+        )
+        if is_dup:
+            broadcast_trace(
+                "control",
+                f"BLOCKED duplicate call: `{function_call['name']}` — injecting memory reminder",
+                session_id,
+                summary=f"Safety check: The AI proposed to use '{function_call['name']}' again with the same inputs. This was blocked to prevent a redundant loop.",
+            )
+            await asyncio.sleep(0)
+            input_items.append({
+                "role": "system",
+                "content": f"Function `{function_call['name']}` already called. Do not repeat.",
+            })
+            continue
+
+        broadcast_trace(
+            "control",
+            f"APPROVED: `{function_call['name']}` — no prior identical call found",
+            session_id,
+            summary=f"Safety check passed. The AI's proposed action is new — it has not taken this exact step before. Proceeding to execute '{function_call['name']}'.",
+        )
+        await asyncio.sleep(0)
+        broadcast_trace(
+            "action",
+            f"Executing `{function_call['name']}`...",
+            session_id,
+            summary=f"The AI is now running '{function_call['name']}' to retrieve the information it needs.",
+        )
+        await asyncio.sleep(0)
+        _trace_step_id = f"{iteration}:{function_call['name']}"
+        yield f"[TRACE]{json.dumps({'id': _trace_step_id, 'phase': 'start', 'tool': function_call['name'], 'label': _trace_label_for_call(function_call['name'], cur_args if isinstance(cur_args, dict) else {})})}[/TRACE]"
+
+        funcall_chains.append({"name": function_call["name"], "args": cur_args})
+        result = await asyncio.to_thread(execute_function_call, function_call, session_id=session_id)
+        if result is None:
+            continue
+        _prefetched = await asyncio.to_thread(_decisions_prefetch, state, function_call, result, query, session_id, execute_function_call)
+        last_tool = function_call["name"]
+        state.turn_tool_calls = getattr(state, "turn_tool_calls", 0) + 1
+        _tool_decision = model_router.decide_tool_model(None, persona, last_tool, model or _context.model, candidate_models=[], query=query, session_id=session_id)
+        _current_model = _tool_decision["model"]
+        llm_usage.current().set_routing_info(routing_overrides.get_override(persona).get("routingMode"), _tool_decision["decision_source"])
+
+        try:
+            _rp = json.dumps(result, ensure_ascii=False)
+        except Exception:
+            _rp = str(result)
+        _ctx = _summarize_tool_result(function_call["name"], result)
+        tool_log.append({"name": function_call["name"], "args": cur_args, "summary": _ctx})
+        broadcast_trace(
+            "action",
+            f"Result from `{function_call['name']}`:\n{_rp[:300]}",
+            session_id,
+            summary=f"'{function_call['name']}' completed. {_ctx}",
+        )
+        await asyncio.sleep(0)
+        yield f"[TRACE]{json.dumps({'id': _trace_step_id, 'phase': 'result', 'tool': function_call['name'], 'count': _trace_count_for_result(function_call['name'], result)})}[/TRACE]"
+        broadcast_trace(
+            "memory",
+            f"Fact stored: `{function_call['name']}` result is now confirmed knowledge.\nValue: {_rp[:150]}",
+            session_id,
+            summary=f"The AI stored the result from '{function_call['name']}'. This confirmed knowledge will be used when composing the final response.",
+        )
+        await asyncio.sleep(0)
+
+        append_function_call_round_trip(
+            input_items,
+            call_id=function_call["call_id"],
+            name=function_call["name"],
+            arguments=function_call["arguments"],
+            result=result,
+        )
+        if _prefetched:
+            for _pf in _deliver_prefetched(_prefetched, input_items, funcall_chains, tool_log, prefetched_keys, _summarize_tool_result):
+                _pf_id = f"{iteration}:prefetch:{_pf['call_id']}"
+                yield f"[TRACE]{json.dumps({'id': _pf_id, 'phase': 'start', 'tool': 'legislation_get_section', 'label': _trace_label_for_call('legislation_get_section', _pf['args'])})}[/TRACE]"
+                yield f"[TRACE]{json.dumps({'id': _pf_id, 'phase': 'result', 'tool': 'legislation_get_section', 'count': _trace_count_for_result('legislation_get_section', _pf['result'])})}[/TRACE]"
+        input_items.append({
+            "role": "system",
+            "content": "[Constraints]\nIf a complete response has been produced, TERMINATE.",
+        })
+
+    if not full_response and funcall_chains:
+        try:
+            args = {
+                "model": model or _context.model,
+                "input": input_items + [{
+                    "role": "system",
+                    "content": (
+                        "[Constraints]\nYou have reached the maximum number of tool calls "
+                        "for this turn. Do NOT call any more tools, and do NOT narrate this "
+                        "limit anywhere in your prose answer. Write the best answer possible "
+                        "from the information already gathered above. If any document, "
+                        "authority, or issue could not be reviewed in time, list it under a "
+                        "final \"## Not Yet Reviewed\" section as a plain bullet list — do not "
+                        "mention tool calls, turn limits, or this constraint anywhere else in "
+                        "the answer."
+                    ),
+                }],
+            }
+            if reasoning_effort and reasoning_effort != "none":
+                args["reasoning"] = {"effort": reasoning_effort}
+            llm_usage.current().add_pass()
+            forced = await asyncio.to_thread(create_response, state.openai_client, **args)
+            forced_text = (forced.output_text or "").strip()
+            if forced_text:
+                full_response = forced_text
+                _discarded_draft = None
+                yield forced_text
+        except Exception as e:
+            import logging
+
+            logging.warning("Forced final-answer completion (responses API) failed: %s", e)
+
+    if _discarded_draft:
+        # Revise round ran out of iterations without producing text: re-yield the
+        # rejected draft (the consumer dropped it) so the finalizer gates it as before.
+        yield _discarded_draft
+    if _verify_step_id:
+        yield f"[TRACE]{json.dumps({'id': _verify_step_id, 'phase': 'result', 'tool': 'self_check'})}[/TRACE]"
