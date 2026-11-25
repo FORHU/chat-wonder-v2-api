@@ -802,3 +802,4 @@ ssm-params.json
 
 # Local scratch git worktrees (superpowers subagent-driven-development)
 .worktrees/
+/graphify-out
