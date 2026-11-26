@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 import llm_usage
 import the_server as srv
+import app.core.session as core_session
 
 
 def _inner_client():
@@ -37,6 +38,9 @@ class _Env(unittest.TestCase):
         self.state = srv.ChatState()
         self.patches = [
             mock.patch.object(srv, "make_openai_client", _factory),
+            # init_openai_client (called by /chat and /chat-stream) now lives in
+            # app.core.session and resolves make_openai_client there, not via the_server's.
+            mock.patch.object(core_session, "make_openai_client", _factory),
             mock.patch.object(srv._context, "openai_api_key", "k"),
             mock.patch.dict(srv._context.sessions, {"s1": self.state}),
             mock.patch.object(srv, "prepare_legal_turn", lambda text: (text, [])),
